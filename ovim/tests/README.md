@@ -106,6 +106,20 @@ INSTA_FORCE_UPDATE=1 cargo test
 
 ## Test Helper API
 
+Prefer `editor_test!` for key sequences whose outcomes fit a buffer, cursor,
+mode, and selection fixture. Each content line is followed by an annotation:
+`^` marks the cursor, `@` an optional anchor, and `-` selected text. Annotation
+columns count graphemes (cursor steps), so a combining sequence or ZWJ emoji
+uses one marker. Characterwise selections and insert cursors may mark the EOL
+position immediately after the text. Several `keys`/`expect` steps can share a
+fixture; see `visual_text_objects_test.rs`.
+
+Use `editor_flow_test!` when a step also needs to check registers, clipboard
+text, or other state. Async tests should use a small scenario helper with
+explicit completion conditions. `lsp_startup_test.rs` uses a real stdio peer
+whose initialization is released by the test, avoiding sleeps that guess how
+long server startup takes.
+
 The `EditorTest` helper provides a fluent API for writing tests:
 
 ```rust

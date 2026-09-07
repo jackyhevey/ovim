@@ -1,4 +1,3 @@
-use crate::editor::Editor;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
@@ -64,17 +63,6 @@ fn find_hyperion_binary() -> Option<PathBuf> {
         .into_iter()
         .flatten()
         .find(|candidate| candidate.exists())
-}
-
-/// Handle Hyperion LSP initialization for any JVM language (spawns background task)
-pub async fn handle_hyperion_lsp(editor: &mut Editor, abs_path: PathBuf, language_id: &str) {
-    let lsp_manager = editor.lsp_manager();
-    let lang_id = language_id.to_string();
-
-    // Spawn Hyperion LSP initialization in background
-    tokio::spawn(async move {
-        initialize_hyperion_lsp_background(lsp_manager, abs_path, &lang_id).await;
-    });
 }
 
 /// Background Hyperion LSP initialization

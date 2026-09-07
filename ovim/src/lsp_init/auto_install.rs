@@ -22,6 +22,10 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use tokio::process::Command as TokioCommand;
 
+// Installers can share package directories and global toolchain state. Keep
+// their filesystem mutations serialized across primary and companion startup.
+static INSTALL_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 mod github;
 
 use github::install_via_github;
@@ -53,6 +57,7 @@ pub async fn attempt_auto_install(
     package_name: &str,
     config: &AutoInstallConfig,
 ) -> InstallResult {
+    let _install_permit = INSTALL_GATE.lock().await;
     match &config.method {
         InstallMethod::Npm { global, bin, .. } => {
             let packages = config.method.npm_packages();
@@ -219,6 +224,7 @@ async fn install_via_npm(
     // Step 3: Run npm install with output streaming
     let mut command = TokioCommand::new("npm");
     command
+        .kill_on_drop(true)
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -408,6 +414,7 @@ async fn install_via_cargo(
 
     // Run cargo install
     let child = match TokioCommand::new("cargo")
+        .kill_on_drop(true)
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -469,6 +476,7 @@ async fn install_via_shell(_language_name: &str, verify_bin: &str, command: &str
     }
 
     let child = match TokioCommand::new(parts[0])
+        .kill_on_drop(true)
         .args(&parts[1..])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

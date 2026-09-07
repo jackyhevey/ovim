@@ -9,7 +9,7 @@
 //! - Visual mode search (/ and ?)
 
 use crate::editor::{
-    CursorPos, Editor, Motions, PendingChangeRepeat, RegisterType, TextObjectRange, TextObjects,
+    CursorPos, Editor, Motions, PendingChangeRepeat, RegisterType, TextObjectRange, TextObjectType,
 };
 use crate::indentation::leading_char_count;
 use crate::mode::Mode;
@@ -23,22 +23,32 @@ use super::helpers;
 use super::numbers;
 use crate::editor::input_state::{CharMotion, InputState};
 
-/// Apply a text object range to the visual selection.
-/// If `inclusive` is true, end_col is used directly; otherwise it's decremented by 1.
-fn apply_text_object(editor: &mut Editor, range: Option<TextObjectRange>, inclusive: bool) {
-    if let Some(range) = range {
-        // Phase-15 debt: visual_start stores grapheme cols; range cols are char.
-        editor.set_visual_start(range.start_line, range.start_col.0);
-        let end_col = if inclusive {
-            range.end_col
-        } else {
-            range.end_col.saturating_sub(1)
-        };
-        editor
-            .buffer_mut()
-            .cursor_mut()
-            .set_position(range.end_line, GraphemeCol(end_col.0));
+/// Convert the half-open character range into inclusive grapheme endpoints.
+/// Subtract in rope space so an end at column zero selects the preceding
+/// newline, and a multi-codepoint final grapheme stays intact.
+fn apply_text_object(editor: &mut Editor, range: TextObjectRange, linewise: bool) {
+    let rope = editor.buffer().rope();
+    let start_offset = rope.line_to_char(range.start_line) + range.start_col.0;
+    let end_offset = rope.line_to_char(range.end_line) + range.end_col.0;
+    if end_offset <= start_offset {
+        return;
     }
+    let last_offset = end_offset - 1;
+    let end_line = rope.char_to_line(last_offset);
+    let end_col = CharCol(last_offset - rope.line_to_char(end_line));
+    let start_text = editor
+        .buffer()
+        .line_text(range.start_line)
+        .unwrap_or_default();
+    let start_col = crate::unicode::char_to_grapheme_col(&start_text, range.start_col);
+
+    editor.set_mode(if linewise {
+        Mode::VisualLine
+    } else {
+        Mode::Visual
+    });
+    editor.set_visual_start(range.start_line, start_col.0);
+    editor.buffer_mut().set_cursor_char_col(end_line, end_col);
 }
 
 /// Mirror of normal-mode `cc` for a VisualLine-c selection: delete all
@@ -166,6 +176,17 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
     if let Some(pending) = editor.pending_command() {
         editor.clear_pending_command();
         match (pending, key_event.code) {
+            ('"', key) => {
+                if let KeyCode::Char(register) = key {
+                    if crate::editor::RegisterManager::is_valid_name(register) {
+                        editor.set_pending_register(register);
+                    }
+                    return Ok(());
+                }
+                if key != KeyCode::Esc {
+                    return Ok(());
+                }
+            }
             ('g', KeyCode::Char('g')) => {
                 // gg - go to first line (or line specified by count)
                 let target_line = if let Some(count) = editor.count() {
@@ -219,100 +240,14 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
                 editor.clear_count();
                 return Ok(());
             }
-            ('i', KeyCode::Char('w')) => {
-                apply_text_object(editor, TextObjects::inner_word(editor.buffer()), false);
-                return Ok(());
-            }
-            ('i', KeyCode::Char('W')) => {
-                apply_text_object(editor, TextObjects::inner_big_word(editor.buffer()), false);
-                return Ok(());
-            }
-            ('a', KeyCode::Char('w')) => {
-                apply_text_object(editor, TextObjects::around_word(editor.buffer()), false);
-                return Ok(());
-            }
-            ('a', KeyCode::Char('W')) => {
-                apply_text_object(editor, TextObjects::around_big_word(editor.buffer()), false);
-                return Ok(());
-            }
-            ('i', KeyCode::Char('p')) => {
-                apply_text_object(editor, TextObjects::inner_paragraph(editor.buffer()), true);
-                return Ok(());
-            }
-            ('a', KeyCode::Char('p')) => {
-                apply_text_object(editor, TextObjects::around_paragraph(editor.buffer()), true);
-                return Ok(());
-            }
-            ('i', KeyCode::Char('"')) | ('i', KeyCode::Char('\'')) | ('i', KeyCode::Char('`')) => {
-                let quote = match key_event.code {
-                    KeyCode::Char(c) => c,
-                    _ => return Ok(()),
-                };
-                apply_text_object(
-                    editor,
-                    TextObjects::quoted_string(editor.buffer(), quote, false),
-                    false,
-                );
-                return Ok(());
-            }
-            ('a', KeyCode::Char('"')) | ('a', KeyCode::Char('\'')) | ('a', KeyCode::Char('`')) => {
-                let quote = match key_event.code {
-                    KeyCode::Char(c) => c,
-                    _ => return Ok(()),
-                };
-                apply_text_object(
-                    editor,
-                    TextObjects::quoted_string(editor.buffer(), quote, true),
-                    false,
-                );
-                return Ok(());
-            }
-            ('i', KeyCode::Char('(')) | ('i', KeyCode::Char(')')) | ('i', KeyCode::Char('b')) => {
-                apply_text_object(
-                    editor,
-                    TextObjects::paired_delimiters(editor.buffer(), '(', ')', false),
-                    false,
-                );
-                return Ok(());
-            }
-            ('a', KeyCode::Char('(')) | ('a', KeyCode::Char(')')) | ('a', KeyCode::Char('b')) => {
-                apply_text_object(
-                    editor,
-                    TextObjects::paired_delimiters(editor.buffer(), '(', ')', true),
-                    false,
-                );
-                return Ok(());
-            }
-            ('i', KeyCode::Char('[')) | ('i', KeyCode::Char(']')) => {
-                apply_text_object(
-                    editor,
-                    TextObjects::paired_delimiters(editor.buffer(), '[', ']', false),
-                    false,
-                );
-                return Ok(());
-            }
-            ('a', KeyCode::Char('[')) | ('a', KeyCode::Char(']')) => {
-                apply_text_object(
-                    editor,
-                    TextObjects::paired_delimiters(editor.buffer(), '[', ']', true),
-                    false,
-                );
-                return Ok(());
-            }
-            ('i', KeyCode::Char('{')) | ('i', KeyCode::Char('}')) | ('i', KeyCode::Char('B')) => {
-                apply_text_object(
-                    editor,
-                    TextObjects::paired_delimiters(editor.buffer(), '{', '}', false),
-                    false,
-                );
-                return Ok(());
-            }
-            ('a', KeyCode::Char('{')) | ('a', KeyCode::Char('}')) | ('a', KeyCode::Char('B')) => {
-                apply_text_object(
-                    editor,
-                    TextObjects::paired_delimiters(editor.buffer(), '{', '}', true),
-                    false,
-                );
+            ('i' | 'a', key) if key != KeyCode::Esc => {
+                if let Some(object) = super::text_objects::from_key(editor, key, pending == 'i') {
+                    if let Some(range) = object.resolve(editor.buffer()) {
+                        let linewise = matches!(object, TextObjectType::Paragraph { .. });
+                        apply_text_object(editor, range, linewise);
+                    }
+                }
+                editor.clear_count();
                 return Ok(());
             }
             _ => {
@@ -322,6 +257,7 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
     }
 
     match key_event.code {
+        KeyCode::Char('"') => editor.set_pending_command('"'),
         KeyCode::Esc => {
             helpers::exit_visual_mode_to_normal(editor);
         }
@@ -567,11 +503,13 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         // Yank selection
         KeyCode::Char('y') => {
-            // Move cursor to start of selection before yanking (Vim behavior)
-            if let Some(((start_line, start_col), (end_line, end_col))) = editor.visual_selection()
-            {
-                let mode = editor.mode();
-                helpers::yank_visual_selection(editor)?;
+            let selection = editor.visual_selection();
+            let mode = editor.mode();
+            helpers::yank_visual_selection(editor)?;
+            // Save the complete selection before moving to its start; `gv`
+            // must restore the yanked range, not the collapsed cursor position.
+            helpers::exit_visual_mode_to_normal(editor);
+            if let Some(((start_line, start_col), (end_line, end_col))) = selection {
                 editor
                     .buffer_mut()
                     .cursor_mut()
@@ -588,7 +526,6 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
                     );
                 }
             }
-            helpers::exit_visual_mode_to_normal(editor);
         }
         // Change selection
         KeyCode::Char('c') => {

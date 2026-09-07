@@ -3,6 +3,27 @@ use crate::mode::Mode;
 use crate::unicode::{grapheme_count, GraphemeCol};
 
 impl Editor {
+    /// Rope range for an inclusive characterwise selection. Include the line
+    /// terminator when its EOL cell is selected, then normalize the exclusive
+    /// endpoint onto the next line for buffer edits.
+    pub(crate) fn visual_character_range(&self) -> Option<crate::textobjects::TextObjectRange> {
+        let ((start_line, start_col), (end_line, end_col)) = self.visual_selection()?;
+        let buffer = self.buffer();
+        let start_text = buffer.line_text(start_line)?;
+        let end_text = buffer.line_slice(end_line)?.to_string();
+        let start_col = crate::unicode::grapheme_to_char_col(&start_text, GraphemeCol(start_col));
+        let end_col = crate::unicode::grapheme_to_char_col(&end_text, GraphemeCol(end_col + 1));
+        let end_offset = buffer.rope().line_to_char(end_line) + end_col.0;
+        let end_line = buffer.rope().char_to_line(end_offset);
+        let end_col = crate::unicode::CharCol(end_offset - buffer.rope().line_to_char(end_line));
+        Some(crate::textobjects::TextObjectRange {
+            start_line,
+            start_col,
+            end_line,
+            end_col,
+        })
+    }
+
     /// Returns the current visual selection as user-visible text.
     ///
     /// Frontends use this for native clipboard integration while keeping the
@@ -54,7 +75,12 @@ impl Editor {
                 // For VisualLine, always use column 0
                 0
             } else {
-                start.1.min(start_line_len.saturating_sub(1))
+                // A saved characterwise selection may include the newline.
+                if mode == Mode::Visual && start.1 == start_line_len {
+                    start.1
+                } else {
+                    start.1.min(start_line_len.saturating_sub(1))
+                }
             };
 
             // Clamp end position to buffer bounds
@@ -68,7 +94,11 @@ impl Editor {
                 // For VisualLine, always use column 0
                 0
             } else {
-                end.1.min(end_line_len.saturating_sub(1))
+                if mode == Mode::Visual && end.1 == end_line_len {
+                    end.1
+                } else {
+                    end.1.min(end_line_len.saturating_sub(1))
+                }
             };
 
             // Set visual start
@@ -124,7 +154,7 @@ impl Editor {
                 Mode::VisualLine => {
                     // Get the length of the end line (excluding newline)
                     if let Some(line_text) = self.buffer().line_text(end.0) {
-                        let line_len = line_text.chars().count();
+                        let line_len = grapheme_count(&line_text);
                         end.1 = if line_len > 0 { line_len - 1 } else { 0 };
                     }
 
@@ -141,7 +171,7 @@ impl Editor {
                         new_start.1 = 0;
                         let mut new_end = start;
                         if let Some(line_text) = self.buffer().line_text(new_end.0) {
-                            let line_len = line_text.chars().count();
+                            let line_len = grapheme_count(&line_text);
                             new_end.1 = if line_len > 0 { line_len - 1 } else { 0 };
                         }
                         (new_start, new_end)

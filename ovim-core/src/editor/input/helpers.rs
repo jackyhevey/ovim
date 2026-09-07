@@ -1083,6 +1083,8 @@ pub fn delete_visual_selection_with_token(
         return Ok(None);
     };
 
+    let character_range = editor.visual_character_range();
+
     // Record all deletions in one shot. visual_selection cols are
     // grapheme-space; convert per line so multi-char graphemes are deleted
     // whole instead of being split scalar-by-scalar (OV-00299).
@@ -1120,17 +1122,13 @@ pub fn delete_visual_selection_with_token(
                 (deleted_lines.join("\n"), RegisterType::Block)
             }
             _ => {
-                let start_char = buf
-                    .line_text(start_line)
-                    .map(|text| crate::unicode::grapheme_to_char_col(&text, GraphemeCol(start_col)))
-                    .unwrap_or(CharCol(start_col));
-                let end_char = buf
-                    .line_text(end_line)
-                    .map(|text| {
-                        crate::unicode::grapheme_to_char_col(&text, GraphemeCol(end_col + 1))
-                    })
-                    .unwrap_or(CharCol(end_col + 1));
-                let deleted = buf.delete_range(start_line, start_char, end_line, end_char);
+                let range = character_range.expect("selection has valid endpoints");
+                let deleted = buf.delete_range(
+                    range.start_line,
+                    range.start_col,
+                    range.end_line,
+                    range.end_col,
+                );
                 (deleted, RegisterType::Character)
             }
         }
@@ -1269,30 +1267,10 @@ pub fn yank_visual_selection(editor: &mut Editor) -> Result<()> {
                 editor.yank_to_register_with_type(yanked, RegisterType::Block);
             }
             _ => {
-                // Character-wise visual mode: grapheme→char per line
-                // (OV-00299), mirroring get_visual_selection_text.
-                let start_text = editor
-                    .buffer()
-                    .line_text(start_line)
-                    .unwrap_or_default()
-                    .to_string();
-                let end_text = editor
-                    .buffer()
-                    .line_text(end_line)
-                    .unwrap_or_default()
-                    .to_string();
-                let start_char_col =
-                    crate::unicode::grapheme_to_char_col(&start_text, GraphemeCol(start_col));
-                let end_char_col =
-                    crate::unicode::grapheme_to_char_col(&end_text, GraphemeCol(end_col + 1));
-                let start_char = editor.buffer().rope().line_to_char(start_line) + start_char_col.0;
-                let end_char = editor.buffer().rope().line_to_char(end_line) + end_char_col.0;
-
-                let yanked = editor
-                    .buffer()
-                    .rope()
-                    .slice(start_char..end_char)
-                    .to_string();
+                let range = editor
+                    .visual_character_range()
+                    .expect("selection has valid endpoints");
+                let yanked = crate::textobjects::TextObjects::yank_range(editor.buffer(), range)?;
                 editor.yank_to_register_with_type(yanked, RegisterType::Character);
             }
         }
@@ -1410,6 +1388,7 @@ pub fn exit_visual_mode_to_normal(editor: &mut Editor) {
     editor.save_last_visual_selection();
     editor.set_visual_block_dollar(false);
     editor.clear_visual_start();
+    editor.clear_pending_register();
     editor.set_mode(Mode::Normal);
 }
 
@@ -1609,25 +1588,8 @@ pub fn get_visual_selection_text(editor: &Editor) -> Option<String> {
 
     match mode {
         Mode::Visual => {
-            // Character-wise selection. Visual cols are grapheme-space:
-            // convert per line so selections containing multi-char graphemes
-            // slice the right range — the end grapheme is included whole,
-            // not just its first scalar (OV-00299).
-            let start_text = editor.buffer().line_text(start_line)?;
-            let end_text = editor.buffer().line_text(end_line)?;
-            let start_char_col =
-                crate::unicode::grapheme_to_char_col(&start_text, GraphemeCol(start_col));
-            let end_char_col =
-                crate::unicode::grapheme_to_char_col(&end_text, GraphemeCol(end_col + 1));
-            let start_char = editor.buffer().rope().line_to_char(start_line) + start_char_col.0;
-            let end_char = editor.buffer().rope().line_to_char(end_line) + end_char_col.0;
-            Some(
-                editor
-                    .buffer()
-                    .rope()
-                    .slice(start_char..end_char)
-                    .to_string(),
-            )
+            let range = editor.visual_character_range()?;
+            crate::textobjects::TextObjects::yank_range(editor.buffer(), range).ok()
         }
         Mode::VisualLine => {
             // Line-wise selection (include entire lines)
@@ -1647,13 +1609,19 @@ pub fn get_visual_selection_text(editor: &Editor) -> Option<String> {
             let mut lines = Vec::new();
             for line_idx in start_line..=end_line {
                 if let Some(line_text) = editor.buffer().line_text(line_idx) {
-                    let chars: Vec<char> = line_text.chars().collect();
-                    let line_start = start_col.min(chars.len());
-                    let line_end = (end_col + 1).min(chars.len());
+                    let line_len = grapheme_count(&line_text);
+                    let line_start = start_col.min(line_len);
+                    let line_end = end_col.saturating_add(1).min(line_len);
 
                     if line_start < line_end {
-                        let block_text: String = chars[line_start..line_end].iter().collect();
-                        lines.push(block_text);
+                        use unicode_segmentation::UnicodeSegmentation;
+                        lines.push(
+                            line_text
+                                .graphemes(true)
+                                .skip(line_start)
+                                .take(line_end - line_start)
+                                .collect(),
+                        );
                     } else {
                         // Line is too short for block selection
                         lines.push(String::new());

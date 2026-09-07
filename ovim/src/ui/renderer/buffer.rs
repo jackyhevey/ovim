@@ -20,6 +20,7 @@ use super::styles::{
 };
 use crate::syntax::HighlightGroup;
 use ovim_core::buffer::Cursor;
+use ovim_core::unicode::{grapheme_count, grapheme_to_char_col, GraphemeCol};
 use std::ops::Range;
 
 /// Window-specific rendering context for multi-window support.
@@ -1612,7 +1613,7 @@ pub fn render_buffer(
             // the rendered slice IS the expanded text — no allocation needed.
             // We keep the optional sliced String alive in `line_sliced` so
             // `line_text` can borrow from it (!wrap) or from `expanded_text` (wrap).
-            let (line_sliced, precedes, _extends): (Option<String>, bool, bool) = if !wrap {
+            let (line_sliced, precedes, extends): (Option<String>, bool, bool) = if !wrap {
                 let (sliced, p, e) =
                     slice_horizontal_viewport(&expanded_text, h_offset, text_width);
                 (Some(sliced), p, e)
@@ -1682,38 +1683,53 @@ pub fn render_buffer(
             // Check if this is the cursor line and cursorline option is on
             let is_cursor_line = is_cursor_line_early;
 
-            // Remap visual selection columns from original to expanded char indices
-            let remapped_visual_selection = visual_selection.map(|((sl, sc), (el, ec))| {
-                let sc = if line_idx == sl {
-                    remap_char_col(sc, &char_mapping)
+            // Project this row's inclusive grapheme selection to a half-open
+            // scalar range before conceal, tab expansion or viewport slicing.
+            // In block mode every row needs its own conversion: equal grapheme
+            // columns need not have equal scalar or display columns.
+            let remapped_visual_selection = visual_selection.and_then(|((sl, sc), (el, ec))| {
+                if line_idx < sl || line_idx > el {
+                    return None;
+                }
+                let block = editor.mode() == crate::mode::Mode::VisualBlock;
+                let start = if block || line_idx == sl { sc } else { 0 };
+                let end = if block || line_idx == el {
+                    ec.saturating_add(1)
                 } else {
-                    sc
+                    grapheme_count(&line_text_original)
                 };
-                let ec = if line_idx == el {
-                    remap_char_col(ec, &char_mapping)
-                } else {
-                    ec
+                let expand = |col| {
+                    remap_char_col(
+                        grapheme_to_char_col(&line_text_original, GraphemeCol(col)).0,
+                        &char_mapping,
+                    )
                 };
-                ((sl, sc), (el, ec))
-            });
-
-            // Adjust visual selection for horizontal viewport if nowrap
-            let remapped_visual_selection = if !wrap {
-                remapped_visual_selection.map(|((sl, sc), (el, ec))| {
-                    let adjust = |expanded_char_col: usize| -> usize {
-                        let display_col =
-                            expanded_char_to_display_col(&expanded_text, expanded_char_col);
-                        let viewport_display_col = display_col.saturating_sub(h_offset);
-                        let offset_adjustment = if precedes { 1 } else { 0 };
-                        display_col_to_char_idx(line_text, viewport_display_col + offset_adjustment)
+                let mut start = expand(start);
+                let mut end = expand(end);
+                if !wrap {
+                    // Keep boundaries exclusive until after clipping, preserving
+                    // all scalars in a grapheme and all cells of an expanded tab.
+                    let left = usize::from(precedes);
+                    let right = line_text
+                        .chars()
+                        .count()
+                        .saturating_sub(usize::from(extends));
+                    // The viewport snaps its left edge to a whole grapheme.
+                    // Subtract that source scalar offset, not the requested
+                    // display offset, which may fall inside a wide character.
+                    let hidden_chars = if precedes {
+                        display_col_to_char_idx(&expanded_text, h_offset)
+                    } else {
+                        0
                     };
-                    let sc = if line_idx == sl { adjust(sc) } else { sc };
-                    let ec = if line_idx == el { adjust(ec) } else { ec };
-                    ((sl, sc), (el, ec))
-                })
-            } else {
-                remapped_visual_selection
-            };
+                    let adjust = |col: usize| {
+                        (col.saturating_sub(hidden_chars) + left).clamp(left, right.max(left))
+                    };
+                    start = adjust(start);
+                    end = adjust(end);
+                }
+                (start < end).then_some(start..end)
+            });
 
             // Check if this line has a bracket to highlight (remap through char_mapping)
             let bracket_col = bracket_positions.and_then(|((l1, c1), (l2, c2))| {
@@ -1939,9 +1955,7 @@ pub fn render_buffer(
                 let mut line = render_line_with_highlights(
                     theme,
                     line_text,
-                    line_idx,
                     remapped_visual_selection,
-                    editor.mode(),
                     &search_matches,
                     &syntax_highlights,
                     &remapped_diagnostics,
@@ -1953,7 +1967,9 @@ pub fn render_buffer(
                 if is_cursor_line && yank_flash.is_none() {
                     let cursorline_bg = Color::Rgb(40, 40, 50); // Subtle dark blue background
                     for span in &mut line.spans {
-                        span.style = span.style.bg(cursorline_bg);
+                        if span.style.bg.is_none() || span.style.bg == Some(Color::Reset) {
+                            span.style = span.style.bg(cursorline_bg);
+                        }
                     }
                 }
 
@@ -2279,9 +2295,7 @@ pub struct RemappedDiagnostic {
 pub fn render_line_with_highlights(
     theme: &Theme,
     line_text: &str,
-    line_idx: usize,
-    visual_selection: Option<((usize, usize), (usize, usize))>,
-    mode: crate::mode::Mode,
+    visual_selection: Option<Range<usize>>,
     search_matches: &[(usize, usize)],
     syntax_highlights: &[(std::ops::Range<usize>, crate::syntax::HighlightGroup)],
     diagnostics: &[RemappedDiagnostic],
@@ -2402,33 +2416,10 @@ pub fn render_line_with_highlights(
         }
     }
 
-    // --- Helper: compute visual selection for a given column ---
-    let is_col_selected = |col: usize| -> bool {
-        if let Some(((sel_start_line, sel_start_col), (sel_end_line, sel_end_col))) =
-            visual_selection
-        {
-            match mode {
-                crate::mode::Mode::VisualBlock => {
-                    line_idx >= sel_start_line
-                        && line_idx <= sel_end_line
-                        && col >= sel_start_col
-                        && col <= sel_end_col
-                }
-                _ => {
-                    if line_idx == sel_start_line && line_idx == sel_end_line {
-                        col >= sel_start_col && col <= sel_end_col
-                    } else if line_idx == sel_start_line {
-                        col >= sel_start_col
-                    } else if line_idx == sel_end_line {
-                        col <= sel_end_col
-                    } else {
-                        line_idx > sel_start_line && line_idx < sel_end_line
-                    }
-                }
-            }
-        } else {
-            false
-        }
+    let is_col_selected = |col: usize| {
+        visual_selection
+            .as_ref()
+            .is_some_and(|range| range.contains(&col))
     };
 
     // --- Main loop: group consecutive characters with identical styling ---
@@ -2850,36 +2841,15 @@ mod tests {
     #[test]
     fn test_render_line_empty_string() {
         let theme = Theme::default();
-        let line = render_line_with_highlights(
-            &theme,
-            "",
-            0,
-            None,
-            crate::mode::Mode::Normal,
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
-        );
+        let line = render_line_with_highlights(&theme, "", None, &[], &[], &[], &[], &[]);
         assert!(line.spans.is_empty());
     }
 
     #[test]
     fn test_render_line_plain_text_single_span() {
         let theme = Theme::default();
-        let line = render_line_with_highlights(
-            &theme,
-            "hello world",
-            0,
-            None,
-            crate::mode::Mode::Normal,
-            &[],
-            &[],
-            &[],
-            &[],
-            &[],
-        );
+        let line =
+            render_line_with_highlights(&theme, "hello world", None, &[], &[], &[], &[], &[]);
         // No highlights → should coalesce into one span
         assert_eq!(line.spans.len(), 1);
         assert_eq!(line.spans[0].content.as_ref(), "hello world");
@@ -2890,18 +2860,8 @@ mod tests {
         let theme = Theme::default();
         // Highlight bytes 0..2 ("fn") as Keyword
         let highlights = vec![(0..2, crate::syntax::HighlightGroup::Keyword)];
-        let line = render_line_with_highlights(
-            &theme,
-            "fn main()",
-            0,
-            None,
-            crate::mode::Mode::Normal,
-            &[],
-            &highlights,
-            &[],
-            &[],
-            &[],
-        );
+        let line =
+            render_line_with_highlights(&theme, "fn main()", None, &[], &highlights, &[], &[], &[]);
         // Should have at least 2 spans: "fn" (highlighted) and " main()" (default)
         assert!(line.spans.len() >= 2);
         assert_eq!(line.spans[0].content.as_ref(), "fn");
@@ -2916,9 +2876,7 @@ mod tests {
         let line = render_line_with_highlights(
             &theme,
             "hello world",
-            0,
             None,
-            crate::mode::Mode::Normal,
             &search,
             &highlights,
             &[],
@@ -2937,18 +2895,8 @@ mod tests {
         let theme = Theme::default();
         // "aé" - 'é' is 2 bytes in UTF-8. Highlight byte range 0..1 ("a" only).
         let highlights = vec![(0..1, crate::syntax::HighlightGroup::Keyword)];
-        let line = render_line_with_highlights(
-            &theme,
-            "aéb",
-            0,
-            None,
-            crate::mode::Mode::Normal,
-            &[],
-            &highlights,
-            &[],
-            &[],
-            &[],
-        );
+        let line =
+            render_line_with_highlights(&theme, "aéb", None, &[], &highlights, &[], &[], &[]);
         assert!(line.spans.len() >= 2);
         assert_eq!(line.spans[0].content.as_ref(), "a");
     }
@@ -2961,18 +2909,8 @@ mod tests {
             end: 5,
             color: Color::Red,
         }];
-        let line = render_line_with_highlights(
-            &theme,
-            "error here",
-            0,
-            None,
-            crate::mode::Mode::Normal,
-            &[],
-            &[],
-            &diags,
-            &[],
-            &[],
-        );
+        let line =
+            render_line_with_highlights(&theme, "error here", None, &[], &[], &diags, &[], &[]);
         // First span should have underline modifier
         assert!(line.spans[0]
             .style
@@ -2992,9 +2930,7 @@ mod tests {
         let line = render_line_with_highlights(
             &theme,
             "abcdefghij",
-            0,
             None,
-            crate::mode::Mode::Normal,
             &[],
             &highlights,
             &[],

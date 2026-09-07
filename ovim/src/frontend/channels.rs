@@ -30,6 +30,7 @@ pub struct FrontendChannels {
     pub(super) syntax_rx: mpsc::Receiver<(BufferId, Language, Option<LineHighlights>, u64)>,
     pub(super) file_list_cache_tx: mpsc::Sender<(PathBuf, PathBuf, Vec<editor::PickerResult>)>,
     pub(super) file_list_cache_rx: mpsc::Receiver<(PathBuf, PathBuf, Vec<editor::PickerResult>)>,
+    pub(super) lsp_startup: crate::lsp_init::LspStartup,
     pub(super) java_status_rx: mpsc::Receiver<String>,
 }
 
@@ -58,6 +59,7 @@ impl FrontendChannels {
             file_list_cache_tx,
             file_list_cache_rx,
             java_status_rx,
+            lsp_startup: Default::default(),
         }
     }
 }

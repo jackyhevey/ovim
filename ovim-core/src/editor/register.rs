@@ -105,6 +105,15 @@ pub struct RegisterManager {
 }
 
 impl RegisterManager {
+    /// Register names accepted by the input prefix in normal and visual modes.
+    pub fn is_valid_name(register: char) -> bool {
+        register.is_ascii_alphanumeric()
+            || matches!(
+                register,
+                '"' | '_' | '-' | '+' | '*' | '%' | '.' | ':' | '#' | '/'
+            )
+    }
+
     /// Creates a new register manager
     pub fn new() -> Self {
         Self {

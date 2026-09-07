@@ -34,8 +34,9 @@ pub async fn process_editor_tick(editor: &mut Editor, channels: &mut FrontendCha
     // === LSP lifecycle ===
     process_java_status(editor, &mut channels.java_status_rx);
     process_lsp_notifications(editor).await;
+    channels.lsp_startup.poll(editor).await;
     if !defer_lsp_init {
-        process_lsp_init(editor).await;
+        process_lsp_init(editor, channels);
     }
     process_lsp_sync_and_inlay_hints(editor).await;
 
@@ -152,10 +153,15 @@ async fn process_lsp_notifications(editor: &mut Editor) {
 }
 
 /// Initialize LSP for a newly opened file if needed.
-async fn process_lsp_init(editor: &mut Editor) {
+fn process_lsp_init(editor: &mut Editor, channels: &mut FrontendChannels) {
+    if let Some(approved) = editor.take_approved_lsp_install() {
+        channels
+            .lsp_startup
+            .start(editor, &approved.file_path, true);
+    }
     if let Some(file_path) = editor.needs_lsp_init() {
         ovim_core::log_debug!("tick", "Initializing LSP for {}", file_path);
-        crate::lsp_init::initialize_lsp_for_file(editor, &file_path).await;
+        channels.lsp_startup.start(editor, &file_path, false);
         editor.clear_lsp_init_flag();
     }
 }
@@ -553,10 +559,6 @@ async fn poll_background_tasks(editor: &mut Editor) {
     // The side-by-side diff review is laid out to a fixed width, so it has to
     // re-flow when the window changes size.
     if editor.relayout_diff_review() {
-        editor.mark_dirty();
-    }
-    if editor.has_approved_lsp_install() {
-        crate::lsp_init::handle_approved_lsp_install(editor).await;
         editor.mark_dirty();
     }
     if editor.poll_pending_ai_chat_job() {

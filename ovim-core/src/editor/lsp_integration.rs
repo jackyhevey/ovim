@@ -1787,7 +1787,7 @@ impl Editor {
     /// the debounced didChange (150ms) might not have been sent yet. This causes
     /// LSP to return stale results. We flush pending changes here to ensure LSP
     /// has the latest content.
-    async fn ensure_lsp_document_synced(&mut self) -> bool {
+    pub async fn ensure_lsp_document_synced(&mut self) -> bool {
         let Some(lsp) = self.lsp.state.lsp_manager.clone() else {
             return false;
         };

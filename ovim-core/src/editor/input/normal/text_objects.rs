@@ -31,123 +31,15 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
     editor.clear_pending_operator();
     editor.clear_count();
 
-    let result = match key_event.code {
-        KeyCode::Char('w') => {
-            if text_obj_type == 'i' {
-                TextObjects::inner_word(editor.buffer())
-            } else {
-                TextObjects::around_word(editor.buffer())
-            }
-        }
-        KeyCode::Char('W') => {
-            if text_obj_type == 'i' {
-                TextObjects::inner_big_word(editor.buffer())
-            } else {
-                TextObjects::around_big_word(editor.buffer())
-            }
-        }
-        KeyCode::Char('p') => {
-            if text_obj_type == 'i' {
-                TextObjects::inner_paragraph(editor.buffer())
-            } else {
-                TextObjects::around_paragraph(editor.buffer())
-            }
-        }
-        KeyCode::Char('s') => {
-            if text_obj_type == 'i' {
-                TextObjects::inner_sentence(editor.buffer())
-            } else {
-                TextObjects::around_sentence(editor.buffer())
-            }
-        }
-        KeyCode::Char('"') | KeyCode::Char('\'') | KeyCode::Char('`') => {
-            let quote = match key_event.code {
-                KeyCode::Char(c) => c,
-                _ => unreachable!(),
-            };
-            TextObjects::quoted_string(editor.buffer(), quote, text_obj_type == 'a')
-        }
-        KeyCode::Char('(') | KeyCode::Char(')') | KeyCode::Char('b') => {
-            TextObjects::paired_delimiters(editor.buffer(), '(', ')', text_obj_type == 'a')
-        }
-        KeyCode::Char('[') | KeyCode::Char(']') => {
-            TextObjects::paired_delimiters(editor.buffer(), '[', ']', text_obj_type == 'a')
-        }
-        KeyCode::Char('{') | KeyCode::Char('}') | KeyCode::Char('B') => {
-            TextObjects::paired_delimiters(editor.buffer(), '{', '}', text_obj_type == 'a')
-        }
-        KeyCode::Char('<') | KeyCode::Char('>') => {
-            TextObjects::paired_delimiters(editor.buffer(), '<', '>', text_obj_type == 'a')
-        }
-        KeyCode::Char('t') => TextObjects::tag(editor.buffer(), text_obj_type == 'a'),
-        KeyCode::Char('i') => {
-            let tab_width = editor.indent_options().tab_width;
-            if text_obj_type == 'i' {
-                TextObjects::inner_indent(editor.buffer(), tab_width)
-            } else {
-                TextObjects::around_indent(editor.buffer(), tab_width)
-            }
-        }
-        KeyCode::Char('f') => {
-            if text_obj_type == 'i' {
-                TextObjects::inner_function(editor.buffer())
-            } else {
-                TextObjects::around_function(editor.buffer())
-            }
-        }
-        _ => {
-            // Unknown text object
-            return Ok(true);
-        }
+    let Some(object_type) =
+        super::super::text_objects::from_key(editor, key_event.code, text_obj_type == 'i')
+    else {
+        return Ok(true);
     };
-
-    // Determine the TextObjectType for semantic repeat
-    let inner = text_obj_type == 'i';
-    let object_type: TextObjectType = match key_event.code {
-        KeyCode::Char('w') => TextObjectType::Word { inner, big: false },
-        KeyCode::Char('W') => TextObjectType::Word { inner, big: true },
-        KeyCode::Char('"') | KeyCode::Char('\'') | KeyCode::Char('`') => {
-            let quote = match key_event.code {
-                KeyCode::Char(c) => c,
-                _ => unreachable!(),
-            };
-            TextObjectType::Quote { char: quote, inner }
-        }
-        KeyCode::Char('(') | KeyCode::Char(')') | KeyCode::Char('b') => TextObjectType::Paired {
-            open: '(',
-            close: ')',
-            inner,
-        },
-        KeyCode::Char('[') | KeyCode::Char(']') => TextObjectType::Paired {
-            open: '[',
-            close: ']',
-            inner,
-        },
-        KeyCode::Char('{') | KeyCode::Char('}') | KeyCode::Char('B') => TextObjectType::Paired {
-            open: '{',
-            close: '}',
-            inner,
-        },
-        KeyCode::Char('<') | KeyCode::Char('>') => TextObjectType::Paired {
-            open: '<',
-            close: '>',
-            inner,
-        },
-        KeyCode::Char('p') => TextObjectType::Paragraph { inner },
-        KeyCode::Char('s') => TextObjectType::Sentence { inner },
-        KeyCode::Char('t') => TextObjectType::Tag { inner },
-        KeyCode::Char('i') => TextObjectType::Indent {
-            inner,
-            tab_width: editor.indent_options().tab_width,
-        },
-        KeyCode::Char('f') => TextObjectType::Function { inner },
-        _ => unreachable!("text object key should be validated before object_type mapping"),
-    };
-
     let result = if operator == Operator::Change {
         object_type.resolve_for_change(editor.buffer())
     } else {
-        result
+        object_type.resolve(editor.buffer())
     };
     if let Some(range) = result {
         match operator {

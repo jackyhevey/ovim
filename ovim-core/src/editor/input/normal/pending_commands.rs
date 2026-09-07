@@ -481,19 +481,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // =====================================================================
         // '"' - Register selection
         // =====================================================================
-        ('"', KeyCode::Char(ch))
-            if ch.is_ascii_alphanumeric()
-                || ch == '"'
-                || ch == '_'
-                || ch == '-'
-                || ch == '+'
-                || ch == '*'
-                || ch == '%'
-                || ch == '.'
-                || ch == ':'
-                || ch == '#'
-                || ch == '/' =>
-        {
+        ('"', KeyCode::Char(ch)) if crate::editor::RegisterManager::is_valid_name(ch) => {
             editor.set_pending_register(ch);
         }
 

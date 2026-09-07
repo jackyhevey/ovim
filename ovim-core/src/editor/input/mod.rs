@@ -66,6 +66,9 @@ mod insert_mode;
 /// Visual mode handler (Visual, VisualLine, VisualBlock)
 mod visual_mode;
 
+/// Shared text object key decoding for operators and visual mode.
+mod text_objects;
+
 /// Normal mode handler (decomposed into submodules)
 mod normal;
 
@@ -247,6 +250,22 @@ impl InputHandler {
         // intact.
         match editor.mode() {
             Mode::Insert | Mode::Replace => {}
+            Mode::Visual => {
+                // Characterwise selections may end on the newline cell.
+                editor.buffer_mut().validate_cursor_line();
+                let cursor = editor.buffer().cursor();
+                let max_col = editor
+                    .buffer()
+                    .line_text(cursor.line())
+                    .map(|text| crate::unicode::grapheme_count(&text))
+                    .unwrap_or(0);
+                if cursor.col().0 > max_col {
+                    editor
+                        .buffer_mut()
+                        .cursor_mut()
+                        .set_col(crate::unicode::GraphemeCol(max_col));
+                }
+            }
             Mode::VisualBlock => editor.buffer_mut().validate_cursor_line(),
             _ => editor.buffer_mut().validate_cursor_position(),
         }

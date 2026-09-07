@@ -161,6 +161,33 @@ pub struct LanguageServer {
     inner: Arc<LanguageServerInner>,
 }
 
+/// Owns a process until initialization succeeds and the manager can publish it.
+/// Initialization may be cancelled when its frontend closes.
+struct StartupGuard(Option<LanguageServer>);
+
+impl Drop for StartupGuard {
+    fn drop(&mut self) {
+        let Some(server) = self.0.take() else { return };
+        // Start termination synchronously even if the runtime is shutting down.
+        if let Ok(mut process) = server.inner.process.try_lock() {
+            if let Some(child) = process.as_mut() {
+                let _ = child.start_kill();
+            }
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = server.inner.supervisor.shutdown_all().await;
+                if let Some(mut child) = server.inner.process.lock().await.take() {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                }
+                server.inner.pending_requests.lock().await.clear();
+                server.transition_to(ServerState::Terminated).await;
+            });
+        }
+    }
+}
+
 struct LanguageServerInner {
     /// Language identifier (e.g., "rust", "python") for logging context
     language: String,
@@ -224,6 +251,18 @@ impl LanguageServerInner {
 }
 
 impl LanguageServer {
+    /// Transfer ownership to the manager only after a successful handshake.
+    pub(super) async fn spawn_initialized(
+        language: &str,
+        command: &str,
+        args: Vec<String>,
+        root_uri: Uri,
+    ) -> Result<Self> {
+        let mut startup = StartupGuard(Some(Self::spawn(language, command, args).await?));
+        startup.0.as_mut().unwrap().initialize(root_uri).await?;
+        Ok(startup.0.take().unwrap())
+    }
+
     pub(crate) fn language(&self) -> &str {
         &self.inner.language
     }
@@ -244,6 +283,7 @@ impl LanguageServer {
         );
         let mut child = Command::new(command)
             .args(&args)
+            .kill_on_drop(true)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped()) // Capture stderr for debugging

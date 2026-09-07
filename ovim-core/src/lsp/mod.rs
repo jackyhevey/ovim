@@ -38,7 +38,7 @@ pub use types::{uri_from_file_path, uri_to_file_path, LspPosition, LspRange};
 pub use utils::compute_simple_diff;
 
 use anyhow::Result;
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use lsp_types::{Diagnostic, Uri};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -234,8 +234,8 @@ pub struct LspManager {
     /// Prevents blocking when notification receiver is slow
     dropped_notifications: Arc<AtomicU64>,
 
-    /// Tracks servers currently being started (prevents concurrent duplicate starts)
-    starting_servers: DashSet<String>,
+    /// Serializes startup and registry publication; cancellation releases the gate.
+    startup_gates: DashMap<String, Arc<Mutex<()>>>,
 
     /// Handles to notification listener tasks (for cleanup on server stop)
     listener_handles: DashMap<String, tokio::task::JoinHandle<()>>,
@@ -292,7 +292,7 @@ impl LspManager {
             workspace_edit_tx,
             workspace_edit_rx: Mutex::new(workspace_edit_rx),
             dropped_notifications: Arc::new(AtomicU64::new(0)),
-            starting_servers: DashSet::new(),
+            startup_gates: DashMap::new(),
             listener_handles: DashMap::new(),
             language_server_index: DashMap::new(),
             server_roots: DashMap::new(),
@@ -341,6 +341,16 @@ impl LspManager {
             root_path.display()
         );
 
+        // Serialize registry decisions for this language. A concurrent caller
+        // must wait for readiness, not receive the id of a pending startup.
+        // Dropping a cancelled startup releases the permit automatically.
+        let gate = self
+            .startup_gates
+            .entry(language.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _startup_permit = gate.lock().await;
+
         // Check existing servers for this language — if any shares the same root, reuse it
         let existing_ids = self.servers_for_language(language);
         for sid in &existing_ids {
@@ -370,63 +380,39 @@ impl LspManager {
             return Ok(server_id);
         }
 
-        // Prevent concurrent duplicate starts
-        if !self.starting_servers.insert(server_id.clone()) {
-            lsp_debug!(
-                "LspManager",
-                "Server start already in progress for {}",
-                server_id
-            );
-            return Ok(server_id);
+        let root_uri =
+            uri_from_file_path(root_path).ok_or_else(|| anyhow::anyhow!("Invalid root path"))?;
+        let server = LanguageServer::spawn_initialized(language, command, args, root_uri).await?;
+
+        // Insert into servers map
+        if let Some(mut existing) = self.servers.insert(server_id.clone(), server) {
+            // The fresh process has no documents open — drop baselines
+            // recorded for the replaced instance (OV-00326).
+            self.server_texts.retain(|(sid, _), _| sid != &server_id);
+            if let Err(e) = existing.shutdown().await {
+                lsp_warn!(
+                    "LspManager",
+                    "Failed to shut down redundant server for {}: {}",
+                    server_id,
+                    e
+                );
+            }
         }
 
-        let result = async {
-            lsp_debug!("LspManager", "Spawning server: {} {:?}", command, args);
-            let mut server = LanguageServer::spawn(language, command, args).await?;
-            lsp_debug!("LspManager", "Server spawned successfully");
+        // Track root path for this server
+        self.server_roots
+            .insert(server_id.clone(), root_path.to_path_buf());
 
-            let root_uri = uri_from_file_path(root_path)
-                .ok_or_else(|| anyhow::anyhow!("Invalid root path"))?;
-            lsp_debug!("LspManager", "Root URI: {}", root_uri.as_str());
-
-            lsp_debug!("LspManager", "Calling initialize...");
-            server.initialize(root_uri).await?;
-            lsp_debug!("LspManager", "Initialize completed successfully");
-
-            // Insert into servers map
-            if let Some(mut existing) = self.servers.insert(server_id.clone(), server) {
-                // The fresh process has no documents open — drop baselines
-                // recorded for the replaced instance (OV-00326).
-                self.server_texts.retain(|(sid, _), _| sid != &server_id);
-                if let Err(e) = existing.shutdown().await {
-                    lsp_warn!(
-                        "LspManager",
-                        "Failed to shut down redundant server for {}: {}",
-                        server_id,
-                        e
-                    );
-                }
-            }
-
-            // Track root path for this server
-            self.server_roots
-                .insert(server_id.clone(), root_path.to_path_buf());
-
-            // Update reverse index (deduplicate for restart safety)
-            let mut ids = self
-                .language_server_index
-                .entry(language.to_string())
-                .or_default();
-            if !ids.contains(&server_id) {
-                ids.push(server_id.clone());
-            }
-
-            Ok(server_id.clone())
+        // Update reverse index (deduplicate for restart safety)
+        let mut ids = self
+            .language_server_index
+            .entry(language.to_string())
+            .or_default();
+        if !ids.contains(&server_id) {
+            ids.push(server_id.clone());
         }
-        .await;
 
-        self.starting_servers.remove(&server_id);
-        result
+        Ok(server_id)
     }
 
     /// Starts a companion language server with an explicit server_id
@@ -443,6 +429,13 @@ impl LspManager {
             "start_companion_server called for server_id={}",
             server_id
         );
+        let gate = self
+            .startup_gates
+            .entry(server_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _startup_permit = gate.lock().await;
+
         // Check if already running
         if self.servers.contains_key(server_id) {
             lsp_debug!(
@@ -453,66 +446,39 @@ impl LspManager {
             return Ok(());
         }
 
-        // Prevent concurrent duplicate starts
-        if !self.starting_servers.insert(server_id.to_string()) {
-            lsp_debug!(
-                "LspManager",
-                "Companion server start already in progress for {}",
-                server_id
-            );
-            return Ok(());
+        let language = server_id.split(':').next().unwrap_or(server_id);
+        let root_uri =
+            uri_from_file_path(root_path).ok_or_else(|| anyhow::anyhow!("Invalid root path"))?;
+        let server = LanguageServer::spawn_initialized(language, command, args, root_uri).await?;
+
+        if let Some(mut existing) = self.servers.insert(server_id.to_string(), server) {
+            // Fresh process, no documents open — drop stale baselines
+            // recorded for the replaced instance (OV-00326).
+            self.server_texts.retain(|(sid, _), _| sid != server_id);
+            if let Err(e) = existing.shutdown().await {
+                lsp_warn!(
+                    "LspManager",
+                    "Failed to shut down redundant companion server for {}: {}",
+                    server_id,
+                    e
+                );
+            }
         }
 
-        let result = async {
-            lsp_debug!(
-                "LspManager",
-                "Spawning companion server: {} {:?}",
-                command,
-                args
-            );
-            // Extract language part for the server's language field
-            let language = server_id.split(':').next().unwrap_or(server_id);
-            let mut server = LanguageServer::spawn(language, command, args).await?;
+        // Track root path for this companion server
+        self.server_roots
+            .insert(server_id.to_string(), root_path.to_path_buf());
 
-            let root_uri = uri_from_file_path(root_path)
-                .ok_or_else(|| anyhow::anyhow!("Invalid root path"))?;
-
-            server.initialize(root_uri).await?;
-            lsp_debug!("LspManager", "Companion server {} initialized", server_id);
-
-            if let Some(mut existing) = self.servers.insert(server_id.to_string(), server) {
-                // Fresh process, no documents open — drop stale baselines
-                // recorded for the replaced instance (OV-00326).
-                self.server_texts.retain(|(sid, _), _| sid != server_id);
-                if let Err(e) = existing.shutdown().await {
-                    lsp_warn!(
-                        "LspManager",
-                        "Failed to shut down redundant companion server for {}: {}",
-                        server_id,
-                        e
-                    );
-                }
-            }
-
-            // Track root path for this companion server
-            self.server_roots
-                .insert(server_id.to_string(), root_path.to_path_buf());
-
-            // Update reverse index (deduplicate for restart safety)
-            let mut ids = self
-                .language_server_index
-                .entry(language.to_string())
-                .or_default();
-            if !ids.contains(&server_id.to_string()) {
-                ids.push(server_id.to_string());
-            }
-
-            Ok(())
+        // Update reverse index (deduplicate for restart safety)
+        let mut ids = self
+            .language_server_index
+            .entry(language.to_string())
+            .or_default();
+        if !ids.contains(&server_id.to_string()) {
+            ids.push(server_id.to_string());
         }
-        .await;
 
-        self.starting_servers.remove(server_id);
-        result
+        Ok(())
     }
 
     /// Returns all server_ids that serve the given language_id.
