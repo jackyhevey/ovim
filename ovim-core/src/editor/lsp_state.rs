@@ -1,4 +1,4 @@
-use crate::lsp::LspManager;
+use crate::lsp::{diagnostic_covers_line, diagnostic_range_is_valid, LspManager};
 use ropey::Rope;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -175,11 +175,32 @@ pub struct DiagnosticAnchors {
 #[derive(Debug, Default, Clone)]
 pub struct ProjectedDiagnostics {
     by_line: BTreeMap<usize, Vec<lsp_types::Diagnostic>>,
+    /// References into `by_line`; each diagnostic's payload is stored once.
+    /// A file-wide range costs one entry, independent of its line count.
+    multi_line: Vec<(usize, usize)>,
 }
 
 impl ProjectedDiagnostics {
-    pub(crate) fn new(by_line: BTreeMap<usize, Vec<lsp_types::Diagnostic>>) -> Self {
-        Self { by_line }
+    pub(crate) fn new(mut by_line: BTreeMap<usize, Vec<lsp_types::Diagnostic>>) -> Self {
+        by_line.retain(|_, diagnostics| {
+            diagnostics.retain(|d| diagnostic_range_is_valid(&d.range));
+            !diagnostics.is_empty()
+        });
+        let multi_line = by_line
+            .iter()
+            .flat_map(|(&line, diagnostics)| {
+                diagnostics
+                    .iter()
+                    .enumerate()
+                    .filter_map(move |(index, d)| {
+                        (d.range.end.line > d.range.start.line).then_some((line, index))
+                    })
+            })
+            .collect();
+        Self {
+            by_line,
+            multi_line,
+        }
     }
 
     /// Diagnostics whose projected start line equals `line`.
@@ -187,9 +208,22 @@ impl ProjectedDiagnostics {
         self.by_line.get(&line).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Consume the snapshot, returning the given line's diagnostics.
-    pub fn take_line(mut self, line: usize) -> Vec<lsp_types::Diagnostic> {
-        self.by_line.remove(&line).unwrap_or_default()
+    /// Diagnostics covering this line, including spans starting earlier.
+    /// Cursor feedback and underlines use coverage; gutter/EOL use `for_line`.
+    pub fn covering(&self, line: usize) -> impl Iterator<Item = &lsp_types::Diagnostic> + '_ {
+        self.for_line(line).iter().chain(
+            self.multi_line
+                .iter()
+                .filter(move |(start, _)| *start != line)
+                .map(|(start, index)| &self.by_line[start][*index])
+                .filter(move |d| diagnostic_covers_line(d, line)),
+        )
+    }
+
+    /// Owned form of [`covering`](Self::covering), for callers that outlive
+    /// the snapshot (the diagnostic float builds its message from these).
+    pub fn covering_line(&self, line: usize) -> Vec<lsp_types::Diagnostic> {
+        self.covering(line).cloned().collect()
     }
 
     /// 64-bit fingerprint of the line's full diagnostic set (projected
@@ -200,7 +234,7 @@ impl ProjectedDiagnostics {
     pub fn line_hash(&self, line: usize) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for diag in self.for_line(line) {
+        for diag in self.covering(line) {
             diag.range.start.line.hash(&mut hasher);
             diag.range.start.character.hash(&mut hasher);
             diag.range.end.line.hash(&mut hasher);
@@ -338,7 +372,12 @@ pub struct LspState {
     /// Line-indexed view of `current_file_diagnostics`. Values are indices
     /// into the flat Vec, so per-line lookup is O(log L) without cloning.
     /// Kept in sync via `set_current_file_diagnostics` / `clear_current_file_diagnostics`.
-    pub diagnostics_by_line: BTreeMap<usize, Vec<usize>>,
+    diagnostics_by_line: BTreeMap<usize, Vec<usize>>,
+    /// Indices into `current_file_diagnostics` for diagnostics that span more
+    /// than one line. `diagnostics_by_line` keys on the START line only, so
+    /// continuation lines are found through this list instead (see
+    /// `ProjectedDiagnostics::multi_line` for why they aren't indexed per line).
+    multi_line_diagnostics: Vec<usize>,
     /// Rope-anchored offsets for `current_file_diagnostics`, set by
     /// `anchor_current_file_diagnostics` when diagnostics are placed against a
     /// known rope/version. `None` (e.g. diagnostics stored without a rope)
@@ -385,6 +424,7 @@ impl LspState {
             active_lsp_result_type: None,
             current_file_diagnostics: Vec::new(),
             diagnostics_by_line: BTreeMap::new(),
+            multi_line_diagnostics: Vec::new(),
             diagnostic_anchors: None,
             diagnostics_file_path: None,
             current_file_lsp_version: 0,
@@ -399,15 +439,43 @@ impl LspState {
         self.active_lsp_servers.keys().cloned().collect()
     }
 
+    /// Borrow the covering set from the current diagnostic cache.
+    pub fn diagnostics_covering_line(
+        &self,
+        line: usize,
+    ) -> impl Iterator<Item = &lsp_types::Diagnostic> {
+        self.diagnostics_by_line
+            .get(&line)
+            .into_iter()
+            .flatten()
+            .copied()
+            .chain(
+                self.multi_line_diagnostics
+                    .iter()
+                    .copied()
+                    .filter(move |&index| {
+                        let diagnostic = &self.current_file_diagnostics[index];
+                        diagnostic.range.start.line as usize != line
+                            && diagnostic_covers_line(diagnostic, line)
+                    }),
+            )
+            .map(|index| &self.current_file_diagnostics[index])
+    }
+
     /// Replace the cached diagnostics and rebuild the line index.
-    pub fn set_current_file_diagnostics(&mut self, diagnostics: Vec<lsp_types::Diagnostic>) {
+    pub fn set_current_file_diagnostics(&mut self, mut diagnostics: Vec<lsp_types::Diagnostic>) {
+        diagnostics.retain(|d| diagnostic_range_is_valid(&d.range));
         self.diagnostics_by_line.clear();
+        self.multi_line_diagnostics.clear();
         self.diagnostic_anchors = None;
         for (idx, diag) in diagnostics.iter().enumerate() {
             self.diagnostics_by_line
                 .entry(diag.range.start.line as usize)
                 .or_default()
                 .push(idx);
+            if diag.range.end.line > diag.range.start.line {
+                self.multi_line_diagnostics.push(idx);
+            }
         }
         self.current_file_diagnostics = diagnostics;
     }
@@ -447,6 +515,7 @@ impl LspState {
     pub fn clear_current_file_diagnostics(&mut self) {
         self.current_file_diagnostics.clear();
         self.diagnostics_by_line.clear();
+        self.multi_line_diagnostics.clear();
         self.diagnostic_anchors = None;
     }
 }
@@ -454,5 +523,104 @@ impl LspState {
 impl Default for LspState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diagnostic(range: lsp_types::Range, message: &str) -> lsp_types::Diagnostic {
+        lsp_types::Diagnostic {
+            range,
+            severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+            message: message.to_string(),
+            ..lsp_types::Diagnostic::default()
+        }
+    }
+
+    fn projected(diagnostics: Vec<lsp_types::Diagnostic>) -> ProjectedDiagnostics {
+        let mut by_line: BTreeMap<usize, Vec<lsp_types::Diagnostic>> = BTreeMap::new();
+        for diag in diagnostics {
+            by_line
+                .entry(diag.range.start.line as usize)
+                .or_default()
+                .push(diag);
+        }
+        ProjectedDiagnostics::new(by_line)
+    }
+
+    /// OV-00345: `for_line` keeps its "starts here" meaning (gutter sign, EOL
+    /// message), while `covering_line` reaches the whole span (squiggle,
+    /// float, echo).
+    #[test]
+    fn covering_line_reaches_continuation_lines_that_for_line_does_not() {
+        let snapshot = projected(vec![diagnostic(
+            lsp_types::Range::new(
+                lsp_types::Position::new(1, 16),
+                lsp_types::Position::new(4, 6),
+            ),
+            "incompatible types",
+        )]);
+
+        assert_eq!(snapshot.for_line(1).len(), 1);
+        for line in 2..=4 {
+            assert!(
+                snapshot.for_line(line).is_empty(),
+                "line {line} does not start the span"
+            );
+            assert_eq!(
+                snapshot.covering_line(line).len(),
+                1,
+                "line {line} is inside the span"
+            );
+        }
+        assert!(snapshot.covering_line(0).is_empty());
+        assert!(snapshot.covering_line(5).is_empty());
+    }
+
+    /// The render cache keys on `line_hash`, so a continuation line whose
+    /// squiggle appears must not hash the same as a clean line — otherwise
+    /// cached rows keep the pre-publication look (the OV-00329 bug class).
+    #[test]
+    fn line_hash_distinguishes_a_covered_continuation_line_from_a_clean_one() {
+        let snapshot = projected(vec![diagnostic(
+            lsp_types::Range::new(
+                lsp_types::Position::new(1, 0),
+                lsp_types::Position::new(3, 4),
+            ),
+            "unreachable",
+        )]);
+
+        assert_ne!(snapshot.line_hash(2), snapshot.line_hash(9));
+    }
+
+    #[test]
+    fn diagnostic_covers_line_respects_half_open_end() {
+        let diag = diagnostic(
+            lsp_types::Range::new(
+                lsp_types::Position::new(1, 0),
+                lsp_types::Position::new(3, 0),
+            ),
+            "unreachable",
+        );
+        assert!(diagnostic_covers_line(&diag, 1));
+        assert!(diagnostic_covers_line(&diag, 2));
+        assert!(!diagnostic_covers_line(&diag, 3));
+        assert!(!diagnostic_covers_line(&diag, 0));
+    }
+
+    /// A zero-width diagnostic (start == end) still belongs to its own line.
+    #[test]
+    fn diagnostic_covers_line_keeps_zero_width_ranges_on_their_line() {
+        let diag = diagnostic(
+            lsp_types::Range::new(
+                lsp_types::Position::new(2, 0),
+                lsp_types::Position::new(2, 0),
+            ),
+            "missing semicolon",
+        );
+        assert!(diagnostic_covers_line(&diag, 2));
+        assert!(!diagnostic_covers_line(&diag, 3));
     }
 }

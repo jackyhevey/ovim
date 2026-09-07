@@ -20,6 +20,46 @@ pub fn uri_to_file_path(uri: &Uri) -> Option<std::path::PathBuf> {
     url.to_file_path().ok()
 }
 
+/// Reject reversed ranges at the diagnostic ingestion boundary.
+pub(crate) fn diagnostic_range_is_valid(range: &Range) -> bool {
+    (range.start.line, range.start.character) <= (range.end.line, range.end.character)
+}
+
+/// Whether a diagnostic covers a line. Ends are exclusive; an empty range
+/// remains reachable on its start line. No expansion by span length is needed.
+pub fn diagnostic_covers_line(diagnostic: &lsp_types::Diagnostic, line: usize) -> bool {
+    let range = &diagnostic.range;
+    diagnostic_range_is_valid(range)
+        && line >= range.start.line as usize
+        && (line < range.end.line as usize
+            || (line == range.end.line as usize
+                && (range.end.character > 0 || range.start.line == range.end.line)))
+}
+
+/// Clip a diagnostic to a line's visible content, converting its UTF-16
+/// endpoints to a half-open scalar range. Continuation lines start at zero
+/// and end at the line length. Out-of-bounds columns clamp to the content.
+pub fn diagnostic_char_range(
+    diagnostic: &lsp_types::Diagnostic,
+    line: usize,
+    text: &str,
+) -> Option<std::ops::Range<usize>> {
+    if !diagnostic_covers_line(diagnostic, line) {
+        return None;
+    }
+    let start = if line == diagnostic.range.start.line as usize {
+        super::utf16_to_char_col(text, diagnostic.range.start.character)
+    } else {
+        0
+    };
+    let end = if line == diagnostic.range.end.line as usize {
+        super::utf16_to_char_col(text, diagnostic.range.end.character)
+    } else {
+        text.chars().count()
+    };
+    Some(start..end)
+}
+
 /// LSP Position wrapper for easier construction
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LspPosition {

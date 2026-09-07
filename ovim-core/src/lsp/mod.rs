@@ -34,7 +34,11 @@ pub use protocol::{JsonRpcMessage, RequestId};
 pub use server::{LanguageServer, LanguageServerHealth};
 pub use supervisor::{RestartPolicy, TaskSupervisor};
 pub use trigger_chars::fallback_completion_trigger_characters;
-pub use types::{uri_from_file_path, uri_to_file_path, LspPosition, LspRange};
+pub(crate) use types::diagnostic_range_is_valid;
+pub use types::{
+    diagnostic_char_range, diagnostic_covers_line, uri_from_file_path, uri_to_file_path,
+    LspPosition, LspRange,
+};
 pub use utils::compute_simple_diff;
 
 use anyhow::Result;
@@ -692,7 +696,7 @@ impl LspManager {
         self.get_diagnostics(uri)
             .await
             .into_iter()
-            .filter(|d| d.range.start.line <= line && d.range.end.line >= line)
+            .filter(|d| diagnostic_covers_line(d, line as usize))
             .collect()
     }
 
@@ -758,6 +762,12 @@ impl LspManager {
             version
         );
         crate::metrics::LSP_DIAGNOSTICS_TOTAL.inc();
+
+        // Keep malformed ranges out of caches, counts and code-action context.
+        let diagnostics: Vec<_> = diagnostics
+            .into_iter()
+            .filter(|d| diagnostic_range_is_valid(&d.range))
+            .collect();
 
         // Reject stale diagnostics — two cases:
         //

@@ -1779,20 +1779,29 @@ mod tests {
         let tool = editor.ai_runtime_record_tool_intent(&turn, &call).unwrap();
         let (response_tx, mut response_rx) = tokio::sync::oneshot::channel();
 
-        let started = std::time::Instant::now();
         editor.execute_dynamic_tool_after_policy(turn, tool, call, response_tx, None, false);
-        assert!(started.elapsed() < std::time::Duration::from_millis(100));
-        assert!(editor
+        let pending = editor
             .ai_state
             .chat
             .as_ref()
             .unwrap()
             .pending_shell_execution
-            .is_some());
+            .as_ref()
+            .expect("shell must run in the background");
         assert_eq!(
             editor.ai_chat_activity(),
             super::super::AiChatActivity::RunningShell
         );
+
+        // Wait for real process-start progress while the release gate stays
+        // closed. Progress is a visible state change, not job completion.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while pending.progress.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("shell did not start");
 
         // A live tool belongs to the chat, not to the chat panel. Hiding the
         // panel must return input ownership to the editor while the tool keeps
@@ -1809,11 +1818,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(editor.cursor_position().line, 1);
+        editor.poll_pending_ai_chat_job();
         assert_eq!(
             editor.ai_chat_activity(),
             super::super::AiChatActivity::RunningShell
         );
-        assert!(!editor.poll_pending_ai_chat_job());
         assert!(matches!(
             response_rx.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)

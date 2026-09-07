@@ -20,7 +20,9 @@ use super::styles::{
 };
 use crate::syntax::HighlightGroup;
 use ovim_core::buffer::Cursor;
-use ovim_core::unicode::{grapheme_count, grapheme_to_char_col, GraphemeCol};
+use ovim_core::unicode::{
+    char_to_grapheme_col, grapheme_count, grapheme_to_char_col, CharCol, GraphemeCol,
+};
 use std::ops::Range;
 
 /// Window-specific rendering context for multi-window support.
@@ -56,26 +58,34 @@ fn display_col_to_char_idx(text: &str, target_display_col: usize) -> usize {
     crate::display::display_col_to_char_col(text, target_display_col, 1)
 }
 
-/// Converts a UTF-16 offset to a char index within a line of text.
-/// LSP uses UTF-16 offsets for character positions.
-fn utf16_offset_to_char_idx(text: &str, utf16_offset: usize) -> usize {
-    let mut utf16_count = 0;
-    for (char_idx, ch) in text.chars().enumerate() {
-        if utf16_count >= utf16_offset {
-            return char_idx;
-        }
-        utf16_count += ch.len_utf16();
-    }
-    text.chars().count()
+/// A horizontal slice retains the exact source scalars it displays. Styling
+/// uses this mapping too, including when scrolling snaps to a wide grapheme.
+struct HorizontalViewport {
+    text: String,
+    source_chars: Range<usize>,
+    precedes: bool,
 }
 
-/// Slices a line for horizontal viewport with visual indicators.
-/// h_offset and width are in display columns.
-/// Returns (sliced_text, precedes_indicator, extends_indicator)
-fn slice_horizontal_viewport(line: &str, h_offset: usize, width: usize) -> (String, bool, bool) {
+impl HorizontalViewport {
+    fn project_range(&self, range: Range<usize>) -> Option<Range<usize>> {
+        let start = range.start.max(self.source_chars.start);
+        let end = range.end.min(self.source_chars.end);
+        let left = usize::from(self.precedes);
+        (start < end)
+            .then(|| start - self.source_chars.start + left..end - self.source_chars.start + left)
+    }
+}
+
+/// Slice by display columns while preserving complete graphemes. Indicators
+/// and padding are outside `source_chars` and cannot acquire text highlights.
+fn slice_horizontal_viewport(line: &str, h_offset: usize, width: usize) -> HorizontalViewport {
     // Safety check: if width is 0 or too small, return empty or minimal content
     if width == 0 {
-        return (String::new(), false, false);
+        return HorizontalViewport {
+            text: String::new(),
+            source_chars: 0..0,
+            precedes: false,
+        };
     }
 
     // Calculate total display width of the line
@@ -83,27 +93,18 @@ fn slice_horizontal_viewport(line: &str, h_offset: usize, width: usize) -> (Stri
 
     // Line fits entirely in viewport
     if total_display_width <= width {
-        return (line.to_string(), false, false);
-    }
-
-    let precedes = h_offset > 0;
-    let extends = h_offset + width < total_display_width;
-
-    // Available width for actual content (reserve space for indicators)
-    let indicator_cols = (if precedes { 1 } else { 0 }) + (if extends { 1 } else { 0 });
-    let content_width = width.saturating_sub(indicator_cols);
-
-    let mut result = String::new();
-
-    // Add precedes indicator (<) if scrolled right
-    if precedes {
-        result.push('<');
+        return HorizontalViewport {
+            text: line.to_string(),
+            source_chars: 0..line.chars().count(),
+            precedes: false,
+        };
     }
 
     // Walk graphemes to find the start position (skip h_offset display columns)
     let mut display_col = 0;
     let mut graphemes = line.graphemes(true).peekable();
 
+    let mut source_start = 0;
     // Skip graphemes until we reach h_offset
     while let Some(&grapheme) = graphemes.peek() {
         let g_width = grapheme_display_width(grapheme);
@@ -111,17 +112,32 @@ fn slice_horizontal_viewport(line: &str, h_offset: usize, width: usize) -> (Stri
             break;
         }
         display_col += g_width;
+        source_start += grapheme.chars().count();
         graphemes.next();
+    }
+
+    let precedes = h_offset > 0;
+    let left_width = usize::from(precedes);
+    // Use the snapped start and account for the left indicator: both can
+    // leave more text offscreen than `h_offset + width` would suggest.
+    let extends =
+        total_display_width - display_col > width - left_width && (!precedes || width > 1);
+    let content_width = width - left_width - usize::from(extends);
+    let mut result = String::new();
+    if precedes {
+        result.push('<');
     }
 
     // Collect graphemes that fit within content_width display columns
     let mut content_display_width = 0;
+    let mut source_end = source_start;
     while let Some(&grapheme) = graphemes.peek() {
         let g_width = grapheme_display_width(grapheme);
         if content_display_width + g_width > content_width {
             break;
         }
         result.push_str(grapheme);
+        source_end += grapheme.chars().count();
         content_display_width += g_width;
         graphemes.next();
     }
@@ -137,7 +153,11 @@ fn slice_horizontal_viewport(line: &str, h_offset: usize, width: usize) -> (Stri
         result.push('>');
     }
 
-    (result, precedes, extends)
+    HorizontalViewport {
+        text: result,
+        source_chars: source_start..source_end,
+        precedes,
+    }
 }
 
 /// Reusable scratch buffers for `shift_highlights_for_viewport` to avoid
@@ -1609,18 +1629,13 @@ pub fn render_buffer(
             let control_ranges = exp.control_ranges;
             let char_mapping = exp.char_mapping;
 
-            // Apply horizontal viewport slicing if nowrap is set. In wrap mode
-            // the rendered slice IS the expanded text — no allocation needed.
-            // We keep the optional sliced String alive in `line_sliced` so
-            // `line_text` can borrow from it (!wrap) or from `expanded_text` (wrap).
-            let (line_sliced, precedes, extends): (Option<String>, bool, bool) = if !wrap {
-                let (sliced, p, e) =
-                    slice_horizontal_viewport(&expanded_text, h_offset, text_width);
-                (Some(sliced), p, e)
-            } else {
-                (None, false, false)
-            };
-            let line_text: &str = line_sliced.as_deref().unwrap_or(&expanded_text);
+            let viewport =
+                (!wrap).then(|| slice_horizontal_viewport(&expanded_text, h_offset, text_width));
+            let precedes = viewport.as_ref().is_some_and(|view| view.precedes);
+            let line_text = viewport
+                .as_ref()
+                .map(|view| view.text.as_str())
+                .unwrap_or(&expanded_text);
 
             // Get syntax highlights for this line and remap them for expanded text
             let original_highlights = buffer.highlights_for_line(line_idx);
@@ -1704,31 +1719,12 @@ pub fn render_buffer(
                         &char_mapping,
                     )
                 };
-                let mut start = expand(start);
-                let mut end = expand(end);
-                if !wrap {
-                    // Keep boundaries exclusive until after clipping, preserving
-                    // all scalars in a grapheme and all cells of an expanded tab.
-                    let left = usize::from(precedes);
-                    let right = line_text
-                        .chars()
-                        .count()
-                        .saturating_sub(usize::from(extends));
-                    // The viewport snaps its left edge to a whole grapheme.
-                    // Subtract that source scalar offset, not the requested
-                    // display offset, which may fall inside a wide character.
-                    let hidden_chars = if precedes {
-                        display_col_to_char_idx(&expanded_text, h_offset)
-                    } else {
-                        0
-                    };
-                    let adjust = |col: usize| {
-                        (col.saturating_sub(hidden_chars) + left).clamp(left, right.max(left))
-                    };
-                    start = adjust(start);
-                    end = adjust(end);
+                let range = expand(start)..expand(end);
+                if let Some(viewport) = &viewport {
+                    viewport.project_range(range)
+                } else {
+                    (!range.is_empty()).then_some(range)
                 }
-                (start < end).then_some(start..end)
             });
 
             // Check if this line has a bracket to highlight (remap through char_mapping)
@@ -1766,91 +1762,50 @@ pub fn render_buffer(
                 bracket_col
             };
 
-            // Reuse diagnostics already fetched for cache check
-            let line_diagnostics = line_diagnostics_early;
-            let has_diagnostics = !line_diagnostics.is_empty();
-            let remapped_diagnostics: Vec<RemappedDiagnostic> = line_diagnostics
-                .iter()
-                .filter_map(|d| {
-                    // This renderer only handles diagnostics that start on this line.
-                    // LSP ranges for multi-line diagnostics are line-relative, so
-                    // clamp the end to line length instead of using end.character.
-                    if d.range.start.line as usize != line_idx {
+            // Underlines cover the complete span. Gutter signs and EOL
+            // messages still use the diagnostics starting on this line.
+            let remapped_diagnostics: Vec<RemappedDiagnostic> = projected_diagnostics
+                .covering(line_idx)
+                .filter_map(|diagnostic| {
+                    let range = ovim_core::lsp::diagnostic_char_range(
+                        diagnostic,
+                        line_idx,
+                        &line_text_original,
+                    )?;
+                    if range.is_empty() {
                         return None;
                     }
-
-                    // Convert UTF-16 offsets to char indices, then remap through expansion
-                    let start_char = utf16_offset_to_char_idx(
-                        &line_text_original,
-                        d.range.start.character as usize,
-                    );
-                    let line_char_count_for_diag = line_text_original.chars().count();
-                    let end_char = if d.range.end.line as usize > line_idx {
-                        line_char_count_for_diag
+                    // A terminal cell cannot underline half a grapheme. Round
+                    // outward before tabs/conceal so accents and ZWJ sequences
+                    // never get split into differently styled spans.
+                    let start = char_to_grapheme_col(&line_text_original, CharCol(range.start));
+                    let last = char_to_grapheme_col(&line_text_original, CharCol(range.end - 1));
+                    let start = grapheme_to_char_col(&line_text_original, start).0;
+                    let end = grapheme_to_char_col(&line_text_original, GraphemeCol(last.0 + 1)).0;
+                    let range =
+                        remap_char_col(start, &char_mapping)..remap_char_col(end, &char_mapping);
+                    let range = if let Some(viewport) = &viewport {
+                        viewport.project_range(range)?
+                    } else if range.is_empty() {
+                        return None;
                     } else {
-                        utf16_offset_to_char_idx(
-                            &line_text_original,
-                            d.range.end.character as usize,
-                        )
-                        .min(line_char_count_for_diag)
+                        range
                     };
-                    let color = match d.severity {
+                    let color = match diagnostic.severity {
                         Some(lsp_types::DiagnosticSeverity::ERROR) => Color::Red,
                         Some(lsp_types::DiagnosticSeverity::WARNING) => Color::Yellow,
                         Some(lsp_types::DiagnosticSeverity::INFORMATION) => Color::Cyan,
                         Some(lsp_types::DiagnosticSeverity::HINT) => Color::Gray,
                         _ => Color::Red,
                     };
-                    let expanded_start = remap_char_col(start_char, &char_mapping);
-                    let expanded_end = remap_char_col(end_char, &char_mapping);
-                    let (expanded_start, expanded_end) = if expanded_start <= expanded_end {
-                        (expanded_start, expanded_end)
-                    } else {
-                        (expanded_end, expanded_start)
-                    };
-                    if expanded_start == expanded_end {
-                        return None;
-                    }
-
-                    // Adjust for horizontal viewport in nowrap mode
-                    if !wrap {
-                        let start_display =
-                            expanded_char_to_display_col(&expanded_text, expanded_start);
-                        let end_display =
-                            expanded_char_to_display_col(&expanded_text, expanded_end);
-                        // Skip if entirely outside viewport
-                        if end_display <= h_offset || start_display >= h_offset + text_width {
-                            return None;
-                        }
-                        let offset_adj = if precedes { 1 } else { 0 };
-                        let mut sliced_start = display_col_to_char_idx(
-                            line_text,
-                            start_display.saturating_sub(h_offset) + offset_adj,
-                        );
-                        let mut sliced_end = display_col_to_char_idx(
-                            line_text,
-                            end_display.saturating_sub(h_offset) + offset_adj,
-                        );
-                        if sliced_start > sliced_end {
-                            std::mem::swap(&mut sliced_start, &mut sliced_end);
-                        }
-                        if sliced_start == sliced_end {
-                            return None;
-                        }
-                        Some(RemappedDiagnostic {
-                            start: sliced_start,
-                            end: sliced_end,
-                            color,
-                        })
-                    } else {
-                        Some(RemappedDiagnostic {
-                            start: expanded_start,
-                            end: expanded_end,
-                            color,
-                        })
-                    }
+                    Some(RemappedDiagnostic {
+                        start: range.start,
+                        end: range.end,
+                        color,
+                    })
                 })
                 .collect();
+            let has_diagnostics = !remapped_diagnostics.is_empty();
             let line_char_count = line_text_original.chars().count();
             let ai_selection_ranges = if let Some(selection) = ai_selection {
                 if line_idx < selection.start_line || line_idx > selection.end_line {
@@ -2086,7 +2041,7 @@ pub fn render_buffer(
                                 &gutter_ctx,
                                 line_idx,
                                 row_idx > 0,
-                                line_diagnostics,
+                                line_diagnostics_early,
                                 blame_brackets
                                     .as_ref()
                                     .and_then(|b| b.get(line_idx - start_line)),
@@ -2112,7 +2067,7 @@ pub fn render_buffer(
                             &gutter_ctx,
                             line_idx,
                             false,
-                            line_diagnostics,
+                            line_diagnostics_early,
                             blame_brackets
                                 .as_ref()
                                 .and_then(|b| b.get(line_idx - start_line)),
@@ -2557,71 +2512,43 @@ mod tests {
         assert_eq!(text, "ab  "); // padded
     }
 
-    // --- slice_horizontal_viewport tests ---
-
     #[test]
-    fn test_slice_viewport_ascii_fits() {
-        let (text, precedes, extends) = slice_horizontal_viewport("hello", 0, 10);
-        assert_eq!(text, "hello");
-        assert!(!precedes);
-        assert!(!extends);
+    fn horizontal_viewport_preserves_graphemes_and_excludes_indicators_and_padding() {
+        for (line, offset, width, expected, highlighted) in [
+            ("hello", 0, 10, "hello", Some(0..5)),
+            ("hello world!", 0, 6, "hello>", Some(0..5)),
+            ("hello world!", 3, 6, "<lo w>", Some(1..5)),
+            ("a世b", 0, 5, "a世b", Some(0..3)),
+            ("a世b世c", 0, 5, "a世b>", Some(0..3)),
+            ("a世b世c", 3, 5, "<b世c", Some(1..4)),
+            ("a界b界c", 0, 3, "a >", Some(0..1)),
+            ("a界b界c", 1, 4, "<界>", Some(1..2)),
+            ("界word", 1, 5, "<界w>", Some(1..3)),
+            ("hello", 0, 0, "", None),
+            ("hello", 0, 1, ">", None),
+            ("hello", 3, 1, "<", None),
+        ] {
+            let viewport = slice_horizontal_viewport(line, offset, width);
+            assert_eq!(
+                viewport.text, expected,
+                "line={line:?}, offset={offset}, width={width}"
+            );
+            assert_eq!(
+                viewport.project_range(0..usize::MAX),
+                highlighted,
+                "line={line:?}"
+            );
+        }
     }
 
     #[test]
-    fn test_slice_viewport_ascii_extends() {
-        let (text, precedes, extends) = slice_horizontal_viewport("hello world!", 0, 6);
-        assert_eq!(text.len(), 6);
-        assert!(!precedes);
-        assert!(extends);
-        assert!(text.ends_with('>'));
-    }
-
-    #[test]
-    fn test_slice_viewport_ascii_scrolled() {
-        // "hello world!" scrolled 3 display cols, width 6
-        let (text, precedes, extends) = slice_horizontal_viewport("hello world!", 3, 6);
-        assert!(precedes);
-        assert!(extends);
-        assert_eq!(text.chars().next(), Some('<'));
-        assert!(text.ends_with('>'));
-        assert_eq!(text.chars().count(), 6);
-    }
-
-    #[test]
-    fn test_slice_viewport_cjk_fits() {
-        // "a世b" has display width 4 (1+2+1)
-        let (text, precedes, extends) = slice_horizontal_viewport("a世b", 0, 5);
-        assert_eq!(text, "a世b");
-        assert!(!precedes);
-        assert!(!extends);
-    }
-
-    #[test]
-    fn test_slice_viewport_cjk_extends() {
-        // "a世b世c" has display width 8 (1+2+1+2+1), viewport width 5
-        let (text, precedes, extends) = slice_horizontal_viewport("a世b世c", 0, 5);
-        assert!(!precedes);
-        assert!(extends);
-        // Should fit "a世b" (4 cols) + '>' = 5 display cols total
-        assert!(text.ends_with('>'));
-    }
-
-    #[test]
-    fn test_slice_viewport_cjk_scrolled() {
-        // "a世b世c" scrolled past 'a' and '世' (3 display cols), width 5
-        let (text, precedes, extends) = slice_horizontal_viewport("a世b世c", 3, 5);
-        assert!(precedes);
-        assert!(!extends);
-        // Should show '<' + content from display col 3 + possibly '>'
-        assert_eq!(text.chars().next(), Some('<'));
-    }
-
-    #[test]
-    fn test_slice_viewport_zero_width() {
-        let (text, precedes, extends) = slice_horizontal_viewport("hello", 0, 0);
-        assert_eq!(text, "");
-        assert!(!precedes);
-        assert!(!extends);
+    fn horizontal_viewport_clips_ranges_to_the_displayed_source_characters() {
+        let viewport = slice_horizontal_viewport("é word tail", 2, 6);
+        assert_eq!(viewport.text, "<word>");
+        assert_eq!(viewport.project_range(0..2), None);
+        assert_eq!(viewport.project_range(3..5), Some(1..3));
+        assert_eq!(viewport.project_range(5..20), Some(3..5));
+        assert_eq!(viewport.project_range(7..20), None);
     }
 
     // --- Helper function tests ---
@@ -2641,18 +2568,6 @@ mod tests {
         assert_eq!(display_col_to_char_idx("a世b", 1), 1);
         assert_eq!(display_col_to_char_idx("a世b", 2), 1); // mid-wide → same char
         assert_eq!(display_col_to_char_idx("a世b", 3), 2);
-    }
-
-    #[test]
-    fn test_utf16_offset_to_char_idx() {
-        // ASCII: 1 UTF-16 unit per char
-        assert_eq!(utf16_offset_to_char_idx("hello", 2), 2);
-        // BMP CJK: 1 UTF-16 unit per char
-        assert_eq!(utf16_offset_to_char_idx("a世b", 1), 1);
-        assert_eq!(utf16_offset_to_char_idx("a世b", 2), 2);
-        // Supplementary (emoji): 2 UTF-16 units
-        assert_eq!(utf16_offset_to_char_idx("a😀b", 1), 1); // start of emoji
-        assert_eq!(utf16_offset_to_char_idx("a😀b", 3), 2); // after emoji (2 UTF-16 units)
     }
 
     #[test]
