@@ -21,6 +21,9 @@ use anyhow::Result;
 ///
 /// This dispatcher tries each handler in priority order until one handles the key.
 pub fn handle_normal_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()> {
+    if editor.handle_pseudocode_key(key_event) {
+        return Ok(());
+    }
     // The test panel is passive rather than focused, so Escape must hide it
     // even when a pending operator or multi-key command consumes the key.
     if key_event.code == KeyCode::Esc {

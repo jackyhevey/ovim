@@ -459,6 +459,37 @@ fn handle_value_option(name: &str, value: &str, editor: &mut Editor) -> Option<C
 // Public entry point
 // ---------------------------------------------------------------------------
 
+fn handle_pseudocode_option(editor: &mut Editor, args: &str) -> Option<CommandResult> {
+    let (name, value) = args
+        .split_once('=')
+        .map_or((args, None), |(name, value)| (name, Some(value)));
+    let enabled = match (name, value) {
+        ("pseudo?" | "pseudocode?", None) => {
+            return Some(ok(Some(format!(
+                "  {}pseudocode",
+                if editor.is_pseudocode_buffer() {
+                    ""
+                } else {
+                    "no"
+                }
+            ))))
+        }
+        ("pseudo" | "pseudocode", None) => true,
+        ("nopseudo" | "nopseudocode" | "pseudo&" | "pseudocode&", None) => false,
+        ("pseudo!" | "pseudocode!", None) => !editor.is_pseudocode_buffer(),
+        ("pseudo" | "pseudocode", Some("true" | "on" | "1")) => true,
+        ("pseudo" | "pseudocode", Some("false" | "off" | "0")) => false,
+        ("pseudo" | "pseudocode", Some(_)) => {
+            return Some(err("pseudocode expects on/off or true/false"))
+        }
+        _ => return None,
+    };
+    Some(match editor.set_pseudocode(enabled) {
+        Ok(()) => ok(None),
+        Err(error) => err(error.to_string()),
+    })
+}
+
 fn handle_pullbase_path(editor: &mut Editor, option: &str, path: &str) -> CommandResult {
     let path = match crate::native_diff::pullbase_directory(path) {
         Ok(path) => path,
@@ -504,6 +535,9 @@ fn handle_pullbase_path(editor: &mut Editor, option: &str, path: &str) -> Comman
 ///
 /// This replaces `handle_set_command` in `commands.rs`.
 pub fn handle_set_command(editor: &mut Editor, args: &str) -> CommandResult {
+    if let Some(result) = handle_pseudocode_option(editor, args) {
+        return result;
+    }
     // The path consumes the remainder, allowing directory names with spaces.
     if let Some((option, path)) = args.split_once(" path=") {
         if option.starts_with("pullbase") || option == "nopullbase" {

@@ -72,6 +72,7 @@ mod performance;
 pub mod picker;
 mod picker_manager;
 pub mod picker_state;
+mod pseudocode;
 mod quickfix;
 mod register;
 mod render_cache;
@@ -2056,6 +2057,10 @@ impl Editor {
 
     /// Handles a bracketed paste event (for all supported modes, including chat input).
     pub fn handle_paste_event(&mut self, text: &str) -> Result<()> {
+        if self.is_pseudocode_buffer() && !matches!(self.mode(), Mode::Command | Mode::Search) {
+            self.set_status_message("Pseudocode is a reading view; press Enter to edit source");
+            return Ok(());
+        }
         if text.is_empty() {
             return Ok(());
         }

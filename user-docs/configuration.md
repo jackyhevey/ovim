@@ -267,3 +267,9 @@ override applies.
 hover over an annotation to see its commit, author, date, and message without
 moving the cursor. Move away or type to dismiss the preview. Click an annotation
 or use `gb` for the existing keyboard-controlled popup; `gB` opens the commit diff.
+
+### Pseudocode
+
+`:set pseudo` opens a source-mapped Java or Markdown reading view with types and
+formatting noise concealed. Use `:set nopseudo` to return to source. See
+[pseudocode reading view](pseudocode.md) for transformations, navigation, and Lua usage.

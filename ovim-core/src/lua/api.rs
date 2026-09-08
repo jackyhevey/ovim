@@ -398,6 +398,10 @@ fn create_opt_table(lua: &Lua, bridge: EditorBridge) -> Result<Table<'_>> {
                     mlua::Value::Boolean(false) => "set noblame".to_string(),
                     _ => return Err(mlua::Error::external("blame must be boolean")),
                 },
+                "pseudo" | "pseudocode" => match value {
+                    mlua::Value::Boolean(enabled) => format!("set pseudocode={enabled}"),
+                    _ => return Err(mlua::Error::external("pseudocode must be boolean")),
+                },
                 "pullbase" => match value {
                     mlua::Value::Nil => "set pullbase=".to_string(),
                     mlua::Value::String(s) => {

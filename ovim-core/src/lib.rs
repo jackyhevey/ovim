@@ -37,6 +37,7 @@ pub mod motion_range;
 pub mod native_diff;
 pub mod navigation_types;
 pub mod number_ops;
+pub mod pseudocode;
 pub mod rect;
 pub mod repeat_action;
 pub mod run_log;

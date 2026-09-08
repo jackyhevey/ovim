@@ -10,6 +10,9 @@ use crate::dashboard::DashboardAnimation;
 /// path completion, dashboard, cat animation, diagnostics, and toast notifications.
 #[derive(Default)]
 pub struct UiPanels {
+    /// Source-mapped reading buffers, keyed by their own buffer IDs.
+    pub pseudocode:
+        std::collections::HashMap<crate::buffer::BufferId, super::pseudocode::PseudocodeView>,
     /// Latest user-facing status message shown by the editor UI.
     pub status_message: String,
     /// File tree explorer

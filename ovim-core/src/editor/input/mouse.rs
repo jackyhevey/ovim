@@ -13,6 +13,14 @@ use super::code_explanation_mode;
 /// Top-level mouse event dispatcher.
 /// Returns `Ok(Some(url))` when a concealed markdown link was clicked and should be opened.
 pub fn handle_mouse_event(editor: &mut Editor, event: MouseEvent) -> Result<Option<String>> {
+    if editor.is_pseudocode_buffer()
+        && matches!(
+            event.kind,
+            MouseEventKind::Drag(_) | MouseEventKind::Down(MouseButton::Middle)
+        )
+    {
+        return Ok(None);
+    }
     if code_explanation_mode::blocks_pointer_event(editor, &event.kind) {
         return Ok(None);
     }

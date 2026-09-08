@@ -209,6 +209,45 @@ pub fn jump_to_quickfix_entry(editor: &mut Editor, entry: &QuickfixEntry) -> Com
 
 /// Execute a command (e.g., :w, :q, :tabnew)
 pub fn execute_command(editor: &mut Editor, command: &str) -> CommandResult {
+    if editor.is_pseudocode_buffer() {
+        if matches!(
+            command,
+            "q" | "q!" | "quit" | "quit!" | "bd" | "bd!" | "bdelete" | "bdelete!"
+        ) {
+            return match editor.set_pseudocode(false) {
+                Ok(()) => ok_silent(),
+                Err(error) => err(error.to_string()),
+            };
+        }
+        let verb = command.split_whitespace().next().unwrap_or("");
+        if !matches!(
+            verb,
+            "set"
+                | "se"
+                | "ls"
+                | "buffers"
+                | "bn"
+                | "bnext"
+                | "bp"
+                | "bprev"
+                | "e"
+                | "edit"
+                | "tabnext"
+                | "tabprevious"
+                | "tabnew"
+                | "sp"
+                | "split"
+                | "vsp"
+                | "vsplit"
+                | "qa"
+                | "qa!"
+                | "qall"
+                | "qall!"
+        ) && !command.chars().all(|c| c.is_ascii_digit())
+        {
+            return err("Pseudocode is a reading view; press Enter to edit or save source");
+        }
+    }
     // Intercept write/quit commands when in a chat scratch buffer
     if editor.is_chat_scratch_buffer() {
         match command {
