@@ -224,3 +224,51 @@ fn pullbase_lua_options_set_and_clear_through_editor_commands() {
         "function"
     );
 }
+
+#[test]
+fn pullbase_lua_path_overrides_support_spaces_and_clear_individually() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("project with spaces");
+    std::fs::create_dir(&path).unwrap();
+    let canonical = path.canonicalize().unwrap();
+    let path_literal = format!("{:?}", path.to_str().unwrap());
+    let mut editor = Editor::new();
+    editor.enable_lua().unwrap();
+    editor.execute_lua("ovim.opt.pullbase = 'main'").unwrap();
+    for namespace in ["ovim", "vim"] {
+        editor
+            .execute_lua(&format!(
+                "{namespace}.opt.pullbase = {{ path = {path_literal}, branch = 'develop' }}"
+            ))
+            .unwrap();
+        editor.process_lua_commands().unwrap();
+        assert_eq!(
+            editor
+                .options
+                .pullbase_paths
+                .get(&canonical)
+                .map(String::as_str),
+            Some("develop")
+        );
+        assert_eq!(editor.options.pullbase.as_deref(), Some("main"));
+        for fields in [
+            "branch = true",
+            "branch = 'main..feature'",
+            "brnach = 'develop'",
+        ] {
+            assert!(editor
+                .execute_lua(&format!(
+                    "{namespace}.opt.pullbase = {{ path = {path_literal}, {fields} }}"
+                ))
+                .is_err());
+        }
+        editor
+            .execute_lua(&format!(
+                "{namespace}.opt.pullbase = {{ path = {path_literal}, branch = nil }}"
+            ))
+            .unwrap();
+        editor.process_lua_commands().unwrap();
+        assert!(editor.options.pullbase_paths.is_empty());
+        assert_eq!(editor.options.pullbase.as_deref(), Some("main"));
+    }
+}

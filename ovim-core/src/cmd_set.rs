@@ -458,10 +458,56 @@ fn handle_value_option(name: &str, value: &str, editor: &mut Editor) -> Option<C
 // Public entry point
 // ---------------------------------------------------------------------------
 
+fn handle_pullbase_path(editor: &mut Editor, option: &str, path: &str) -> CommandResult {
+    let path = match crate::native_diff::pullbase_directory(path) {
+        Ok(path) => path,
+        Err(error) => return err(format!("{error:#}")),
+    };
+    if option == "pullbase?" {
+        return ok(Some(format!(
+            "  pullbase={} path={}",
+            editor
+                .options
+                .pullbase_paths
+                .get(&path)
+                .map(String::as_str)
+                .unwrap_or(""),
+            path.display()
+        )));
+    }
+    let branch = match option {
+        "pullbase&" | "nopullbase" => "",
+        _ => match option.strip_prefix("pullbase=") {
+            Some(branch) => branch,
+            None => return err("Use set pullbase=<branch> path=<directory>"),
+        },
+    };
+    if !branch.is_empty() && !crate::native_diff::valid_pullbase(branch) {
+        return err("pullbase must be a branch name");
+    }
+    let message = format!("  pullbase={branch} path={}", path.display());
+    if branch.is_empty() {
+        editor.options.pullbase_paths.remove(&path);
+    } else {
+        editor
+            .options
+            .pullbase_paths
+            .insert(path, branch.to_string());
+    }
+    editor.refresh_diff_review();
+    ok(Some(message))
+}
+
 /// Handle `:set` commands for options.
 ///
 /// This replaces `handle_set_command` in `commands.rs`.
 pub fn handle_set_command(editor: &mut Editor, args: &str) -> CommandResult {
+    // The path consumes the remainder, allowing directory names with spaces.
+    if let Some((option, path)) = args.split_once(" path=") {
+        if option.starts_with("pullbase") || option == "nopullbase" {
+            return handle_pullbase_path(editor, option, path);
+        }
+    }
     // Handle empty :set (show all options)
     if args.is_empty() {
         let opts = &editor.options;

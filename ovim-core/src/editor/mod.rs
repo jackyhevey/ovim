@@ -254,6 +254,8 @@ pub struct EditorOptions {
     pub blame: bool,
     /// Default branch for diff review; None selects the repository default.
     pub pullbase: Option<String>,
+    /// Canonical directory overrides; the closest ancestor of the repo root wins.
+    pub pullbase_paths: std::collections::BTreeMap<std::path::PathBuf, String>,
     /// Conceal markdown constructs (links, images) when rendering (default: true)
     pub markdown_conceal: bool,
     /// Background color for textwidth margins
@@ -297,6 +299,7 @@ impl Default for EditorOptions {
             file_tree_reveal: true,
             blame: false,
             pullbase: None,
+            pullbase_paths: Default::default(),
             markdown_conceal: true,
             margin_color: MarginColor::None,
             margin_padding: 0,

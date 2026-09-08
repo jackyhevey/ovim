@@ -231,3 +231,27 @@ ovim.opt.pullbase = nil -- restore automatic selection
 
 `vim.opt.pullbase` supports the same assignments. The branch must exist when
 opening or refreshing the review; it need not exist when loading configuration.
+
+To override the base for one project (or a directory containing several projects):
+
+```vim
+:set pullbase=develop path=~/Projects/example
+:set pullbase? path=~/Projects/example
+:unset pullbase path=~/Projects/example
+```
+
+In Lua, assign a table to add or remove one override:
+
+```lua
+ovim.opt.pullbase = { path = "~/Projects/example", branch = "develop" }
+ovim.opt.pullbase = { path = "~/Projects/example", branch = nil } -- remove this override
+```
+
+The most specific directory containing the Git worktree root wins, followed by
+the global `pullbase`, then automatic selection. Explicit `:GitDiff <ref>` still
+takes precedence. Matching uses the repository root, even when opening a file
+in a subdirectory. Paths must name existing directories; `~`, relative paths
+(from the current working directory), and symlinks are resolved when setting
+the override. In Ex commands, `path=` consumes the rest of the line, so paths
+with spaces need no quotes. Clearing a path override preserves the global
+setting and all other overrides; clearing the global setting preserves overrides.

@@ -284,7 +284,7 @@ impl Editor {
         let root_hint = self.diff_review_root_hint();
         let base = match explicit_spec {
             Some(spec) => ReviewBase::explicit(spec),
-            None => native_diff::resolve_pullbase(&root_hint, self.options.pullbase.as_deref())?,
+            None => self.resolve_review_base(&root_hint)?,
         };
         let patch = native_diff::review_patch(&root_hint, &base)?;
 
@@ -347,7 +347,7 @@ impl Editor {
 
         let base = match explicit.as_deref() {
             Some(spec) => Ok(ReviewBase::explicit(spec)),
-            None => native_diff::resolve_pullbase(&root, self.options.pullbase.as_deref()),
+            None => self.resolve_review_base(&root),
         };
         let base = match base {
             Ok(base) => base,
@@ -614,7 +614,7 @@ impl Editor {
         let root = self.diff_review_root_hint();
         let base = match self.ui_panels.diff_review.as_ref() {
             Some(state) if state.explicit_spec.is_some() => Ok(state.patch.base.clone()),
-            _ => native_diff::resolve_pullbase(&root, self.options.pullbase.as_deref()),
+            _ => self.resolve_review_base(&root),
         };
         let remote = match base {
             Ok(base) => base.remote,
@@ -884,6 +884,15 @@ impl Editor {
         if self.current_buffer_index > index {
             self.current_buffer_index -= 1;
         }
+    }
+
+    fn resolve_review_base(&self, path: &Path) -> anyhow::Result<ReviewBase> {
+        let branch = native_diff::pullbase_for_path(
+            path,
+            self.options.pullbase.as_deref(),
+            &self.options.pullbase_paths,
+        )?;
+        native_diff::resolve_pullbase(path, branch)
     }
 
     fn diff_review_root_hint(&self) -> PathBuf {

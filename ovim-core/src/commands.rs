@@ -377,6 +377,10 @@ pub fn execute_command(editor: &mut Editor, command: &str) -> CommandResult {
                 None => err("GitDiffLayout: use split or unified"),
             }
         }
+        cmd if cmd.starts_with("unset pullbase path=") => {
+            let path = cmd.strip_prefix("unset pullbase path=").unwrap();
+            crate::cmd_set::handle_set_command(editor, &format!("pullbase= path={path}"))
+        }
         "unset pullbase" => crate::cmd_set::handle_set_command(editor, "pullbase="),
         "GitFetch" | "gitfetch" => {
             editor.fetch_review_base();

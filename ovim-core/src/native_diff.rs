@@ -167,6 +167,37 @@ pub fn valid_pullbase(branch: &str) -> bool {
     !branch.starts_with('-') && git2::Reference::is_valid_name(&format!("refs/heads/{branch}"))
 }
 
+/// Normalize an override directory at configuration time, including home expansion.
+pub fn pullbase_directory(path: &str) -> Result<std::path::PathBuf> {
+    anyhow::ensure!(!path.is_empty(), "pullbase path cannot be empty");
+    let expanded = shellexpand::tilde(path);
+    let path = Path::new(expanded.as_ref())
+        .canonicalize()
+        .with_context(|| format!("Cannot resolve pullbase path '{path}'"))?;
+    anyhow::ensure!(path.is_dir(), "pullbase path must be a directory");
+    Ok(path)
+}
+
+/// Select the most specific override against the repository root, independent
+/// of which source directory was used to open the review.
+pub fn pullbase_for_path<'a>(
+    path: &Path,
+    global: Option<&'a str>,
+    overrides: &'a std::collections::BTreeMap<std::path::PathBuf, String>,
+) -> Result<Option<&'a str>> {
+    let repo = Repository::discover(path)?;
+    let root = repo
+        .workdir()
+        .context("Diff review requires a Git worktree")?
+        .canonicalize()?;
+    Ok(overrides
+        .iter()
+        .filter(|(directory, _)| root.starts_with(directory))
+        .max_by_key(|(directory, _)| directory.components().count())
+        .map(|(_, branch)| branch.as_str())
+        .or(global))
+}
+
 /// Resolve a configured branch, preserving remote metadata for base fetching.
 pub fn resolve_pullbase(path: &Path, branch: Option<&str>) -> Result<ReviewBase> {
     let Some(branch) = branch else {

@@ -827,3 +827,67 @@ fn pullbase_resolves_remote_metadata_and_reports_missing_branches() {
     assert_eq!(base.spec, "origin/release/stable...WORKTREE");
     assert!(ovim_core::native_diff::resolve_pullbase(&fixture.root, Some("missing")).is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pullbase_path_override_refreshes_and_unsets_without_changing_global() {
+    use ovim_core::command_result::CommandResult;
+    use ovim_core::commands::execute_command;
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    execute_command(&mut test.editor, "set pullbase=main");
+    execute_command(&mut test.editor, "GitDiff");
+    let path = fixture.root.display();
+    assert!(matches!(
+        execute_command(
+            &mut test.editor,
+            &format!("set pullbase=feature path={path}")
+        ),
+        CommandResult::Success(_)
+    ));
+    assert_eq!(test.editor.diff_review().unwrap().base().name, "feature");
+    assert_eq!(test.editor.options.pullbase.as_deref(), Some("main"));
+    test.editor.refresh_diff_review();
+    assert_eq!(test.editor.diff_review().unwrap().base().name, "feature");
+    let query = execute_command(&mut test.editor, &format!("set pullbase? path={path}"));
+    assert!(matches!(query, CommandResult::Success(ref response)
+        if response.message.as_deref() == Some(format!("  pullbase=feature path={path}").as_str())));
+    execute_command(&mut test.editor, "GitDiff main");
+    assert_eq!(test.editor.diff_review().unwrap().base().name, "main");
+    execute_command(&mut test.editor, "GitDiff");
+    assert_eq!(test.editor.diff_review().unwrap().base().name, "feature");
+    execute_command(&mut test.editor, &format!("unset pullbase path={path}"));
+    assert_eq!(test.editor.diff_review().unwrap().base().name, "main");
+    assert!(test.editor.options.pullbase_paths.is_empty());
+    assert_eq!(test.editor.options.pullbase.as_deref(), Some("main"));
+}
+
+#[test]
+fn pullbase_path_matching_uses_repo_root_and_closest_directory() {
+    use ovim_core::native_diff::pullbase_for_path;
+    use std::collections::BTreeMap;
+    let fixture = Fixture::new();
+    let nested = fixture.root.join("source directory");
+    fs::create_dir(&nested).unwrap();
+    let mut overrides = BTreeMap::new();
+    overrides.insert(
+        fixture.root.parent().unwrap().to_path_buf(),
+        "parent".into(),
+    );
+    overrides.insert(fixture.root.clone(), "project".into());
+    overrides.insert(nested.clone(), "source".into());
+    assert_eq!(
+        pullbase_for_path(&nested, Some("global"), &overrides).unwrap(),
+        Some("project")
+    );
+    overrides.remove(&fixture.root);
+    assert_eq!(
+        pullbase_for_path(&nested, Some("global"), &overrides).unwrap(),
+        Some("parent")
+    );
+    overrides.remove(fixture.root.parent().unwrap());
+    assert_eq!(
+        pullbase_for_path(&nested, Some("global"), &overrides).unwrap(),
+        Some("global")
+    );
+    assert_eq!(pullbase_for_path(&nested, None, &overrides).unwrap(), None);
+}
