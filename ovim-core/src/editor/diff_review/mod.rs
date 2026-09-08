@@ -658,6 +658,7 @@ impl Editor {
         };
         match pending.receiver.try_recv() {
             Ok(Ok(())) => {
+                self.refresh_pullbase_gutters();
                 let refreshed = self.review_buffer_index().is_some();
                 if refreshed {
                     self.refresh_diff_review();

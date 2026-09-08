@@ -527,6 +527,7 @@ impl Editor {
                             let modeline =
                                 crate::modeline::Modeline::parse(&buffer.rope().to_string());
                             self.initialize_buffer_indent_options(&mut buffer);
+                            self.initialize_buffer_git_status(&mut buffer);
                             self.buffers[self.current_buffer_index] = buffer;
                             if let Some(modeline) = modeline.as_ref() {
                                 self.apply_modeline(modeline);
@@ -1149,6 +1150,7 @@ impl Editor {
         }
 
         self.lsp.state.diagnostic_count = (0, 0, 0, 0);
+        self.lsp.state.blame_mouse_hover = false;
         self.lsp.state.hover_info = None;
         self.lsp.state.hover_scroll = 0;
         self.lsp.state.hover_h_scroll = 0;

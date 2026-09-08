@@ -453,10 +453,44 @@ impl Editor {
         }
     }
 
+    /// Recompute signs when pullbase changes, invalidating older background results.
+    pub fn refresh_pullbase_gutters(&mut self) {
+        self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);
+        for index in 0..self.buffers.len() {
+            if let Some(path) = self.buffers[index].file_path() {
+                let status = self.git_status_for_path(path);
+                self.buffers[index].set_git_status(status);
+            }
+        }
+        self.mark_dirty();
+    }
+
+    fn git_status_for_path(&self, path: &str) -> crate::git::GitStatus {
+        crate::native_diff::pullbase_for_path(
+            std::path::Path::new(path),
+            self.options.pullbase.as_deref(),
+            &self.options.pullbase_paths,
+        )
+        .and_then(|branch| crate::git::GitStatus::from_file_with_pullbase(path, branch))
+        .unwrap_or_default()
+    }
+
+    pub(crate) fn initialize_buffer_git_status(&self, buffer: &mut crate::buffer::Buffer) {
+        if self.options.pullbase.is_some() || !self.options.pullbase_paths.is_empty() {
+            if let Some(path) = buffer.file_path() {
+                let status = self.git_status_for_path(path);
+                buffer.set_git_status(status);
+            }
+        }
+    }
+
     /// Drains completed background git refresh results. Returns true if any applied.
     pub fn poll_git_refresh(&mut self) -> bool {
         let mut changed = false;
         while let Ok(result) = self.git_refresh_rx.try_recv() {
+            if result.generation != self.git_refresh_generation {
+                continue;
+            }
             // Apply to the buffer whose file path matches the refresh result.
             let matching = self
                 .buffers
@@ -479,8 +513,17 @@ impl Editor {
     pub fn spawn_git_refresh(&self, path: &str, blame_enabled: bool) {
         let path = path.to_string();
         let tx = self.git_refresh_tx.clone();
+        let generation = self.git_refresh_generation;
+        let global = self.options.pullbase.clone();
+        let overrides = self.options.pullbase_paths.clone();
         tokio::task::spawn_blocking(move || {
-            let status = crate::git::GitStatus::from_file(&path).ok();
+            let status = crate::native_diff::pullbase_for_path(
+                std::path::Path::new(&path),
+                global.as_deref(),
+                &overrides,
+            )
+            .and_then(|branch| crate::git::GitStatus::from_file_with_pullbase(&path, branch))
+            .ok();
             let blame = if blame_enabled {
                 crate::git::GitBlame::from_file(&path)
                     .ok()
@@ -489,6 +532,7 @@ impl Editor {
                 None
             };
             let _ = tx.blocking_send(super::GitRefreshResult {
+                generation,
                 path,
                 status,
                 blame,

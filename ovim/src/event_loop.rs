@@ -289,9 +289,9 @@ fn process_input_events(editor: &mut Editor, events: Vec<Event>) -> Result<bool>
                 if editor.has_codex_auth_dialog() {
                     continue;
                 }
-                // Skip mouse-move events — they don't change editor state and
-                // would otherwise trigger unnecessary redraws on every movement.
                 if matches!(mouse_event.kind, crossterm::event::MouseEventKind::Moved) {
+                    // Blame hover marks dirty only when the hovered line changes.
+                    handle_mouse_event(editor, convert_mouse_event(mouse_event))?;
                     continue;
                 }
                 let mouse = convert_mouse_event(mouse_event);
@@ -374,6 +374,9 @@ pub async fn run_event_loop(
                         }
                     }
 
+                    let only_pointer_moves = events.iter().all(|event| matches!(event,
+                        Event::Mouse(mouse) if mouse.kind == crossterm::event::MouseEventKind::Moved
+                    ));
                     let had_edit = process_input_events(editor, events)?;
                     if had_edit {
                         last_edit = Instant::now();
@@ -381,7 +384,9 @@ pub async fn run_event_loop(
 
                     // Mark dirty and immediately refresh the visible syntax
                     // once after all events processed.
-                    refresh_after_input(editor);
+                    if !only_pointer_moves || editor.is_dirty() {
+                        refresh_after_input(editor);
+                    }
 
                     // Immediately process LSP actions triggered by input
                     editor.dispatch_pending_intents().await;

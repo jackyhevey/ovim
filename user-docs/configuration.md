@@ -255,3 +255,15 @@ in a subdirectory. Paths must name existing directories; `~`, relative paths
 the override. In Ex commands, `path=` consumes the rest of the line, so paths
 with spaces need no quotes. Clearing a path override preserves the global
 setting and all other overrides; clearing the global setting preserves overrides.
+
+The `+`/`-` line-change gutter normally shows uncommitted changes against `HEAD`.
+When a global or matching path-specific `pullbase` is configured, it shows
+changes since that branch's merge-base with `HEAD`, like the branch review.
+Setting or clearing an override refreshes signs in open buffers. `<Space>gd`
+and `:GitDiff` continue to default to the repository's default branch when no
+override applies.
+
+`:blame` separately toggles line-author annotations. In the terminal editor,
+hover over an annotation to see its commit, author, date, and message without
+moving the cursor. Move away or type to dismiss the preview. Click an annotation
+or use `gb` for the existing keyboard-controlled popup; `gB` opens the commit diff.

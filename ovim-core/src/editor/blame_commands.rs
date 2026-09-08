@@ -6,13 +6,17 @@ use crate::git::{commit_diff, commit_info, is_zero_oid};
 impl Editor {
     /// Shows a hover popup with commit metadata for the current line (`gb`).
     pub fn show_blame_info(&mut self) {
+        let line = self.buffer().cursor().line();
+        let col = self.buffer().cursor().col().0;
+        self.show_blame_info_at(line, col);
+    }
+
+    /// Show commit details at a source line without moving the editing cursor.
+    pub(crate) fn show_blame_info_at(&mut self, cursor_line: usize, cursor_col: usize) {
         let file_path = match self.buffer().file_path() {
             Some(p) => p.to_string(),
             None => return,
         };
-
-        let cursor_line = self.buffer().cursor().line();
-        let cursor_col = self.buffer().cursor().col().0;
 
         // Resolve the OID for this line
         let oid = self.resolve_blame_oid(&file_path, cursor_line);
@@ -47,6 +51,32 @@ impl Editor {
                     cursor_col,
                 );
             }
+        }
+    }
+
+    pub fn blame_mouse_hover_active(&self) -> bool {
+        self.lsp.state.blame_mouse_hover
+    }
+
+    pub(crate) fn dismiss_blame_mouse_hover(&mut self) {
+        if self.blame_mouse_hover_active() {
+            self.clear_hover();
+            self.mark_dirty();
+        }
+    }
+
+    pub(crate) fn hover_blame_line(&mut self, line: usize) {
+        if self.blame_mouse_hover_active() && self.hover_position() == Some((line, 0)) {
+            return;
+        }
+        // Pointer previews must not take over insert/visual modes or other overlays.
+        if self.mode != crate::mode::Mode::Normal {
+            return;
+        }
+        self.show_blame_info_at(line, 0);
+        if self.mode == crate::mode::Mode::HoverPreview {
+            self.mode = crate::mode::Mode::Normal;
+            self.lsp.state.blame_mouse_hover = true;
         }
     }
 
@@ -92,6 +122,7 @@ impl Editor {
 
     /// Shows a blame hover popup with the given text.
     fn show_blame_popup(&mut self, text: &str, line: usize, col: usize) {
+        self.lsp.state.blame_mouse_hover = false;
         self.lsp.state.hover_info = Some(text.to_string());
         self.lsp.state.hover_scroll = 0;
         self.lsp.state.hover_h_scroll = 0;

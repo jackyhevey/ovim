@@ -418,6 +418,7 @@ fn handle_value_option(name: &str, value: &str, editor: &mut Editor) -> Option<C
                 return Some(err("pullbase must be a branch name"));
             }
             editor.options.pullbase = (!value.is_empty()).then(|| value.to_string());
+            editor.refresh_pullbase_gutters();
             editor.refresh_diff_review();
             ok(Some(format!("  pullbase={value}")))
         }
@@ -494,6 +495,7 @@ fn handle_pullbase_path(editor: &mut Editor, option: &str, path: &str) -> Comman
             .pullbase_paths
             .insert(path, branch.to_string());
     }
+    editor.refresh_pullbase_gutters();
     editor.refresh_diff_review();
     ok(Some(message))
 }

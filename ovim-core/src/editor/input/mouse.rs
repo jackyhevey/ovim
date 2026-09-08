@@ -17,7 +17,19 @@ pub fn handle_mouse_event(editor: &mut Editor, event: MouseEvent) -> Result<Opti
         return Ok(None);
     }
 
+    if event.kind != MouseEventKind::Moved {
+        editor.dismiss_blame_mouse_hover();
+    }
     match event.kind {
+        MouseEventKind::Moved => {
+            if editor.options.blame {
+                if let Some(line) = is_blame_click(editor, event.column, event.row) {
+                    editor.hover_blame_line(line);
+                    return Ok(None);
+                }
+            }
+            editor.dismiss_blame_mouse_hover();
+        }
         MouseEventKind::Down(MouseButton::Left) => {
             return handle_left_click(editor, event.column, event.row);
         }
@@ -278,15 +290,14 @@ fn is_blame_click(editor: &Editor, screen_col: u16, screen_row: u16) -> Option<u
                     .viewport_top_visual_row(editor.scroll_offset(), editor.scroll_subrow());
                 let absolute_visual_row = rel_row + viewport_visual_row;
                 let (logical_line, _sub_line) = wrap_map.visual_to_logical(absolute_visual_row);
-                logical_line.min(editor.buffer().line_count().saturating_sub(1))
+                logical_line
             } else {
-                (rel_row + editor.scroll_offset())
-                    .min(editor.buffer().line_count().saturating_sub(1))
+                rel_row + editor.scroll_offset()
             }
         } else {
-            (rel_row + editor.scroll_offset()).min(editor.buffer().line_count().saturating_sub(1))
+            rel_row + editor.scroll_offset()
         };
-        Some(buffer_line)
+        (buffer_line < editor.buffer().line_count()).then_some(buffer_line)
     } else {
         None
     }

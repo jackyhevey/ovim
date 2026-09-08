@@ -396,9 +396,10 @@ fn render_overlays(
     }
 
     // Hover window
-    if editor.mode().is_hover() {
+    if editor.mode().is_hover() || editor.blame_mouse_hover_active() {
         if let Some(hover_text) = editor.hover_info() {
-            let is_preview = editor.mode() == crate::mode::Mode::HoverPreview;
+            let is_preview = editor.mode() == crate::mode::Mode::HoverPreview
+                || editor.blame_mouse_hover_active();
             let hover_pos = editor.hover_position();
             let content_type = editor.hover_content_type();
             render_hover_window(

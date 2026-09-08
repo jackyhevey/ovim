@@ -427,6 +427,7 @@ pub struct Editor {
     /// Unified virtual text decorations (inlay hints, diagnostics, etc.)
     pub decorations: decoration::DecorationMap,
     /// Channel for receiving background git refresh results (status + blame)
+    git_refresh_generation: u64,
     git_refresh_rx: tokio::sync::mpsc::Receiver<GitRefreshResult>,
     /// Sender half — cloned into spawn_blocking tasks after save
     pub(crate) git_refresh_tx: tokio::sync::mpsc::Sender<GitRefreshResult>,
@@ -434,6 +435,7 @@ pub struct Editor {
 
 /// Result of a background git status/blame refresh after save.
 pub struct GitRefreshResult {
+    pub generation: u64,
     pub path: String,
     pub status: Option<crate::git::GitStatus>,
     pub blame: Option<crate::git::GitBlame>,
@@ -603,6 +605,7 @@ impl Editor {
             git_branch: None,
             build: build_state::BuildState::default(),
             decorations: decoration::DecorationMap::new(),
+            git_refresh_generation: 0,
             git_refresh_rx: git_rx,
             git_refresh_tx: git_tx,
         }
@@ -655,6 +658,7 @@ impl Editor {
             git_branch: None,
             build: build_state::BuildState::default(),
             decorations: decoration::DecorationMap::new(),
+            git_refresh_generation: 0,
             git_refresh_rx: git_rx,
             git_refresh_tx: git_tx,
         }

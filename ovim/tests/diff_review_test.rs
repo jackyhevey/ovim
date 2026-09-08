@@ -891,3 +891,150 @@ fn pullbase_path_matching_uses_repo_root_and_closest_directory() {
     );
     assert_eq!(pullbase_for_path(&nested, None, &overrides).unwrap(), None);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pullbase_controls_gutter_signs_but_keeps_head_as_the_unset_default() {
+    use ovim_core::commands::execute_command;
+    use ovim_core::git::GitStatus;
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    assert_eq!(test.editor.buffer().git_status().change_counts(), (0, 0, 0));
+    // The review still defaults to main, even though the gutter defaults to HEAD.
+    execute_command(&mut test.editor, "GitDiff");
+    assert_eq!(test.editor.diff_review().unwrap().base().name, "main");
+    test.editor.close_diff_review();
+    execute_command(&mut test.editor, "set pullbase=main");
+    let changes = test.editor.buffer().git_status().change_counts();
+    assert_ne!(changes, (0, 0, 0));
+    let path = fixture.root.display();
+    execute_command(
+        &mut test.editor,
+        &format!("set pullbase=feature path={path}"),
+    );
+    assert_eq!(test.editor.buffer().git_status().change_counts(), (0, 0, 0));
+    execute_command(&mut test.editor, &format!("unset pullbase path={path}"));
+    assert_eq!(test.editor.buffer().git_status().change_counts(), changes);
+
+    // An editor configured before opening a file gets the same signs immediately.
+    let mut other = ovim_core::editor::Editor::new();
+    execute_command(&mut other, "set pullbase=main");
+    other.open_file(Path::new(&fixture.path("a.txt"))).unwrap();
+    assert_eq!(other.buffer().git_status().change_counts(), changes);
+
+    // Background save refresh uses the override, and a later unset invalidates it.
+    test.editor.spawn_git_refresh(&fixture.path("a.txt"), false);
+    let mut refreshed = false;
+    for _ in 0..100 {
+        if test.editor.poll_git_refresh() {
+            refreshed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(refreshed, "background gutter refresh must complete");
+    assert_eq!(test.editor.buffer().git_status().change_counts(), changes);
+    test.editor.spawn_git_refresh(&fixture.path("a.txt"), false);
+    execute_command(&mut test.editor, "unset pullbase");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    test.editor.poll_git_refresh();
+    assert_eq!(test.editor.buffer().git_status().change_counts(), (0, 0, 0));
+
+    fs::write(fixture.root.join("a.txt"), "uncommitted\n").unwrap();
+    assert_ne!(
+        GitStatus::from_file(fixture.root.join("a.txt"))
+            .unwrap()
+            .change_counts(),
+        (0, 0, 0)
+    );
+}
+
+#[test]
+fn pullbase_gutter_uses_merge_base_not_unrelated_changes_on_target() {
+    use ovim_core::git::GitStatus;
+    let fixture = Fixture::new();
+    let repo = Repository::open(&fixture.root).unwrap();
+    repo.set_head("refs/heads/main").unwrap();
+    fs::write(fixture.root.join("a.txt"), "unrelated target changes\n").unwrap();
+    commit_all(&repo, "advance target independently");
+    repo.set_head("refs/heads/feature").unwrap();
+    fs::write(fixture.root.join("a.txt"), "one\n2\nthree\nfour\n").unwrap();
+    let mut checkout = git2::build::CheckoutBuilder::new();
+    checkout.force();
+    repo.checkout_head(Some(&mut checkout)).unwrap();
+    let signs =
+        GitStatus::from_file_with_pullbase(fixture.root.join("a.txt"), Some("main")).unwrap();
+    assert_eq!(
+        signs.get_line_status(0),
+        None,
+        "unchanged first line must not be marked"
+    );
+    assert!(signs.get_line_status(3).is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn blame_mouse_hover_renders_details_without_moving_cursor_or_taking_keyboard() {
+    use ovim::editor::handle_mouse_event;
+    use ovim::ui::Renderer;
+    use ovim_core::{MouseEvent, MouseEventKind, Rect};
+    use ratatui::{backend::TestBackend, Terminal};
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    test.editor.options.blame = true;
+    test.editor.options.wrap = false;
+    test.editor.buffer_mut().load_git_blame();
+    test.editor.render_cache.last_buffer_area = Some(Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 25,
+    });
+    test.editor.render_cache.last_blame_width = 20;
+    let mouse = |row, column| MouseEvent {
+        kind: MouseEventKind::Moved,
+        row,
+        column,
+    };
+    handle_mouse_event(&mut test.editor, mouse(1, 1)).unwrap();
+    assert_eq!(test.editor.mode(), ovim_core::mode::Mode::Normal);
+    assert_eq!(test.editor.buffer().cursor().line(), 0);
+    assert_eq!(test.editor.hover_position(), Some((1, 0)));
+    assert!(test.editor.hover_info().unwrap().contains("edit a"));
+    test.editor.mark_clean();
+    handle_mouse_event(&mut test.editor, mouse(1, 2)).unwrap();
+    assert!(
+        !test.editor.is_dirty(),
+        "moving within the same annotation must not redraw"
+    );
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| Renderer::render_to_frame(frame, &mut test.editor, &mut Default::default()))
+        .unwrap();
+    let rendered: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(rendered.contains("Author:"));
+    assert!(rendered.contains("edit a"));
+    handle_mouse_event(&mut test.editor, mouse(1, 99)).unwrap();
+    assert!(test.editor.hover_info().is_none());
+    handle_mouse_event(&mut test.editor, mouse(1, 1)).unwrap();
+    test.keys("j");
+    assert_eq!(
+        test.editor.buffer().cursor().line(),
+        1,
+        "j must move the editing cursor"
+    );
+    assert!(test.editor.hover_info().is_none());
+    handle_mouse_event(&mut test.editor, mouse(20, 1)).unwrap();
+    assert!(
+        test.editor.hover_info().is_none(),
+        "blank gutter rows have no annotation"
+    );
+    test.keys("i");
+    handle_mouse_event(&mut test.editor, mouse(1, 1)).unwrap();
+    assert_eq!(test.editor.mode(), ovim_core::mode::Mode::Insert);
+    assert!(test.editor.hover_info().is_none());
+}

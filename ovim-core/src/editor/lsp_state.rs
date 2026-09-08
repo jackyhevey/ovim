@@ -333,6 +333,8 @@ pub struct LspState {
     pub diagnostic_count: (usize, usize, usize, usize),
     /// Hover information to display (from LSP)
     pub hover_info: Option<String>,
+    /// Nonmodal commit details opened by pointing at the blame gutter.
+    pub blame_mouse_hover: bool,
     /// Scroll offset for hover window (line number)
     pub hover_scroll: usize,
     /// Horizontal scroll offset for hover window (columns)
@@ -405,6 +407,7 @@ impl LspState {
             lsp_manager: None,
             diagnostic_count: (0, 0, 0, 0),
             hover_info: None,
+            blame_mouse_hover: false,
             hover_scroll: 0,
             hover_h_scroll: 0,
             hover_position: None,

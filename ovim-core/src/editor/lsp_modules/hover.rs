@@ -25,6 +25,7 @@ impl Editor {
 
     /// Clear hover info
     pub fn clear_hover(&mut self) {
+        self.lsp.state.blame_mouse_hover = false;
         self.lsp.state.hover_info = None;
         self.lsp.state.hover_scroll = 0;
         self.lsp.state.hover_h_scroll = 0;

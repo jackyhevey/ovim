@@ -68,6 +68,14 @@ impl GitStatus {
 
     /// Computes git status for a file
     pub fn from_file<P: AsRef<Path>>(file_path: P) -> Result<Self> {
+        Self::from_file_with_pullbase(file_path, None)
+    }
+
+    /// Compare against HEAD by default, or the configured branch's merge-base.
+    pub fn from_file_with_pullbase<P: AsRef<Path>>(
+        file_path: P,
+        branch: Option<&str>,
+    ) -> Result<Self> {
         let file_path = file_path.as_ref();
 
         // Find the git repository
@@ -99,12 +107,22 @@ impl GitStatus {
             Err(_) => return Ok(Self::new()),
         };
 
-        let head_tree = match head_commit.tree() {
+        let base_commit = if let Some(branch) = branch {
+            let base = crate::native_diff::resolve_pullbase(file_path, Some(branch))?;
+            let base_oid = repo
+                .revparse_single(base.base_ref().unwrap())?
+                .peel_to_commit()?
+                .id();
+            repo.find_commit(repo.merge_base(head_commit.id(), base_oid)?)?
+        } else {
+            head_commit
+        };
+        let head_tree = match base_commit.tree() {
             Ok(tree) => tree,
             Err(_) => return Ok(Self::new()),
         };
 
-        // Create diff between HEAD and working directory
+        // Compare the selected tree with staged and working-directory changes
         let mut diff_opts = DiffOptions::new();
         diff_opts.pathspec(relative_path);
         diff_opts.context_lines(0); // We only need the changed lines

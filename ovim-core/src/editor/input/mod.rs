@@ -99,6 +99,7 @@ impl InputHandler {
         record_macro: bool,
         remap_depth: usize,
     ) -> Result<()> {
+        editor.dismiss_blame_mouse_hover();
         // Record the event if we're recording a macro (but don't record the 'q'
         // that stops recording). A 'q' only terminates recording when it reaches
         // the terminator branch — i.e. Normal mode with no pending

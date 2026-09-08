@@ -122,6 +122,7 @@ impl Editor {
         let mut buf = buf;
         buf.set_language_catalog(self.language_catalog.clone());
         self.initialize_buffer_indent_options(&mut buf);
+        self.initialize_buffer_git_status(&mut buf);
         self.buffers.push(buf);
         self.buffers.len() - 1
     }
@@ -314,6 +315,7 @@ impl Editor {
     pub fn add_buffer(&mut self, mut buffer: Buffer) {
         buffer.set_language_catalog(self.language_catalog.clone());
         self.initialize_buffer_indent_options(&mut buffer);
+        self.initialize_buffer_git_status(&mut buffer);
         self.buffers.push(buffer);
         self.current_buffer_index = self.buffers.len() - 1;
         self.clear_lsp_state();
