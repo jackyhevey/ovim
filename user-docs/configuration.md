@@ -266,7 +266,9 @@ override applies.
 `:blame` separately toggles line-author annotations. In the terminal editor,
 hover over an annotation to see its commit, author, date, and message without
 moving the cursor. Move away or type to dismiss the preview. Click an annotation
-or use `gb` for the existing keyboard-controlled popup; `gB` opens the commit diff.
+(or use `gB`) to open that commit's full, highlighted diff in a read-only tab.
+Use `gb` for the keyboard-controlled details popup. Commit groups share a stable
+text color and tinted gutter background, with contrast adjusted for light themes.
 
 ### Pseudocode
 

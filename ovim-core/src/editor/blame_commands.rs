@@ -82,12 +82,16 @@ impl Editor {
 
     /// Opens the full commit diff in a new scratch buffer tab (`gB`).
     pub fn show_blame_diff(&mut self) {
+        self.show_blame_diff_at(self.buffer().cursor().line());
+    }
+
+    /// Open the clicked annotation's commit without relocating the source cursor.
+    pub(crate) fn show_blame_diff_at(&mut self, cursor_line: usize) {
         let file_path = match self.buffer().file_path() {
             Some(p) => p.to_string(),
             None => return,
         };
 
-        let cursor_line = self.buffer().cursor().line();
         let cursor_col = self.buffer().cursor().col().0;
 
         let oid = self.resolve_blame_oid(&file_path, cursor_line);
@@ -108,7 +112,10 @@ impl Editor {
             Ok(diff_text) => {
                 let short = &oid[..7.min(oid.len())];
                 let title = format!("Diff {}", short);
-                self.open_scratch_buffer_in_new_tab(&title, &diff_text);
+                self.open_diff_buffer_in_new_tab(&title, &diff_text);
+                self.buffer_mut()
+                    .enable_syntax_highlighting_for_path("commit.diff");
+                self.set_mode(crate::mode::Mode::Normal);
             }
             Err(e) => {
                 self.show_blame_popup(

@@ -15,8 +15,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use super::helpers::{compose_conceal_and_tabs, expand_tabs_with_mapping, remap_char_col};
 use super::layout::{BufferLayout, GUTTER_SPACING, SIGN_WIDTH};
 use super::styles::{
-    blame_color_for_hash, get_diagnostic_sign_style, get_git_sign_style, get_line_number_style,
-    remap_highlights,
+    blame_color_for_hash, blame_style, get_diagnostic_sign_style, get_git_sign_style,
+    get_line_number_style, remap_highlights,
 };
 use crate::syntax::HighlightGroup;
 use ovim_core::buffer::Cursor;
@@ -591,6 +591,14 @@ fn build_gutter_line(
     if is_continuation {
         // Blank gutter for wrap continuation rows
         let width = blame_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING;
+        if blame_width > 0 {
+            if let Some((_, _, _, color)) = blame_info {
+                return Line::from(vec![
+                    Span::styled(" ".repeat(blame_width), blame_style(*color, theme)),
+                    Span::raw(" ".repeat(width - blame_width)),
+                ]);
+            }
+        }
         return Line::from(" ".repeat(width));
     }
 
@@ -629,7 +637,7 @@ fn build_gutter_line(
 
             // Truncate to blame_width
             let text: String = text.chars().take(blame_width).collect();
-            spans.push(Span::styled(text, Style::default().fg(*color)));
+            spans.push(Span::styled(text, blame_style(*color, theme)));
         } else {
             spans.push(Span::raw(" ".repeat(blame_width)));
         }

@@ -1038,3 +1038,145 @@ async fn blame_mouse_hover_renders_details_without_moving_cursor_or_taking_keybo
     assert_eq!(test.editor.mode(), ovim_core::mode::Mode::Insert);
     assert!(test.editor.hover_info().is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn clicking_blame_opens_that_commit_and_preserves_source_cursor() {
+    use ovim::editor::handle_mouse_event;
+    use ovim_core::{MouseButton, MouseEvent, MouseEventKind, Rect};
+    let fixture = Fixture::new();
+    let repo = Repository::open(&fixture.root).unwrap();
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    for (row, oid) in [(0, head.parent_id(0).unwrap()), (1, head.id())] {
+        let mut test = open_editor_on(&fixture, "a.txt");
+        test.editor.options.blame = true;
+        test.editor.options.wrap = false;
+        test.editor.buffer_mut().load_git_blame();
+        let source_id = test.editor.buffer().id();
+        let source_cursor = *test.editor.buffer().cursor();
+        test.editor.render_cache.last_buffer_area = Some(Rect {
+            x: 2,
+            y: 3,
+            width: 100,
+            height: 25,
+        });
+        test.editor.render_cache.last_blame_width = 20;
+        handle_mouse_event(
+            &mut test.editor,
+            MouseEvent {
+                kind: MouseEventKind::Moved,
+                row: row + 3,
+                column: 3,
+            },
+        )
+        .unwrap();
+        assert!(test.editor.blame_mouse_hover_active());
+        handle_mouse_event(
+            &mut test.editor,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                row: row + 3,
+                column: 3,
+            },
+        )
+        .unwrap();
+        assert_eq!(test.editor.tab_count(), 2);
+        assert_eq!(test.editor.mode(), ovim_core::mode::Mode::Normal);
+        assert!(test.editor.hover_info().is_none());
+        assert!(test.editor.buffer().is_read_only());
+        assert!(test.editor.buffer().file_path().is_none());
+        let diff = test.editor.buffer().rope().to_string();
+        assert!(diff.starts_with(&format!("commit {oid}\n")), "{diff}");
+        assert!(diff.contains("diff --git a/a.txt b/a.txt"));
+        assert!(
+            !diff.contains("b.txt"),
+            "uncommitted files do not belong to a commit patch"
+        );
+        let added = diff
+            .lines()
+            .position(|line| line == if row == 0 { "+two" } else { "+2" })
+            .unwrap();
+        assert!(!test.editor.buffer().highlights_for_line(added).is_empty());
+        test.keys("gT");
+        assert_eq!(test.editor.buffer().id(), source_id);
+        assert_eq!(*test.editor.buffer().cursor(), source_cursor);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn blame_bands_color_every_row_in_a_commit_group_and_ignore_empty_wrap_rows() {
+    use ovim::editor::handle_mouse_event;
+    use ovim::ui::Renderer;
+    use ovim_core::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{backend::TestBackend, Terminal};
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    test.editor.options.blame = true;
+    test.editor.options.wrap = true;
+    test.editor.buffer_mut().load_git_blame();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| Renderer::render_to_frame(frame, &mut test.editor, &mut Default::default()))
+        .unwrap();
+    let area = test.editor.render_cache.last_buffer_area.unwrap();
+    let screen = terminal.backend().buffer();
+    // Lines 1 and 3 are from the same original commit; both have a colored band.
+    let first = &screen[(area.x, area.y)];
+    let third = &screen[(area.x, area.y + 2)];
+    assert_eq!(first.bg, third.bg);
+    assert_eq!(first.fg, third.fg);
+    assert_ne!(first.bg, screen[(area.x + 90, area.y)].bg);
+    let tabs = test.editor.tab_count();
+    handle_mouse_event(
+        &mut test.editor,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: area.y + 20,
+            column: area.x + 1,
+        },
+    )
+    .unwrap();
+    assert_eq!(test.editor.tab_count(), tabs);
+    assert!(test.editor.hover_info().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn wrapped_blame_continuations_keep_the_commit_band_and_click_target() {
+    use ovim::editor::handle_mouse_event;
+    use ovim::ui::Renderer;
+    use ovim_core::{MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{backend::TestBackend, Terminal};
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("a.txt"),
+        format!("{}\nsecond\n", "long text ".repeat(30)),
+    )
+    .unwrap();
+    let repo = Repository::open(&fixture.root).unwrap();
+    let oid = commit_all(&repo, "long line");
+    let mut test = open_editor_on(&fixture, "a.txt");
+    test.editor.options.blame = true;
+    test.editor.options.wrap = true;
+    test.editor.buffer_mut().load_git_blame();
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    terminal
+        .draw(|frame| Renderer::render_to_frame(frame, &mut test.editor, &mut Default::default()))
+        .unwrap();
+    let area = test.editor.render_cache.last_buffer_area.unwrap();
+    let screen = terminal.backend().buffer();
+    assert_eq!(screen[(area.x, area.y)].bg, screen[(area.x, area.y + 1)].bg);
+    handle_mouse_event(
+        &mut test.editor,
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            row: area.y + 1,
+            column: area.x + 1,
+        },
+    )
+    .unwrap();
+    assert!(test
+        .editor
+        .buffer()
+        .rope()
+        .to_string()
+        .starts_with(&format!("commit {oid}\n")));
+}

@@ -276,7 +276,7 @@ fn is_blame_click(editor: &Editor, screen_col: u16, screen_row: u16) -> Option<u
     let area = editor.render_cache.last_buffer_area?;
     let blame_width = editor.render_cache.last_blame_width;
 
-    if blame_width == 0 {
+    if !editor.options.blame || blame_width == 0 {
         return None;
     }
 
@@ -297,6 +297,9 @@ fn is_blame_click(editor: &Editor, screen_col: u16, screen_row: u16) -> Option<u
                 let viewport_visual_row = wrap_map
                     .viewport_top_visual_row(editor.scroll_offset(), editor.scroll_subrow());
                 let absolute_visual_row = rel_row + viewport_visual_row;
+                if absolute_visual_row >= wrap_map.total_visual_lines() {
+                    return None;
+                }
                 let (logical_line, _sub_line) = wrap_map.visual_to_logical(absolute_visual_row);
                 logical_line
             } else {
@@ -305,7 +308,11 @@ fn is_blame_click(editor: &Editor, screen_col: u16, screen_row: u16) -> Option<u
         } else {
             rel_row + editor.scroll_offset()
         };
-        (buffer_line < editor.buffer().line_count()).then_some(buffer_line)
+        editor
+            .buffer()
+            .git_blame()?
+            .get(buffer_line)
+            .map(|_| buffer_line)
     } else {
         None
     }
@@ -597,13 +604,9 @@ fn handle_left_click(editor: &mut Editor, col: u16, row: u16) -> Result<Option<S
         return Ok(Some(url));
     }
 
-    // Check blame column click → show blame popup
+    // Hover shows metadata; clicking an annotation opens the full commit patch.
     if let Some(line) = is_blame_click(editor, col, row) {
-        editor
-            .buffer_mut()
-            .cursor_mut()
-            .set_position(line, GraphemeCol::ZERO);
-        editor.show_blame_info();
+        editor.show_blame_diff_at(line);
         return Ok(None);
     }
 
