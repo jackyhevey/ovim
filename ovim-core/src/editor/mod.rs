@@ -252,6 +252,8 @@ pub struct EditorOptions {
     pub file_tree_reveal: bool,
     /// Show git blame gutter (default: false)
     pub blame: bool,
+    /// Default branch for diff review; None selects the repository default.
+    pub pullbase: Option<String>,
     /// Conceal markdown constructs (links, images) when rendering (default: true)
     pub markdown_conceal: bool,
     /// Background color for textwidth margins
@@ -294,6 +296,7 @@ impl Default for EditorOptions {
             clipboard: "unnamedplus".to_string(),
             file_tree_reveal: true,
             blame: false,
+            pullbase: None,
             markdown_conceal: true,
             margin_color: MarginColor::None,
             margin_padding: 0,

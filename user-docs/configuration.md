@@ -211,3 +211,23 @@ You can override this location by setting:
 This affects session file reads/writes and cleanup.
 Ovim secures the selected directory for owner-only access on Unix because each
 named headless session descriptor contains its API bearer capability.
+
+### Diff review base
+
+Set the default branch for `:GitDiff` and `<Space>gd` with
+`:set pullbase=develop` (or `origin/develop` for a remote-tracking branch).
+`:set pullbase?` shows the setting. Clear it with `:unset pullbase`,
+`:set pullbase=`, `:set pullbase&`, or `:set nopullbase` to restore automatic
+base selection. Changing it refreshes an open review; an explicit
+`:GitDiff <ref>` takes precedence. `:GitFetch` / `<Space>gf` fetches the selected
+base when it is a remote-tracking branch.
+
+Configure it for each session in `init.lua`:
+
+```lua
+ovim.opt.pullbase = "origin/develop"
+ovim.opt.pullbase = nil -- restore automatic selection
+```
+
+`vim.opt.pullbase` supports the same assignments. The branch must exist when
+opening or refreshing the review; it need not exist when loading configuration.

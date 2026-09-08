@@ -29,7 +29,10 @@ pub fn setup_vim_api(lua: &Lua, bridge: EditorBridge) -> Result<()> {
 
     // Create vim.opt (options) namespace with metatable
     let opt = create_opt_table(lua, bridge.clone())?;
-    vim.set("opt", opt)?;
+    vim.set("opt", opt.clone())?;
+    let ovim = lua.create_table()?;
+    ovim.set("opt", opt)?;
+    lua.globals().set("ovim", ovim)?;
 
     // Create vim.api_keys namespace
     let api_keys = crate::lua::ai_api::setup_api_keys_api(lua, bridge.clone())?;
@@ -394,6 +397,17 @@ fn create_opt_table(lua: &Lua, bridge: EditorBridge) -> Result<Table<'_>> {
                     mlua::Value::Boolean(true) => "set blame".to_string(),
                     mlua::Value::Boolean(false) => "set noblame".to_string(),
                     _ => return Err(mlua::Error::external("blame must be boolean")),
+                },
+                "pullbase" => match value {
+                    mlua::Value::Nil => "set pullbase=".to_string(),
+                    mlua::Value::String(s) => {
+                        let branch = s.to_str()?;
+                        if !branch.is_empty() && !crate::native_diff::valid_pullbase(branch) {
+                            return Err(mlua::Error::external("pullbase must be a branch name"));
+                        }
+                        format!("set pullbase={branch}")
+                    }
+                    _ => return Err(mlua::Error::external("pullbase must be a string or nil")),
                 },
                 "margincolor" => match value {
                     mlua::Value::String(s) => {

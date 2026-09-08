@@ -765,3 +765,65 @@ async fn a_long_line_wraps_inside_its_split_column() {
     test.press_key(KeyCode::Enter);
     assert_eq!(test.editor.buffer().cursor().line(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pullbase_controls_review_and_unset_restores_auto() {
+    use ovim_core::command_result::CommandResult;
+    use ovim_core::commands::execute_command;
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    for command in ["set pullbase=feature", "GitDiff"] {
+        assert!(matches!(
+            execute_command(&mut test.editor, command),
+            CommandResult::Success(_)
+        ));
+    }
+    assert_eq!(test.editor.diff_review().unwrap().base().name, "feature");
+    execute_command(&mut test.editor, "set pullbase=main");
+    assert_eq!(test.editor.diff_review().unwrap().base().name, "main");
+    execute_command(&mut test.editor, "GitDiff feature");
+    execute_command(&mut test.editor, "unset pullbase");
+    assert_eq!(test.editor.diff_review().unwrap().base().name, "feature");
+    execute_command(&mut test.editor, "GitDiff");
+    assert_eq!(test.editor.diff_review().unwrap().base().name, "main");
+    for unset in [
+        "set pullbase=",
+        "set pullbase&",
+        "set nopullbase",
+        "unset pullbase",
+    ] {
+        execute_command(&mut test.editor, "set pullbase=feature");
+        assert!(matches!(
+            execute_command(&mut test.editor, unset),
+            CommandResult::Success(_)
+        ));
+        assert_eq!(test.editor.options.pullbase, None);
+    }
+    assert!(matches!(
+        execute_command(&mut test.editor, "set pullbase=main..feature"),
+        CommandResult::Error(_)
+    ));
+    assert_eq!(test.editor.options.pullbase, None);
+    let result = execute_command(&mut test.editor, "set pullbase?");
+    assert!(
+        matches!(result, CommandResult::Success(ref response) if response.message.as_deref() == Some("  pullbase="))
+    );
+}
+
+#[test]
+fn pullbase_resolves_remote_metadata_and_reports_missing_branches() {
+    let fixture = Fixture::new();
+    let repo = Repository::open(&fixture.root).unwrap();
+    let oid = repo.refname_to_id("refs/heads/main").unwrap();
+    repo.reference("refs/remotes/origin/release/stable", oid, true, "test")
+        .unwrap();
+    let base =
+        ovim_core::native_diff::resolve_pullbase(&fixture.root, Some("origin/release/stable"))
+            .unwrap();
+    assert_eq!(
+        base.remote,
+        Some(("origin".into(), "release/stable".into()))
+    );
+    assert_eq!(base.spec, "origin/release/stable...WORKTREE");
+    assert!(ovim_core::native_diff::resolve_pullbase(&fixture.root, Some("missing")).is_err());
+}

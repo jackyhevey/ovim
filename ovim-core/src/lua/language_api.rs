@@ -13,7 +13,10 @@ pub fn setup_ovim_api(
     catalog: Arc<LanguageCatalog>,
     source: LuaSourceContext,
 ) -> Result<()> {
-    let ovim = lua.create_table()?;
+    let ovim = match lua.globals().get::<_, Value>("ovim")? {
+        Value::Table(table) => table,
+        _ => lua.create_table()?,
+    };
     let languages = lua.create_table()?;
     let register = lua.create_function(move |_lua, table: Table| {
         reject_unknown(

@@ -162,6 +162,37 @@ impl ReviewBase {
     }
 }
 
+/// Whether a configured pull base is a branch name (not a revision expression).
+pub fn valid_pullbase(branch: &str) -> bool {
+    !branch.starts_with('-') && git2::Reference::is_valid_name(&format!("refs/heads/{branch}"))
+}
+
+/// Resolve a configured branch, preserving remote metadata for base fetching.
+pub fn resolve_pullbase(path: &Path, branch: Option<&str>) -> Result<ReviewBase> {
+    let Some(branch) = branch else {
+        return resolve_base(path);
+    };
+    anyhow::ensure!(valid_pullbase(branch), "pullbase must be a branch name");
+    let repo = Repository::discover(path)?;
+    // Prefer a local branch with this exact name, then a remote-tracking branch.
+    let reference = repo
+        .find_reference(&format!("refs/heads/{branch}"))
+        .or_else(|_| repo.find_reference(&format!("refs/remotes/{branch}")))
+        .with_context(|| format!("Pull base branch '{branch}' was not found"))?;
+    reference.peel_to_commit()?;
+    let mut base = ReviewBase::explicit(branch);
+    if let Some(name) = reference
+        .name()
+        .and_then(|name| name.strip_prefix("refs/remotes/"))
+    {
+        if let Some((remote, branch)) = name.split_once('/') {
+            base.remote = Some((remote.to_string(), branch.to_string()));
+            (base.fetched_ago, base.ever_fetched) = fetch_age(&repo);
+        }
+    }
+    Ok(base)
+}
+
 /// Resolves the best base to review the current branch against.
 ///
 /// The default branch is discovered from the remote's advertised HEAD, then

@@ -44,7 +44,7 @@ pub struct DiffReviewState {
     /// Tab index the review was (re-)entered from; fallback when
     /// `origin_buffer_id` is no longer shown in any tab.
     pub origin_tab: usize,
-    /// User-supplied comparison (`:GitDiff <spec>`); `None` means auto.
+    /// User-supplied comparison (`:GitDiff <spec>`); None uses pullbase or auto.
     pub explicit_spec: Option<String>,
     pub layout: DiffLayout,
     /// The patch the buffer was rendered from, kept so switching layout or
@@ -284,7 +284,7 @@ impl Editor {
         let root_hint = self.diff_review_root_hint();
         let base = match explicit_spec {
             Some(spec) => ReviewBase::explicit(spec),
-            None => native_diff::resolve_base(&root_hint)?,
+            None => native_diff::resolve_pullbase(&root_hint, self.options.pullbase.as_deref())?,
         };
         let patch = native_diff::review_patch(&root_hint, &base)?;
 
@@ -340,18 +340,21 @@ impl Editor {
         let Some(index) = self.review_buffer_index() else {
             return;
         };
-        let (root, base, explicit) = {
+        let (root, explicit) = {
             let state = self.ui_panels.diff_review.as_ref().expect("review state");
-            (
-                state.patch.root.clone(),
-                state.patch.base.clone(),
-                state.explicit_spec.clone(),
-            )
+            (state.patch.root.clone(), state.explicit_spec.clone())
         };
 
-        let base = match &explicit {
-            Some(spec) => ReviewBase::explicit(spec),
-            None => native_diff::resolve_base(&root).unwrap_or(base),
+        let base = match explicit.as_deref() {
+            Some(spec) => Ok(ReviewBase::explicit(spec)),
+            None => native_diff::resolve_pullbase(&root, self.options.pullbase.as_deref()),
+        };
+        let base = match base {
+            Ok(base) => base,
+            Err(error) => {
+                self.review_toast(ToastLevel::Error, format!("Diff review: {error:#}"));
+                return;
+            }
         };
         let patch = match native_diff::review_patch(&root, &base) {
             Ok(patch) => patch,
@@ -610,8 +613,8 @@ impl Editor {
         }
         let root = self.diff_review_root_hint();
         let base = match self.ui_panels.diff_review.as_ref() {
-            Some(state) => Ok(state.patch.base.clone()),
-            None => native_diff::resolve_base(&root),
+            Some(state) if state.explicit_spec.is_some() => Ok(state.patch.base.clone()),
+            _ => native_diff::resolve_pullbase(&root, self.options.pullbase.as_deref()),
         };
         let remote = match base {
             Ok(base) => base.remote,

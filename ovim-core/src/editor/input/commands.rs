@@ -196,6 +196,7 @@ const COMMAND_NAMES: &[&str] = &[
     "saveas",
     "se",
     "set",
+    "unset",
     "session",
     "sort",
     "source",

@@ -195,3 +195,32 @@ fn test_vim_keymap_set_insert_mode_mapping() {
     let line = editor.buffer().line_text(0).unwrap_or_default();
     assert_eq!(line.trim_end_matches('\n'), "abc");
 }
+
+#[test]
+fn pullbase_lua_options_set_and_clear_through_editor_commands() {
+    let mut editor = Editor::new();
+    editor.enable_lua().unwrap();
+    for namespace in ["ovim", "vim"] {
+        editor
+            .execute_lua(&format!("{namespace}.opt.pullbase = 'release/stable'"))
+            .unwrap();
+        editor.process_lua_commands().unwrap();
+        assert_eq!(editor.options.pullbase.as_deref(), Some("release/stable"));
+        for invalid in ["true", "42", "'main..feature'", "'main\\nquit'"] {
+            assert!(editor
+                .execute_lua(&format!("{namespace}.opt.pullbase = {invalid}"))
+                .is_err());
+        }
+        editor
+            .execute_lua(&format!("{namespace}.opt.pullbase = nil"))
+            .unwrap();
+        editor.process_lua_commands().unwrap();
+        assert_eq!(editor.options.pullbase, None);
+    }
+    assert_eq!(
+        editor
+            .execute_lua("return type(ovim.languages.register)")
+            .unwrap(),
+        "function"
+    );
+}

@@ -192,6 +192,7 @@ fn query_option(name: &str, editor: &Editor) -> Option<CommandResult> {
                 MarginColor::Solid(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
             }
         ),
+        "pullbase" => format!("  pullbase={}", opts.pullbase.as_deref().unwrap_or("")),
         "marginpadding" => format!("  marginpadding={}", opts.margin_padding),
         "autoinstall" => format!(
             "  autoinstall={}",
@@ -412,6 +413,14 @@ fn handle_value_option(name: &str, value: &str, editor: &mut Editor) -> Option<C
             }
             Err(_) => err(format!("Invalid number: {}", value)),
         },
+        "pullbase" => {
+            if !value.is_empty() && !crate::native_diff::valid_pullbase(value) {
+                return Some(err("pullbase must be a branch name"));
+            }
+            editor.options.pullbase = (!value.is_empty()).then(|| value.to_string());
+            editor.refresh_diff_review();
+            ok(Some(format!("  pullbase={value}")))
+        }
         "makeprg" | "mp" => {
             if value.is_empty() {
                 err("makeprg cannot be empty")
@@ -482,6 +491,10 @@ pub fn handle_set_command(editor: &mut Editor, args: &str) -> CommandResult {
     } else {
         (args, None)
     };
+
+    if opt_value.is_none() && matches!(opt_name, "pullbase&" | "nopullbase") {
+        return handle_value_option("pullbase", "", editor).unwrap();
+    }
 
     // Check for query (option?)
     if let Some(query_opt) = opt_name.strip_suffix('?') {
