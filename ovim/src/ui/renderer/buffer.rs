@@ -2242,6 +2242,21 @@ pub fn render_buffer(
         .block(Block::default().borders(Borders::NONE))
         .style(Style::default().bg(Color::Reset));
     frame.render_widget(paragraph, text_area);
+    if let Some(rail) = layout.scrollbar_area {
+        let (total, top) = if has_wrap {
+            wrap_map
+                .map(|map| {
+                    (
+                        map.total_visual_lines(),
+                        map.viewport_top_visual_row(start_line, top_skip),
+                    )
+                })
+                .unwrap_or((line_count, start_line))
+        } else {
+            (line_count, start_line)
+        };
+        render_diff_scrollbar(frame, rail, total, top, theme);
+    }
 
     start_line
 }
@@ -2466,6 +2481,36 @@ pub fn render_line_with_highlights(
     }
 
     Line::from(spans)
+}
+
+fn render_diff_scrollbar(frame: &mut Frame, area: Rect, total: usize, top: usize, theme: &Theme) {
+    let height = usize::from(area.height);
+    if height == 0 {
+        return;
+    }
+    let thumb = (height.saturating_mul(height) / total.max(1)).clamp(1, height);
+    let travel = height - thumb;
+    let scrollable = total.saturating_sub(height);
+    let start = top.min(scrollable).saturating_mul(travel) / scrollable.max(1);
+    for row in 0..height {
+        let selected = (start..start + thumb).contains(&row);
+        let group = if selected {
+            UiGroup::LineNumberCurrent
+        } else {
+            UiGroup::LineNumber
+        };
+        let style = Style::default()
+            .fg(crate::key_convert::convert_core_color(
+                theme.get_ui_color(group),
+            ))
+            .bg(crate::key_convert::convert_core_color(
+                theme.get_ui_color(UiGroup::Background),
+            ));
+        frame.render_widget(
+            Paragraph::new(if selected { "┃" } else { "│" }).style(style),
+            Rect::new(area.x, area.y + row as u16, 1, 1),
+        );
+    }
 }
 
 #[cfg(test)]

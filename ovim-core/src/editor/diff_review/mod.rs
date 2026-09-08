@@ -243,6 +243,11 @@ impl Editor {
         self.ui_panels.diff_review.as_ref()
     }
 
+    /// Branch reviews and commit/patch buffers share diff viewport affordances.
+    pub fn is_diff_buffer(&self) -> bool {
+        self.is_diff_review_buffer() || self.buffer().syntax_language_id() == Some("diff")
+    }
+
     /// True when the current buffer is the branch review.
     pub fn is_diff_review_buffer(&self) -> bool {
         self.ui_panels

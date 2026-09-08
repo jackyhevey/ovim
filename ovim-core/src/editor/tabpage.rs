@@ -15,6 +15,7 @@ pub struct TabPage {
     /// editor's current buffer in that case. Stored as an id rather than an
     /// index so buffer removal elsewhere can't silently repoint the tab.
     buffer_id: Option<BufferId>,
+    pub(crate) definition_origin: Option<TabPageId>,
 }
 
 impl TabPage {
@@ -28,6 +29,7 @@ impl TabPage {
             id,
             window_manager: None,
             buffer_id: None,
+            definition_origin: None,
         }
     }
 
@@ -57,6 +59,9 @@ impl TabPage {
 
     /// Sets the buffer this tab is displaying
     pub fn set_buffer_id(&mut self, id: BufferId) {
+        if self.buffer_id != Some(id) {
+            self.definition_origin = None;
+        }
         self.buffer_id = Some(id);
     }
 }

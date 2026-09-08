@@ -521,9 +521,10 @@ impl Editor {
                 self.push_tag();
 
                 if new_tab {
-                    self.new_tab();
+                    let origin = self.tab_page_manager.current_tab().id();
                     match crate::buffer::Buffer::load_file(&path) {
                         Ok(mut buffer) => {
+                            self.new_tab_for_definition();
                             let modeline =
                                 crate::modeline::Modeline::parse(&buffer.rope().to_string());
                             self.initialize_buffer_indent_options(&mut buffer);
@@ -535,6 +536,8 @@ impl Editor {
                             // The replacement buffer has a fresh id; repoint
                             // the tab at it
                             self.sync_current_tab_buffer();
+                            self.tab_page_manager.current_tab_mut().definition_origin =
+                                Some(origin);
                             if let Some(path) = self.buffer().file_path() {
                                 self.registers.set_current_file(path.to_string());
                             }
@@ -2212,6 +2215,87 @@ mod tests {
             editor.handle_location_result(Ok(Some(location)), "Definition", "LSP-DEFINITION", true);
         assert!(handled);
         assert_eq!(editor.registers().get(Some('%')), target_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn definition_quit_retraces_chain_until_manual_navigation_or_file_change() {
+        use crate::commands::execute_command;
+        let dir = tempfile::tempdir().unwrap();
+        let paths: Vec<_> = ["a.rs", "b.rs", "c.rs", "other.rs"]
+            .into_iter()
+            .map(|name| {
+                let path = dir.path().join(name);
+                std::fs::write(&path, "fn symbol() {}\n").unwrap();
+                path.canonicalize().unwrap()
+            })
+            .collect();
+        let follow = |editor: &mut Editor, index: usize| {
+            let location = Location::new(
+                uri_from_file_path(&paths[index]).unwrap(),
+                Range::new(Position::new(0, 0), Position::new(0, 0)),
+            );
+            assert!(editor.handle_location_result(
+                Ok(Some(location)),
+                "Definition",
+                "LSP-DEFINITION",
+                true
+            ));
+        };
+        for action in ["chain", "manual", "file", "file_back", "rename"] {
+            let mut editor = Editor::new();
+            editor.open_file(&paths[0]).unwrap();
+            editor.new_tab();
+            editor.open_file(&paths[3]).unwrap();
+            editor.goto_tab(0);
+            let origin = editor.tab_page_manager.current_tab().id();
+            follow(&mut editor, 1);
+            follow(&mut editor, 2);
+            match action {
+                "manual" => {
+                    editor.previous_tab();
+                    editor.next_tab();
+                }
+                "file" => {
+                    editor.open_file(&paths[0]).unwrap();
+                }
+                "file_back" => {
+                    editor.open_file(&paths[0]).unwrap();
+                    editor.open_file(&paths[2]).unwrap();
+                }
+                "rename" => {
+                    editor.set_file_path(paths[0].to_string_lossy().into_owned());
+                }
+                _ => {}
+            }
+            execute_command(&mut editor, "q");
+            assert!(!editor.should_quit());
+            if action == "chain" {
+                assert_eq!(editor.buffer().file_path(), paths[1].to_str());
+                execute_command(&mut editor, "q");
+                assert_eq!(editor.tab_page_manager.current_tab().id(), origin);
+                assert_eq!(editor.buffer().file_path(), paths[0].to_str());
+            } else {
+                // Ordinary tab closing selects the tab on the right.
+                assert_eq!(editor.buffer().file_path(), paths[3].to_str(), "{action}");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn failed_definition_file_does_not_create_a_tab() {
+        let mut editor = Editor::new();
+        let dir = tempfile::tempdir().unwrap();
+        let location = Location::new(
+            uri_from_file_path(dir.path().join("missing.rs")).unwrap(),
+            Range::new(Position::new(0, 0), Position::new(0, 0)),
+        );
+        assert!(!editor.handle_location_result(
+            Ok(Some(location)),
+            "Definition",
+            "LSP-DEFINITION",
+            true
+        ));
+        assert_eq!(editor.tab_count(), 1);
     }
 
     #[test]

@@ -1018,8 +1018,28 @@ async fn blame_mouse_hover_renders_details_without_moving_cursor_or_taking_keybo
         .collect();
     assert!(rendered.contains("Author:"));
     assert!(rendered.contains("edit a"));
+    assert!(
+        !terminal.backend().cursor_visible(),
+        "the hardware caret must not cover blame details"
+    );
     handle_mouse_event(&mut test.editor, mouse(1, 99)).unwrap();
     assert!(test.editor.hover_info().is_none());
+    terminal
+        .draw(|frame| Renderer::render_to_frame(frame, &mut test.editor, &mut Default::default()))
+        .unwrap();
+    assert!(
+        terminal.backend().cursor_visible(),
+        "leaving the popup restores the caret"
+    );
+    test.editor.show_blame_info();
+    terminal
+        .draw(|frame| Renderer::render_to_frame(frame, &mut test.editor, &mut Default::default()))
+        .unwrap();
+    assert!(
+        !terminal.backend().cursor_visible(),
+        "keyboard blame popovers hide the caret too"
+    );
+    test.press_key(ovim_core::KeyCode::Esc);
     handle_mouse_event(&mut test.editor, mouse(1, 1)).unwrap();
     test.keys("j");
     assert_eq!(
@@ -1179,4 +1199,49 @@ async fn wrapped_blame_continuations_keep_the_commit_band_and_click_target() {
         .rope()
         .to_string()
         .starts_with(&format!("commit {oid}\n")));
+}
+
+#[test]
+fn diff_scroll_indicator_tracks_wrapped_and_unwrapped_views_without_covering_text() {
+    use ovim::ui::Renderer;
+    use ratatui::{backend::TestBackend, Terminal};
+    for wrap in [false, true] {
+        let patch = (0..100)
+            .map(|index| format!("+{index} {}\n", "content ".repeat(15)))
+            .collect::<String>();
+        let mut test = EditorTest::new(&patch);
+        test.editor
+            .buffer_mut()
+            .enable_syntax_highlighting_for_path("commit.diff");
+        test.editor.options.wrap = wrap;
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        let draw = |test: &mut EditorTest, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|frame| {
+                    Renderer::render_to_frame(frame, &mut test.editor, &mut Default::default())
+                })
+                .unwrap();
+        };
+        draw(&mut test, &mut terminal);
+        let area = test.editor.render_cache.last_buffer_area.unwrap();
+        let rail = area.x + area.width;
+        assert_eq!(rail, 79);
+        assert_eq!(terminal.backend().buffer()[(rail, area.y)].symbol(), "┃");
+        assert_eq!(
+            terminal.backend().buffer()[(rail, area.y + area.height - 1)].symbol(),
+            "│"
+        );
+        assert_eq!(
+            test.editor.render_cache.last_text_width,
+            ovim::frontend::compute_text_width(&test.editor, 80)
+        );
+        test.keys("G$");
+        draw(&mut test, &mut terminal);
+        assert_eq!(terminal.backend().buffer()[(rail, area.y)].symbol(), "│");
+        assert_eq!(
+            terminal.backend().buffer()[(rail, area.y + area.height - 1)].symbol(),
+            "┃"
+        );
+        assert!(terminal.get_cursor_position().unwrap().x < rail);
+    }
 }

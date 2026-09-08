@@ -108,6 +108,9 @@ impl Editor {
     /// Sets the current buffer file path and updates the % register
     /// to keep register-based file operations in sync with the buffer path.
     pub fn set_file_path(&mut self, path: String) {
+        if self.buffer().file_path() != Some(path.as_str()) {
+            self.tab_page_manager.current_tab_mut().definition_origin = None;
+        }
         self.buffer_mut().set_file_path(path.clone());
         self.registers.set_current_file(path);
     }
@@ -174,6 +177,11 @@ impl Editor {
     /// Switches to a buffer by index (0-based)
     pub fn switch_to_buffer(&mut self, index: usize) {
         if index < self.buffers.len() && index != self.current_buffer_index {
+            // Restoring a tab's own buffer preserves its return target. An
+            // explicit file/buffer change within that tab ends the preview.
+            if self.tab_page_manager.current_tab().buffer_id() != Some(self.buffers[index].id()) {
+                self.tab_page_manager.current_tab_mut().definition_origin = None;
+            }
             // Save current file to alternate file register (skip scratch buffers)
             if let Some(current_path) = self.buffer().file_path() {
                 if !is_scratch_path(current_path) {
@@ -313,6 +321,7 @@ impl Editor {
 
     /// Adds a new buffer and switches to it
     pub fn add_buffer(&mut self, mut buffer: Buffer) {
+        self.tab_page_manager.current_tab_mut().definition_origin = None;
         buffer.set_language_catalog(self.language_catalog.clone());
         self.initialize_buffer_indent_options(&mut buffer);
         self.initialize_buffer_git_status(&mut buffer);

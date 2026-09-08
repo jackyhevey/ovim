@@ -846,7 +846,12 @@ impl Buffer {
         }
     }
 
-    /// Checks if syntax highlighting is enabled
+    /// Language identity of the active parser, including pathless views.
+    pub fn syntax_language_id(&self) -> Option<&str> {
+        self.syntax.as_ref().map(|syntax| syntax.language_id())
+    }
+
+    /// Checks if syntax highlighting is enabled.
     pub fn has_syntax_highlighting(&self) -> bool {
         self.syntax.is_some() || self.forced_highlights.is_some()
     }

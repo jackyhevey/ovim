@@ -36,6 +36,7 @@ pub struct BufferLayout {
     pub line_num_width: usize,
     /// Width of the blame column (0 when blame is off).
     pub blame_width: usize,
+    pub scrollbar_area: Option<Rect>,
 }
 
 impl BufferLayout {
@@ -49,6 +50,14 @@ impl BufferLayout {
     /// rect wider than the centered code-box. `area` is the centered band;
     /// `render_area` is the rect that includes the right diagnostic margin.
     pub fn compute_with_render_area(editor: &Editor, area: Rect, render_area: Rect) -> Self {
+        let scrollbar_area = (editor.is_diff_buffer() && area.width > 1)
+            .then(|| Rect::new(area.right() - 1, area.y, 1, area.height));
+        let mut area = area;
+        let mut render_area = render_area;
+        if scrollbar_area.is_some() {
+            area.width -= 1;
+            render_area.width = area.right().saturating_sub(render_area.x);
+        }
         let show_numbers = editor.options.number || editor.options.relative_number;
         let line_count = editor.buffer().line_count();
         let line_num_width = if show_numbers {
@@ -81,6 +90,7 @@ impl BufferLayout {
             text_width,
             line_num_width,
             blame_width,
+            scrollbar_area,
         }
     }
 

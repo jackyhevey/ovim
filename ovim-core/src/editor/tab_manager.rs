@@ -20,6 +20,13 @@ impl Editor {
 
     /// Creates a new tab page with an empty buffer and switches to it
     pub fn new_tab(&mut self) {
+        self.clear_definition_returns();
+        self.new_tab_for_definition();
+    }
+
+    /// Internal creation preserves the return chain; callers attach an origin
+    /// only after the definition's file has loaded successfully.
+    pub(crate) fn new_tab_for_definition(&mut self) {
         self.sync_current_tab_buffer();
 
         // Create a new empty buffer for the new tab
@@ -38,6 +45,7 @@ impl Editor {
 
     /// Opens a scratch buffer with the given content in a new tab
     pub fn open_scratch_buffer_in_new_tab(&mut self, title: &str, content: &str) {
+        self.clear_definition_returns();
         self.sync_current_tab_buffer();
 
         // Create the scratch buffer; its `[Title]` file path doubles as the
@@ -61,6 +69,7 @@ impl Editor {
 
     /// Opens a pathless, read-only presentation buffer for a native diff.
     pub fn open_diff_buffer_in_new_tab(&mut self, title: &str, content: &str) {
+        self.clear_definition_returns();
         self.sync_current_tab_buffer();
 
         let mut buffer = Buffer::new_from_str(content);
@@ -129,9 +138,29 @@ impl Editor {
         }
     }
 
+    fn clear_definition_returns(&mut self) {
+        for index in 0..self.tab_count() {
+            if let Some(tab) = self.tab_page_manager.tab_mut(index) {
+                tab.definition_origin = None;
+            }
+        }
+    }
+
     /// Closes the current tab
     pub fn close_current_tab(&mut self) {
+        self.sync_current_tab_buffer();
+        let origin = self.tab_page_manager.current_tab().definition_origin;
         self.tab_page_manager.close_current_tab();
+        if let Some(index) = origin.and_then(|origin| {
+            self.tab_page_manager
+                .tabs()
+                .iter()
+                .position(|tab| tab.id() == origin)
+        }) {
+            // Deliberate return: unlike a manual tab switch, keep the next
+            // origin intact so repeated :q retraces nested definition jumps.
+            self.tab_page_manager.switch_to_tab(index);
+        }
         self.restore_current_tab_buffer();
 
         // Ensure the UI re-renders after tab closure to prevent stale text.
@@ -141,35 +170,55 @@ impl Editor {
     /// Switches to the next tab
     pub fn next_tab(&mut self) {
         self.sync_current_tab_buffer();
+        let previous = self.current_tab_index();
         self.tab_page_manager.next_tab();
+        if previous != self.current_tab_index() {
+            self.clear_definition_returns();
+        }
         self.restore_current_tab_buffer();
     }
 
     /// Switches to the previous tab
     pub fn previous_tab(&mut self) {
         self.sync_current_tab_buffer();
+        let previous = self.current_tab_index();
         self.tab_page_manager.previous_tab();
+        if previous != self.current_tab_index() {
+            self.clear_definition_returns();
+        }
         self.restore_current_tab_buffer();
     }
 
     /// Switches to a specific tab by index (0-based)
     pub fn goto_tab(&mut self, index: usize) {
         self.sync_current_tab_buffer();
+        let previous = self.current_tab_index();
         self.tab_page_manager.switch_to_tab(index);
+        if previous != self.current_tab_index() {
+            self.clear_definition_returns();
+        }
         self.restore_current_tab_buffer();
     }
 
     /// Switches to the first tab
     pub fn first_tab(&mut self) {
         self.sync_current_tab_buffer();
+        let previous = self.current_tab_index();
         self.tab_page_manager.first_tab();
+        if previous != self.current_tab_index() {
+            self.clear_definition_returns();
+        }
         self.restore_current_tab_buffer();
     }
 
     /// Switches to the last tab
     pub fn last_tab(&mut self) {
         self.sync_current_tab_buffer();
+        let previous = self.current_tab_index();
         self.tab_page_manager.last_tab();
+        if previous != self.current_tab_index() {
+            self.clear_definition_returns();
+        }
         self.restore_current_tab_buffer();
     }
 

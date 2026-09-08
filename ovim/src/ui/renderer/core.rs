@@ -467,7 +467,9 @@ fn set_cursor_position(
     chat_area: Option<Rect>,
     file_tree_area: Option<Rect>,
 ) {
-    if editor.has_codex_auth_dialog()
+    if (editor.hover_info().is_some()
+        && (editor.mode().is_hover() || editor.blame_mouse_hover_active()))
+        || editor.has_codex_auth_dialog()
         || editor.ai_chat_has_pending_code_explanation()
         || editor.ai_shell_inspector_is_open()
     {

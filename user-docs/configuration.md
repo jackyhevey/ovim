@@ -267,7 +267,10 @@ override applies.
 hover over an annotation to see its commit, author, date, and message without
 moving the cursor. Move away or type to dismiss the preview. Click an annotation
 (or use `gB`) to open that commit's full, highlighted diff in a read-only tab.
-Use `gb` for the keyboard-controlled details popup. Commit groups share a stable
+Use `gb` for the keyboard-controlled details popup. The terminal caret is hidden
+while a hover popover is visible and restored when it closes. Diff views have a
+right-edge scroll indicator that tracks the visible portion, including wrapped rows.
+Commit groups share a stable
 text color and tinted gutter background, with contrast adjusted for light themes.
 
 ### Pseudocode
@@ -275,3 +278,13 @@ text color and tinted gutter background, with contrast adjusted for light themes
 `:set pseudo` opens a source-mapped Java or Markdown reading view with types and
 formatting noise concealed. Use `:set nopseudo` to return to source. See
 [pseudocode reading view](pseudocode.md) for transformations, navigation, and Lua usage.
+
+### Definition tabs
+
+`<C-g>` follows a symbol's definition in a new tab. `:q` closes that definition
+tab and returns to the tab it came from. Nested jumps retain their return chain:
+A → B → C can be retraced with `:q` back to B, then `:q` back to A.
+
+Closing a definition tab does not clear the remaining chain. Manually switching
+tabs clears the chain; opening a different file or buffer within a definition tab
+clears that tab's return target. Ordinary tab-closing behavior then applies.

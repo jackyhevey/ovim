@@ -105,7 +105,8 @@ pub fn compute_text_width(editor: &Editor, content_width: u16) -> usize {
         content_width
     };
 
-    (effective_width as usize).saturating_sub(gutter_width)
+    (effective_width as usize)
+        .saturating_sub(gutter_width + usize::from(editor.is_diff_buffer() && effective_width > 1))
 }
 
 #[cfg(test)]
