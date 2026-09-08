@@ -208,7 +208,7 @@ pub fn builtin_subagent_model_metadata(config: &AiConfig) -> Vec<ProviderModelMe
             }
             let (efforts, default) = match profile.model.as_str() {
                 "gpt-5.6-luna" => (vec![ReasoningEffort::max()], ReasoningEffort::max()),
-                "gpt-5.6-terra" => (
+                "gpt-6-astra" | "gpt-5.6-terra" => (
                     vec![
                         ReasoningEffort::low(),
                         ReasoningEffort::medium(),
@@ -752,6 +752,12 @@ mod tests {
             ("luna", AiProviderKind::Codex, "gpt-5.6-luna", Some("low")),
             ("terra", AiProviderKind::Codex, "gpt-5.6-terra", Some("low")),
             ("sol", AiProviderKind::Codex, "gpt-5.6-sol", Some("low")),
+            (
+                "astra",
+                AiProviderKind::Codex,
+                "gpt-6-astra",
+                Some("medium"),
+            ),
         ]);
         let metadata = builtin_subagent_model_metadata(&config);
         let catalog = SubagentModelCatalog::from_config_with_metadata(&config, metadata).unwrap();
@@ -767,6 +773,7 @@ mod tests {
 
         for (profile, model, default) in [
             ("terra", "gpt-5.6-terra", ReasoningEffort::medium()),
+            ("astra", "gpt-6-astra", ReasoningEffort::medium()),
             ("sol", "gpt-5.6-sol", ReasoningEffort::high()),
         ] {
             let entry = catalog.entry(&catalog_model_id(profile, model)).unwrap();

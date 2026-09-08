@@ -36,6 +36,9 @@ OAuth refresh tokens rotate, so two applications using the same credential
 lineage can periodically invalidate each other. Codex CLI may be installed and
 signed in separately, but it is not required for Ovim.
 
+Select `/model codex_astra` to use `gpt-6-astra` at medium reasoning effort.
+The profile supports low, medium, high, xhigh, and max effort.
+
 The built-in defaults use `gpt-5.6-sol` at medium effort for chat and
 `gpt-5.6-terra` at low effort for read-only queries. With
 the default `codex` provider, Ovim—not Codex app-server—is the agent harness.

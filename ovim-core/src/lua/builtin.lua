@@ -139,6 +139,20 @@ vim.ai.setup({
     },
 
     profiles = {
+        codex_astra = {
+            scope = "project",
+            scope_network = true,
+            provider = "codex",
+            model = "gpt-6-astra",
+            max_tokens = 4096,
+            edit_format = "codeblock",
+            chat_edit_format = "apply_patch",
+            context = vim.ai.context_policies.hybrid,
+            syntax_check = true,
+            retry = { max = 1 },
+            reasoning_effort = "medium",
+        },
+
         codex_sol = {
             scope = "project",
             scope_network = true,
