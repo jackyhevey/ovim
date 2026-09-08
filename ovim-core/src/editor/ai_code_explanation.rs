@@ -661,7 +661,7 @@ impl Editor {
         );
     }
 
-    pub(crate) fn ai_code_explanation_answering(&self) -> bool {
+    pub fn ai_code_explanation_answering(&self) -> bool {
         self.ai_state.chat.as_ref().is_some_and(|chat| {
             chat.pending_code_explanation
                 .as_ref()

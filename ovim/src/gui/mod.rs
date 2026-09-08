@@ -582,6 +582,7 @@ pub struct GuiQueuedChatInput {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuiCodeExplanation {
+    pub answer_in_progress: bool,
     pub current: usize,
     pub total: usize,
     pub page: GuiCodeExplanationPage,
@@ -2874,6 +2875,7 @@ fn code_explanation(editor: &Editor) -> Option<GuiCodeExplanation> {
         },
     };
     Some(GuiCodeExplanation {
+        answer_in_progress: editor.ai_code_explanation_answering(),
         current: view.current,
         total: view.total,
         page,

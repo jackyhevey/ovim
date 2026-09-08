@@ -140,6 +140,7 @@ export interface GuiAiChat {
 }
 
 export interface GuiCodeExplanation {
+    answerInProgress: boolean;
     current: number;
     total: number;
     page:

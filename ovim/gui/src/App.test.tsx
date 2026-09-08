@@ -150,6 +150,7 @@ describe("Ovim Solid workbench", () => {
     it("renders an interactive concept walkthrough from projected core state", () => {
         const onKey = vi.fn();
         const walkthrough: GuiCodeExplanation = {
+            answerInProgress: false,
             current: 1,
             total: 2,
             page: {
@@ -178,8 +179,44 @@ describe("Ovim Solid workbench", () => {
         expect(onKey).toHaveBeenNthCalledWith(2, " ");
     });
 
+    it("reopens a hidden thread while keeping streaming controls disabled", () => {
+        const onKey = vi.fn();
+        const walkthrough: GuiCodeExplanation = {
+            answerInProgress: true,
+            current: 1,
+            total: 2,
+            page: {
+                kind: "concept",
+                title: "Original step",
+                body: "The original explanation.",
+            },
+            discussion: {
+                state: "navigating",
+                questionCount: 2,
+                latestFailed: false,
+            },
+        };
+        render(() => (
+            <CodeWalkthrough walkthrough={walkthrough} onKey={onKey} />
+        ));
+        fireEvent.click(screen.getByRole("button", { name: "Show thread" }));
+        expect(onKey).toHaveBeenCalledWith("t");
+        expect(
+            screen
+                .getByRole("button", { name: "Continue" })
+                .hasAttribute("disabled"),
+        ).toBe(true);
+        expect(
+            screen
+                .getByRole("button", { name: "Ask a question" })
+                .hasAttribute("disabled"),
+        ).toBe(true);
+        expect(screen.getByText("The original explanation.")).toBeTruthy();
+    });
+
     it("renders code location and live answer state", () => {
         const walkthrough: GuiCodeExplanation = {
+            answerInProgress: true,
             current: 2,
             total: 2,
             page: {
@@ -205,6 +242,12 @@ describe("Ovim Solid workbench", () => {
             screen.getByRole("dialog", { name: "src/main.rs:12–14" }),
         ).toBeTruthy();
         expect(screen.getByLabelText("Answering")).toBeTruthy();
+        expect(
+            screen.getByRole("button", { name: "Back to step" }),
+        ).toBeTruthy();
+        expect(
+            screen.getByRole("button", { name: "Earlier question" }),
+        ).toBeTruthy();
         expect(screen.getByText("Because it owns the boundary.")).toBeTruthy();
         expect(
             screen

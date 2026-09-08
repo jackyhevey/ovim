@@ -351,7 +351,15 @@ export const CodeWalkthrough = (props: {
         return active.kind === "concept" ? active.body : active.comment;
     };
     const composing = () => props.walkthrough.discussion.state === "composing";
-    const answering = () => props.walkthrough.discussion.state === "answering";
+    const answering = () => props.walkthrough.answerInProgress;
+    const threadVisible = () => {
+        const discussion = props.walkthrough.discussion;
+        return (
+            discussion.state === "answering" ||
+            (discussion.state === "navigating" &&
+                Boolean(discussion.latestQuestion))
+        );
+    };
     return (
         <div
             class={`walkthrough-layer ${page().kind}`}
@@ -382,7 +390,13 @@ export const CodeWalkthrough = (props: {
                     </div>
                     <button
                         type="button"
-                        aria-label="Dismiss walkthrough"
+                        aria-label={
+                            composing()
+                                ? "Cancel question"
+                                : threadVisible()
+                                  ? "Back to step"
+                                  : "Dismiss walkthrough"
+                        }
                         onClick={() => dispatch("Escape")}
                     >
                         Esc
@@ -418,6 +432,40 @@ export const CodeWalkthrough = (props: {
                         </button>
                     </div>
                     <div class="walkthrough-actions">
+                        <Show
+                            when={
+                                !composing() &&
+                                props.walkthrough.discussion.questionCount > 0
+                            }
+                        >
+                            <Show
+                                when={threadVisible()}
+                                fallback={
+                                    <button
+                                        type="button"
+                                        onClick={() => dispatch("t")}
+                                        title="t"
+                                    >
+                                        Show thread
+                                    </button>
+                                }
+                            >
+                                <button
+                                    type="button"
+                                    onClick={() => dispatch("[")}
+                                    title="["
+                                >
+                                    Earlier question
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => dispatch("]")}
+                                    title="]"
+                                >
+                                    Later question
+                                </button>
+                            </Show>
+                        </Show>
                         <button
                             type="button"
                             disabled={answering()}
