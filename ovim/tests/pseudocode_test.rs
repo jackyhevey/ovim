@@ -297,3 +297,49 @@ fn rejected_commands_do_not_leave_pending_prefixes_or_counts() {
         assert_eq!(test.editor.buffer().cursor().line(), 1, "{keys}");
     }
 }
+
+#[test]
+fn markdown_document_is_cached_refreshed_and_scoped_to_the_reading_buffer() {
+    let mut test = EditorTest::new("# Heading\n\nA **bold** word.\n");
+    test.editor.set_file_path("/example/readme.md".into());
+    let source_id = test.editor.buffer().id();
+    command(&mut test, "set pseudo");
+    let view_id = test.editor.buffer().id();
+    let document = test.editor.pseudocode_markdown(view_id).unwrap();
+    assert!(document.text.contains("# Heading"));
+    assert!(document.text.contains("**bold**"));
+    assert_eq!(document.view_lines, vec![0, 1, 2]);
+    assert!(test.editor.pseudocode_markdown(source_id).is_none());
+    command(&mut test, "set nopseudo");
+    test.editor
+        .buffer_mut()
+        .insert_text_at(0, CharCol(2), "Updated ");
+    command(&mut test, "set pseudo");
+    assert_eq!(test.editor.buffer().id(), view_id);
+    assert!(test
+        .editor
+        .pseudocode_markdown(view_id)
+        .unwrap()
+        .text
+        .starts_with("# Updated Heading"));
+}
+
+#[test]
+fn terminal_markdown_retains_bold_and_italic_after_concealing_delimiters() {
+    use ovim::ui::Renderer;
+    use ratatui::{backend::TestBackend, style::Modifier, Terminal};
+    let mut test = EditorTest::new("# Title\n\n**Bold** and *Italic*.\n");
+    test.editor.set_file_path("/example/readme.md".into());
+    command(&mut test, "set pseudo");
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    terminal
+        .draw(|frame| Renderer::render_to_frame(frame, &mut test.editor, &mut Default::default()))
+        .unwrap();
+    let cells = &terminal.backend().buffer().content;
+    assert!(cells
+        .iter()
+        .any(|cell| cell.symbol() == "B" && cell.modifier.contains(Modifier::BOLD)));
+    assert!(cells
+        .iter()
+        .any(|cell| cell.symbol() == "I" && cell.modifier.contains(Modifier::ITALIC)));
+}

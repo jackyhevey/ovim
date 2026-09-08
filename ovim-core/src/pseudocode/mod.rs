@@ -33,9 +33,47 @@ impl Projection {
         let mut edits = Vec::new();
         match language {
             Language::Java => java::edits(source, 0, &mut edits)?,
-            Language::Markdown => markdown::edits(source, &mut edits)?,
+            Language::Markdown => markdown::edits(source, &mut edits, false)?,
         }
         Ok(apply(source, edits))
+    }
+
+    /// Markdown syntax remains available to document renderers, while fenced
+    /// Java uses exactly the same simplification as the terminal reading view.
+    pub fn formatted_markdown(source: &str) -> anyhow::Result<Self> {
+        anyhow::ensure!(
+            source.len() <= 2 * 1024 * 1024,
+            "Pseudocode supports documents up to 2 MiB"
+        );
+        let mut edits = Vec::new();
+        markdown::edits(source, &mut edits, true)?;
+        Ok(apply(source, edits))
+    }
+
+    pub fn markdown_styles(&self, source: &str) -> anyhow::Result<crate::buffer::LineHighlights> {
+        let mut by_line = vec![Vec::new(); self.source_lines.len()];
+        for (range, group) in markdown::styles(source)? {
+            let first = self
+                .source_lines
+                .partition_point(|start| *start <= range.start)
+                .saturating_sub(1);
+            for (line, styles) in by_line.iter_mut().enumerate().skip(first) {
+                let start = self.source_lines[line];
+                if start >= range.end {
+                    break;
+                }
+                let end = self
+                    .source_lines
+                    .get(line + 1)
+                    .copied()
+                    .unwrap_or(source.len());
+                styles.push((
+                    range.start.max(start) - start..range.end.min(end) - start,
+                    group,
+                ));
+            }
+        }
+        Ok(self.map_highlights(|line| by_line[line].clone()))
     }
 
     /// Map a displayed byte column to a source line and byte column.
@@ -88,12 +126,21 @@ impl Projection {
     }
 
     pub fn view_line_for_source(&self, source_line: usize) -> usize {
-        self.lines
-            .iter()
-            .enumerate()
-            .min_by_key(|(line, _)| self.source_position(*line, 0).0.abs_diff(source_line))
-            .map(|(line, _)| line)
-            .unwrap_or(0)
+        let next = self.lines.partition_point(|map| {
+            let byte = map.source_bytes.first().copied().unwrap_or(0);
+            let line = self
+                .source_lines
+                .partition_point(|start| *start <= byte)
+                .saturating_sub(1);
+            line < source_line
+        });
+        [
+            next.saturating_sub(1),
+            next.min(self.lines.len().saturating_sub(1)),
+        ]
+        .into_iter()
+        .min_by_key(|line| self.source_position(*line, 0).0.abs_diff(source_line))
+        .unwrap_or(0)
     }
 }
 
@@ -407,5 +454,52 @@ mod compact_tests {
             view.text
         );
         assert!(view.text.contains("while waiting {}"), "{}", view.text);
+    }
+    #[test]
+    fn formatted_markdown_preserves_semantics_and_maps_simplified_java() {
+        let source = "# Title\n\nA **bold** [reference][ref].  \nNext line.\n\n```java\nimport java.util.List;\npublic int size(String name) {\n    return name.length();\n}\n```\n\n[ref]: https://example.com\n";
+        let plain = Projection::build(source, Language::Markdown).unwrap();
+        let rich = Projection::formatted_markdown(source).unwrap();
+        assert!(rich.text.starts_with("# Title\n"));
+        assert!(rich
+            .text
+            .contains("A **bold** [reference][ref].  \nNext line."));
+        assert!(
+            rich.text
+                .contains("```java\nsize(name):\n    return name.length()\n```"),
+            "{}",
+            rich.text
+        );
+        assert!(rich.text.contains("[ref]: https://example.com"));
+        let line = rich
+            .text
+            .lines()
+            .position(|line| line.contains("return"))
+            .unwrap();
+        assert_eq!(rich.source_position(line, 4), (8, 4));
+        let mapped = plain.view_line_for_source(rich.source_position(line, 0).0);
+        assert_eq!(plain.source_position(mapped, 4), (8, 4));
+        let prose = plain
+            .text
+            .lines()
+            .position(|line| line.contains("bold"))
+            .unwrap();
+        assert!(plain.markdown_styles(source).unwrap()[prose]
+            .iter()
+            .any(|(range, group)| {
+                *group == crate::syntax::HighlightGroup::MarkupBold
+                    && &plain.text.lines().nth(prose).unwrap()[range.clone()] == "bold"
+            }));
+    }
+
+    #[test]
+    fn nearest_source_row_uses_earlier_row_for_ties() {
+        let view = Projection::build("class A {\n\n\n int x;\n}\n", Language::Java).unwrap();
+        for source_line in 0..8 {
+            let expected = (0..view.lines.len())
+                .min_by_key(|line| view.source_position(*line, 0).0.abs_diff(source_line))
+                .unwrap();
+            assert_eq!(view.view_line_for_source(source_line), expected);
+        }
     }
 }

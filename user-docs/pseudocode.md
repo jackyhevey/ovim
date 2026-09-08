@@ -72,12 +72,24 @@ preserved. Incomplete or unrecognized syntax is left visible rather than guessed
 
 ## Markdown
 
-Heading markers, emphasis delimiters, inline-code delimiters, and link syntax
-are concealed while their readable text remains. Lists, tasks, quotes, and tables
-keep their structural markers. Java fenced code uses the Java transformation;
-other languages' fenced code, indented code, and HTML blocks remain verbatim.
-Ordinary repeated blank lines are compacted. Source highlighting is carried
-through the projection, including Java code inside Markdown.
+In the terminal, heading markers, emphasis delimiters, inline-code delimiters,
+and link syntax are concealed. Headings and bold/italic text retain their styles.
+Lists, tasks, quotes, and tables keep their structural markers. Java fenced code
+uses the Java transformation; other languages' fenced code, indented code, and
+HTML blocks remain verbatim. Ordinary repeated blank lines are compacted.
+
+In **ovim-gui**, Markdown appears as a formatted document: headings, emphasis,
+lists, task checkboxes, tables, quotes, and syntax-colored code blocks. Java code
+blocks use the same pseudocode transformation as the terminal. Hard line breaks
+and code whitespace are preserved. The document follows the editor theme and
+scrolls naturally, including wide tables and code blocks in narrow panes.
+
+Click a block (or a code line), then press **Enter** to open its source location.
+Normal motions and search still select locations in the underlying reading view.
+External HTTP(S)/email links open normally; heading links navigate within the
+document. Images appear as descriptive links, and raw HTML is shown literally.
+Use **r** to refresh after changing source, and **q** or `:set nopseudo` to return.
+Source highlighting and navigation share the same source map in both frontends.
 
 ## Lua
 

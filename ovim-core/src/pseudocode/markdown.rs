@@ -1,12 +1,25 @@
 use super::{java, parse, preserve, remove, replace, Edit};
 use tree_sitter::Node;
 
-pub(super) fn edits(source: &str, edits: &mut Vec<Edit>) -> anyhow::Result<()> {
+pub(super) fn edits(source: &str, edits: &mut Vec<Edit>, formatted: bool) -> anyhow::Result<()> {
     let tree = parse(source, tree_sitter_md::LANGUAGE.into())?;
-    blocks(tree.root_node(), source, edits)
+    blocks(tree.root_node(), source, edits, formatted)
 }
 
-fn blocks(node: Node<'_>, source: &str, edits: &mut Vec<Edit>) -> anyhow::Result<()> {
+fn blocks(
+    node: Node<'_>,
+    source: &str,
+    edits: &mut Vec<Edit>,
+    formatted: bool,
+) -> anyhow::Result<()> {
+    if formatted
+        && matches!(
+            node.kind(),
+            "paragraph" | "inline" | "link_reference_definition"
+        )
+    {
+        preserve(edits, node.byte_range());
+    }
     match node.kind() {
         "fenced_code_block" => {
             let mut cursor = node.walk();
@@ -27,7 +40,7 @@ fn blocks(node: Node<'_>, source: &str, edits: &mut Vec<Edit>) -> anyhow::Result
                         "code_fence_content" => {
                             java::edits(&source[child.byte_range()], child.start_byte(), edits)?
                         }
-                        "fenced_code_block_delimiter" | "info_string" => {
+                        "fenced_code_block_delimiter" | "info_string" if !formatted => {
                             remove(source, child.byte_range(), 0, edits)
                         }
                         _ => {}
@@ -42,7 +55,7 @@ fn blocks(node: Node<'_>, source: &str, edits: &mut Vec<Edit>) -> anyhow::Result
             preserve(edits, node.byte_range());
             return Ok(());
         }
-        "inline" => {
+        "inline" if !formatted => {
             let text = &source[node.byte_range()];
             let tree = parse(text, tree_sitter_md::INLINE_LANGUAGE.into())?;
             inline(tree.root_node(), node.start_byte(), edits);
@@ -56,7 +69,9 @@ fn blocks(node: Node<'_>, source: &str, edits: &mut Vec<Edit>) -> anyhow::Result
         | "atx_h6_marker"
         | "setext_h1_underline"
         | "setext_h2_underline"
-        | "link_reference_definition" => {
+        | "link_reference_definition"
+            if !formatted =>
+        {
             remove(source, node.byte_range(), 0, edits);
             return Ok(());
         }
@@ -65,7 +80,7 @@ fn blocks(node: Node<'_>, source: &str, edits: &mut Vec<Edit>) -> anyhow::Result
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        blocks(child, source, edits)?;
+        blocks(child, source, edits, formatted)?;
     }
     Ok(())
 }
@@ -114,4 +129,56 @@ fn inline(node: Node<'_>, base: usize, edits: &mut Vec<Edit>) {
     for child in node.children(&mut cursor) {
         inline(child, base, edits);
     }
+}
+
+/// Inline styles are absent from the block grammar's normal syntax query.
+/// Capture them separately, then use the shared byte map to conceal delimiters.
+pub(super) fn styles(
+    source: &str,
+) -> anyhow::Result<Vec<(std::ops::Range<usize>, crate::syntax::HighlightGroup)>> {
+    fn visit(
+        node: Node<'_>,
+        base: usize,
+        output: &mut Vec<(std::ops::Range<usize>, crate::syntax::HighlightGroup)>,
+    ) {
+        use crate::syntax::HighlightGroup;
+        let group = match node.kind() {
+            "strong_emphasis" => Some(HighlightGroup::MarkupBold),
+            "emphasis" => Some(HighlightGroup::MarkupItalic),
+            "code_span" => Some(HighlightGroup::MarkupRaw),
+            _ => None,
+        };
+        if let Some(group) = group {
+            output.push((base + node.start_byte()..base + node.end_byte(), group));
+        }
+        if node.kind() != "code_span" {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                visit(child, base, output);
+            }
+        }
+    }
+    fn blocks(
+        node: Node<'_>,
+        source: &str,
+        output: &mut Vec<(std::ops::Range<usize>, crate::syntax::HighlightGroup)>,
+    ) -> anyhow::Result<()> {
+        if node.kind() == "inline" {
+            let tree = parse(
+                &source[node.byte_range()],
+                tree_sitter_md::INLINE_LANGUAGE.into(),
+            )?;
+            visit(tree.root_node(), node.start_byte(), output);
+        } else {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                blocks(child, source, output)?;
+            }
+        }
+        Ok(())
+    }
+    let tree = parse(source, tree_sitter_md::LANGUAGE.into())?;
+    let mut output = Vec::new();
+    blocks(tree.root_node(), source, &mut output)?;
+    Ok(output)
 }

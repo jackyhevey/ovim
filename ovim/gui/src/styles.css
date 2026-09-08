@@ -833,6 +833,9 @@ button:focus-visible {
 .pane-tree {
     flex: 1;
 }
+.pane-tree > .editor-pane {
+    height: 100%;
+}
 .split-layout {
     display: grid;
 }
@@ -3336,4 +3339,226 @@ kbd {
 .exit-confirmation button.danger {
     color: var(--error);
     border-color: color-mix(in srgb, var(--error) 54%, var(--border));
+}
+
+/* Pseudo Markdown shares the editor's palette, with document typography and
+   native scrolling independent of the source editor's fixed row geometry. */
+.markdown-document {
+    min-height: 0;
+    min-width: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    padding: 24px clamp(20px, 5%, 64px) 80px;
+    color: var(--text-primary);
+    font: 15px/1.75 var(--ui-font);
+    overflow-wrap: anywhere;
+}
+.document-hint {
+    max-width: 760px;
+    margin: 0 auto 28px;
+    color: var(--text-secondary);
+    font: 10px/1.6 var(--editor-font);
+    letter-spacing: 0.06em;
+}
+.document-hint span {
+    margin-left: 16px;
+    letter-spacing: normal;
+}
+.document-content {
+    max-width: 760px;
+    margin: 0 auto;
+}
+.document-block {
+    position: relative;
+    margin: 0 0 18px;
+}
+.document-block.active::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -12px;
+    width: 2px;
+    background: var(--accent);
+}
+.document-block > :first-child {
+    margin-top: 0;
+}
+.document-block > :last-child {
+    margin-bottom: 0;
+}
+.document-block h1,
+.document-block h2,
+.document-block h3,
+.document-block h4,
+.document-block h5,
+.document-block h6 {
+    color: var(--text-primary);
+    line-height: 1.3;
+    margin: 32px 0 12px;
+    font-weight: 650;
+    letter-spacing: -0.02em;
+}
+.document-block h1 {
+    font-size: 30px;
+}
+.document-block h2 {
+    font-size: 23px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+}
+.document-block h3 {
+    font-size: 18px;
+}
+.document-block h4,
+.document-block h5,
+.document-block h6 {
+    font-size: 15px;
+}
+.document-block p {
+    margin: 0 0 14px;
+}
+.document-block li {
+    padding-left: 4px;
+}
+.document-block li + li {
+    margin-top: 4px;
+}
+.document-block ul,
+.document-block ol {
+    padding-left: 24px;
+}
+.document-block blockquote {
+    margin: 0;
+    padding: 8px 18px;
+    border-left: 2px solid var(--border);
+    color: var(--text-secondary);
+}
+.document-block code {
+    font: 0.88em/1.6 var(--editor-font);
+    background: var(--surface-1);
+    padding: 2px 5px;
+    border-radius: 3px;
+}
+.document-block pre {
+    padding: 18px 20px;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    overflow-x: auto;
+    font: 13px/1.7 var(--editor-font);
+    white-space: pre;
+    overflow-wrap: normal;
+    tab-size: 4;
+}
+.document-block pre code {
+    padding: 0;
+    background: none;
+    font: inherit;
+}
+.document-block:has(table) {
+    overflow-x: auto;
+}
+.document-block table {
+    border-collapse: collapse;
+    min-width: 100%;
+    font-size: 14px;
+}
+.document-block th,
+.document-block td {
+    overflow-wrap: normal;
+    padding: 9px 14px;
+    border: 1px solid var(--border);
+    text-align: left;
+}
+.document-block th {
+    background: var(--surface-1);
+    font-weight: 600;
+}
+.document-block a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+}
+.document-block a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+}
+.document-block hr {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 28px 0;
+}
+.document-block input[type="checkbox"] {
+    accent-color: var(--accent);
+    margin-right: 6px;
+}
+
+.document-syntax-keyword {
+    color: var(--document-syntax-keyword);
+}
+.document-syntax-function {
+    color: var(--document-syntax-function);
+}
+.document-syntax-type {
+    color: var(--document-syntax-type);
+}
+.document-syntax-type-builtin {
+    color: var(--document-syntax-type-builtin);
+}
+.document-syntax-string {
+    color: var(--document-syntax-string);
+}
+.document-syntax-number {
+    color: var(--document-syntax-number);
+}
+.document-syntax-comment {
+    color: var(--document-syntax-comment);
+}
+.document-syntax-operator {
+    color: var(--document-syntax-operator);
+}
+.document-syntax-variable {
+    color: var(--document-syntax-variable);
+}
+.document-syntax-variable-builtin {
+    color: var(--document-syntax-variable-builtin);
+}
+.document-syntax-macro {
+    color: var(--document-syntax-macro);
+}
+.document-syntax-constant {
+    color: var(--document-syntax-constant);
+}
+.document-syntax-property {
+    color: var(--document-syntax-property);
+}
+.document-syntax-parameter {
+    color: var(--document-syntax-parameter);
+}
+.document-syntax-label {
+    color: var(--document-syntax-label);
+}
+.document-syntax-punctuation {
+    color: var(--document-syntax-punctuation);
+}
+.document-syntax-punctuation-delimiter {
+    color: var(--document-syntax-punctuation-delimiter);
+}
+.document-syntax-tag {
+    color: var(--document-syntax-tag);
+}
+.document-syntax-constructor {
+    color: var(--document-syntax-constructor);
+}
+.document-syntax-markup-raw {
+    color: var(--document-syntax-markup-raw);
+}
+.document-syntax-other {
+    color: var(--document-syntax-other);
+}
+
+.document-block table code {
+    white-space: nowrap;
 }

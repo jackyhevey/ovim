@@ -375,6 +375,43 @@ pub struct GuiPane {
     pub horizontal_offset: usize,
     pub total_lines: usize,
     pub lines: Vec<GuiLine>,
+    pub markdown: Option<GuiMarkdownDocument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiMarkdownDocument {
+    pub text: String,
+    pub view_lines: Vec<usize>,
+    pub highlights: Vec<Vec<GuiMarkdownHighlight>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GuiMarkdownHighlight {
+    pub start: usize,
+    pub end: usize,
+    pub token: String,
+}
+
+fn project_markdown(editor: &Editor, buffer_id: u64) -> Option<GuiMarkdownDocument> {
+    let document = editor.pseudocode_markdown(buffer_id)?;
+    Some(GuiMarkdownDocument {
+        text: document.text.clone(),
+        view_lines: document.view_lines.clone(),
+        highlights: document
+            .highlights
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|(range, group)| GuiMarkdownHighlight {
+                        start: range.start,
+                        end: range.end,
+                        token: syntax_name(*group).to_string(),
+                    })
+                    .collect()
+            })
+            .collect(),
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2166,6 +2203,7 @@ fn project_panes(
                 horizontal_offset: editor.horizontal_offset(),
                 total_lines: editor.buffer().line_count(),
                 lines: active_lines.to_vec(),
+                markdown: project_markdown(editor, editor.buffer().id()),
             }],
         );
     };
@@ -2177,9 +2215,15 @@ fn project_panes(
         .filter_map(|index| {
             let window = manager.get_window(index)?;
             let focused = index == focused_index;
-            let buffer = editor
-                .get_buffer(window.buffer_id())
-                .unwrap_or_else(|| editor.buffer());
+            // The focused editor buffer is authoritative after Ex commands
+            // open a generated view; the window may still name its old buffer.
+            let buffer = if focused {
+                editor.buffer()
+            } else {
+                editor
+                    .get_buffer(window.buffer_id())
+                    .unwrap_or_else(|| editor.buffer())
+            };
             let cursor = if focused {
                 editor.buffer().cursor()
             } else {
@@ -2246,6 +2290,7 @@ fn project_panes(
                 horizontal_offset: window.horizontal_offset(),
                 total_lines: buffer.line_count(),
                 lines,
+                markdown: project_markdown(editor, buffer.id()),
             })
         })
         .collect();
@@ -3164,6 +3209,35 @@ fn indexed_rgb(index: u8) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markdown_pseudo_snapshot_carries_document_only_for_its_pane() {
+        let mut editor = Editor::with_content("# Hello\n\n**world**\n");
+        editor.set_file_path("/example/readme.md".into());
+        editor.split_window_vertical();
+        editor.set_pseudocode(true).unwrap();
+        let view = snapshot(&editor, 1);
+        let focused = view.panes.iter().find(|pane| pane.focused).unwrap();
+        assert_eq!(focused.buffer_id, editor.buffer().id());
+        assert_eq!(focused.file_name, "Pseudocode: readme.md");
+        assert_eq!(
+            view.panes
+                .iter()
+                .filter(|pane| pane.markdown.is_some())
+                .count(),
+            1
+        );
+        let document = focused.markdown.as_ref().unwrap();
+        assert_eq!(document.text, "# Hello\n\n**world**\n");
+        assert_eq!(document.view_lines, vec![0, 1, 2]);
+        assert!(view.read_only);
+        assert!(view.file_path.is_none());
+        editor.set_pseudocode(false).unwrap();
+        assert!(snapshot(&editor, 2)
+            .panes
+            .iter()
+            .all(|pane| pane.markdown.is_none()));
+    }
 
     #[test]
     fn gui_chat_activation_dismisses_a_transient_picker() {

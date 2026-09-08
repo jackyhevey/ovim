@@ -13,6 +13,7 @@ import { listen } from "@tauri-apps/api/event";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { mockSnapshot } from "./mock";
+import MarkdownDocument from "./MarkdownDocument";
 import ChatModelPicker from "./ChatModelPicker";
 import ChatComposer, { type ChatInputUpdate } from "./ChatComposer";
 import BrowserPanel, { browserTabTitle } from "./BrowserPanel";
@@ -1959,7 +1960,11 @@ function App() {
         const pane = (event.target as Element | null)?.closest<HTMLElement>(
             ".editor-pane",
         );
-        if (!pane) return;
+        if (
+            !pane ||
+            (event.target as Element | null)?.closest(".markdown-document")
+        )
+            return;
         event.preventDefault();
         const scale =
             event.deltaMode === WheelEvent.DOM_DELTA_LINE
@@ -2151,110 +2156,155 @@ function App() {
                     </small>
                 </header>
             </Show>
-            <div class="code-viewport">
-                <For each={props.pane.lines}>
-                    {(line) => (
-                        <div
-                            class="code-line"
-                            classList={{
-                                [`diff-${line.diff}`]: Boolean(line.diff),
-                                current: line.current && props.pane.focused,
-                                walkthrough: lineIsInWalkthrough(
-                                    line.number,
-                                    props.pane.focused,
-                                ),
-                            }}
-                        >
-                            <span class={`change-mark ${line.git || ""}`} />
-                            <span
-                                class={`diagnostic-mark ${line.diagnostic || ""}`}
-                            >
-                                <Show when={line.diagnostic}>
-                                    {(severity) => {
-                                        const status =
-                                            diagnosticIcon(severity());
-                                        return (
-                                            <Icon
-                                                name={status.name}
-                                                tone={status.tone}
-                                                size={16}
-                                            />
-                                        );
-                                    }}
-                                </Show>
-                            </span>
-                            <span class="line-number">
-                                {line.continuation ? "" : line.number}
-                            </span>
-                            <span
-                                class="line-content"
-                                style={{
-                                    transform: `translateX(-${Math.max(0, props.pane.horizontalOffset - line.displayStart) * cellWidth}px)`,
-                                }}
-                                onMouseDown={(event) =>
-                                    setCursor(
-                                        event,
-                                        props.pane.index,
-                                        line.number,
-                                        line.displayStart,
-                                    )
-                                }
-                            >
-                                <For each={line.segments}>
-                                    {(segment) => (
+            <Show
+                when={props.pane.markdown}
+                fallback={
+                    <>
+                        <div class="code-viewport">
+                            <For each={props.pane.lines}>
+                                {(line) => (
+                                    <div
+                                        class="code-line"
+                                        classList={{
+                                            [`diff-${line.diff}`]: Boolean(
+                                                line.diff,
+                                            ),
+                                            current:
+                                                line.current &&
+                                                props.pane.focused,
+                                            walkthrough: lineIsInWalkthrough(
+                                                line.number,
+                                                props.pane.focused,
+                                            ),
+                                        }}
+                                    >
                                         <span
-                                            class="code-segment"
+                                            class={`change-mark ${line.git || ""}`}
+                                        />
+                                        <span
+                                            class={`diagnostic-mark ${line.diagnostic || ""}`}
+                                        >
+                                            <Show when={line.diagnostic}>
+                                                {(severity) => {
+                                                    const status =
+                                                        diagnosticIcon(
+                                                            severity(),
+                                                        );
+                                                    return (
+                                                        <Icon
+                                                            name={status.name}
+                                                            tone={status.tone}
+                                                            size={16}
+                                                        />
+                                                    );
+                                                }}
+                                            </Show>
+                                        </span>
+                                        <span class="line-number">
+                                            {line.continuation
+                                                ? ""
+                                                : line.number}
+                                        </span>
+                                        <span
+                                            class="line-content"
+                                            style={{
+                                                transform: `translateX(-${Math.max(0, props.pane.horizontalOffset - line.displayStart) * cellWidth}px)`,
+                                            }}
+                                            onMouseDown={(event) =>
+                                                setCursor(
+                                                    event,
+                                                    props.pane.index,
+                                                    line.number,
+                                                    line.displayStart,
+                                                )
+                                            }
+                                        >
+                                            <For each={line.segments}>
+                                                {(segment) => (
+                                                    <span
+                                                        class="code-segment"
+                                                        classList={{
+                                                            cursor:
+                                                                segment.cursor &&
+                                                                props.pane
+                                                                    .focused,
+                                                            selected:
+                                                                segment.selected,
+                                                            "search-match":
+                                                                segment.searchMatch,
+                                                        }}
+                                                        style={{
+                                                            color: segment.token
+                                                                ? view().theme
+                                                                      .syntax[
+                                                                      segment
+                                                                          .token
+                                                                  ]
+                                                                : undefined,
+                                                            width: `${segment.cells * cellWidth}px`,
+                                                        }}
+                                                    >
+                                                        {segment.text}
+                                                    </span>
+                                                )}
+                                            </For>
+                                        </span>
+                                    </div>
+                                )}
+                            </For>
+                        </div>
+                        <InlineSelectionComposer pane={props.pane} />
+                        <div class="overview-ruler" aria-hidden="true">
+                            <For each={props.pane.lines}>
+                                {(line) => (
+                                    <Show
+                                        when={
+                                            (line.current &&
+                                                props.pane.focused) ||
+                                            line.diagnostic ||
+                                            line.git
+                                        }
+                                    >
+                                        <span
                                             classList={{
-                                                cursor:
-                                                    segment.cursor &&
+                                                current:
+                                                    line.current &&
                                                     props.pane.focused,
-                                                selected: segment.selected,
-                                                "search-match":
-                                                    segment.searchMatch,
+                                                diagnostic: Boolean(
+                                                    line.diagnostic,
+                                                ),
+                                                changed: Boolean(line.git),
                                             }}
                                             style={{
-                                                color: segment.token
-                                                    ? view().theme.syntax[
-                                                          segment.token
-                                                      ]
-                                                    : undefined,
-                                                width: `${segment.cells * cellWidth}px`,
+                                                top: `${props.pane.totalLines <= 1 ? 0 : ((line.number - 1) / (props.pane.totalLines - 1)) * 100}%`,
                                             }}
-                                        >
-                                            {segment.text}
-                                        </span>
-                                    )}
-                                </For>
-                            </span>
+                                        />
+                                    </Show>
+                                )}
+                            </For>
                         </div>
-                    )}
-                </For>
-            </div>
-            <InlineSelectionComposer pane={props.pane} />
-            <div class="overview-ruler" aria-hidden="true">
-                <For each={props.pane.lines}>
-                    {(line) => (
-                        <Show
-                            when={
-                                (line.current && props.pane.focused) ||
-                                line.diagnostic ||
-                                line.git
-                            }
-                        >
-                            <span
-                                classList={{
-                                    current: line.current && props.pane.focused,
-                                    diagnostic: Boolean(line.diagnostic),
-                                    changed: Boolean(line.git),
-                                }}
-                                style={{
-                                    top: `${props.pane.totalLines <= 1 ? 0 : ((line.number - 1) / (props.pane.totalLines - 1)) * 100}%`,
-                                }}
-                            />
-                        </Show>
-                    )}
-                </For>
-            </div>
+                    </>
+                }
+            >
+                {(document) => (
+                    <MarkdownDocument
+                        document={document()}
+                        firstLine={props.pane.firstLine}
+                        syntax={view().theme.syntax}
+                        cursorLine={props.pane.cursor.line}
+                        focused={props.pane.focused}
+                        onSelect={(line) => {
+                            focusEditorInput();
+                            void mutate("gui_set_cursor", {
+                                pane: props.pane.index,
+                                line,
+                                displayColumn: 0,
+                            });
+                        }}
+                        onOpenLink={openExternalLink}
+                    />
+                )}
+            </Show>
         </section>
     );
 

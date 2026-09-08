@@ -73,6 +73,7 @@ pub mod picker;
 mod picker_manager;
 pub mod picker_state;
 mod pseudocode;
+pub use pseudocode::MarkdownDocument;
 mod quickfix;
 mod register;
 mod render_cache;

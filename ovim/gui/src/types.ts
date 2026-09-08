@@ -36,6 +36,18 @@ export type GuiLayoutNode =
           second: GuiLayoutNode;
       };
 
+export interface GuiMarkdownHighlight {
+    start: number;
+    end: number;
+    token: string;
+}
+
+export interface GuiMarkdownDocument {
+    text: string;
+    viewLines: number[];
+    highlights?: GuiMarkdownHighlight[][];
+}
+
 export interface GuiPane {
     index: number;
     bufferId: number;
@@ -48,6 +60,7 @@ export interface GuiPane {
     horizontalOffset: number;
     totalLines: number;
     lines: GuiLine[];
+    markdown?: GuiMarkdownDocument | null;
 }
 
 export interface GuiAiProfileOption {

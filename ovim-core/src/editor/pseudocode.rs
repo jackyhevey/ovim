@@ -11,9 +11,23 @@ pub struct PseudocodeView {
     source_version: usize,
     view_version: usize,
     projection: Projection,
+    markdown: Option<MarkdownDocument>,
+}
+
+/// Presentation payload cached with the reading view, independent of viewport
+/// geometry. Each Markdown line points into the source-mapped reading buffer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MarkdownDocument {
+    pub text: String,
+    pub view_lines: Vec<usize>,
+    pub highlights: crate::buffer::LineHighlights,
 }
 
 impl Editor {
+    pub fn pseudocode_markdown(&self, buffer_id: BufferId) -> Option<&MarkdownDocument> {
+        self.ui_panels.pseudocode.get(&buffer_id)?.markdown.as_ref()
+    }
+
     pub fn is_pseudocode_buffer(&self) -> bool {
         self.ui_panels.pseudocode.contains_key(&self.buffer().id())
     }
@@ -44,8 +58,29 @@ impl Editor {
         let mut colored_source = Buffer::new_from_str(&source_text);
         colored_source.set_language_catalog(self.language_catalog.clone());
         colored_source.enable_syntax_highlighting_for_path(path);
-        let highlights =
+        let mut highlights =
             projection.map_highlights(|line| colored_source.highlights_for_line(line).into_owned());
+        let markdown = if language == Language::Markdown {
+            for (line, styles) in highlights
+                .iter_mut()
+                .zip(projection.markdown_styles(&source_text)?)
+            {
+                line.extend(styles);
+            }
+            let formatted = Projection::formatted_markdown(&source_text)?;
+            let view_lines = (0..formatted.lines.len())
+                .map(|line| projection.view_line_for_source(formatted.source_position(line, 0).0))
+                .collect();
+            let highlights = formatted
+                .map_highlights(|line| colored_source.highlights_for_line(line).into_owned());
+            Some(MarkdownDocument {
+                highlights,
+                text: formatted.text,
+                view_lines,
+            })
+        } else {
+            None
+        };
         let source_version = source.version();
         let source_line = if let Some(view) = self.ui_panels.pseudocode.get(&current_id) {
             view.projection
@@ -90,6 +125,7 @@ impl Editor {
                 source_version,
                 view_version: self.buffers[index].version(),
                 projection,
+                markdown,
             },
         );
         self.buffer_mut()
