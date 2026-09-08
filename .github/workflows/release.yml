@@ -89,6 +89,19 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - name: Build
         run: cargo build --release --locked -p ovim --features vendored --target ${{ matrix.target }}
+      - name: Build standalone terminal
+        # Keep the GUI binary above, but replace the terminal binary with a
+        # headless build so its archive does not require GTK/WebKit on Linux.
+        run: cargo build --release --locked -p ovim --bin ovim --no-default-features --features lua,vendored --target ${{ matrix.target }}
+      - name: Verify terminal dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          dependencies="$(readelf -d "target/${{ matrix.target }}/release/ovim")"
+          if echo "$dependencies" | grep -E 'NEEDED.*(libgtk|libgdk|libwebkit|libjavascriptcoregtk|libsoup)'; then
+            echo "::error::The terminal binary must not require GUI libraries"
+            exit 1
+          fi
       - name: Verify native GUI target
         shell: bash
         run: |
