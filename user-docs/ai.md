@@ -545,7 +545,10 @@ current page; its explanation is attached as quoted context, Enter sends,
 Shift-Enter adds a line, and Escape cancels the draft. The root chat agent
 answers in the walkthrough using the conversation it already built. Questions
 expand into the available terminal space; use Up/Down (or `k`/`j`) or the mouse
-wheel to read an answer that is longer than the card. Questions and answers
+wheel to read an answer that is longer than the card. Press Esc while reading
+an answer to return to the same step; the answer keeps streaming in the
+background. Press `t` to reopen that step’s thread and `[` / `]` to browse its
+questions. Esc from the step dismisses the walkthrough. Questions and answers
 remain in normal conversation history after the walkthrough ends, so they are
 available when the agent returns to implementation. Walkthrough
 questions permit read-only investigation but reject navigation, mutations,

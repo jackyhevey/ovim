@@ -1009,13 +1009,13 @@ fn walkthrough_discussion(
             );
             let hints = if exchange.max_scroll > 0 {
                 format!(
-                    "↑/↓ reply {}–{}/{}   ←/→ steps   Space ask   Enter next/done   Esc dismiss",
+                    "↑/↓ reply {}–{}/{}   ←/→ steps   Space ask   [/] replies   Enter next/done   Esc back",
                     exchange.visible_start + 1,
                     exchange.visible_end,
                     exchange.total_rows,
                 )
             } else {
-                "←/→ previous/next   Space ask   Enter next/done   Esc dismiss".into()
+                "←/→ previous/next   Space ask   [/] replies   Enter next/done   Esc back".into()
             };
             WalkthroughDiscussion {
                 lines: exchange.lines,
@@ -1026,7 +1026,7 @@ fn walkthrough_discussion(
         ovim_core::editor::CodeExplanationDiscussionView::Navigating { .. } => {
             WalkthroughDiscussion {
                 lines: Vec::new(),
-                hints: "←/→ previous/next   Space ask   Enter next/done   Esc dismiss".into(),
+                hints: "←/→ steps   Space ask   t thread   Enter next/done   Esc dismiss".into(),
                 answer_max_scroll: 0,
             }
         }
@@ -1066,13 +1066,13 @@ fn walkthrough_discussion(
             );
             let hints = if exchange.max_scroll > 0 {
                 format!(
-                    "Answering…   ↑/↓ reply {}–{}/{}   ←/→ steps   Esc dismiss",
+                    "Answering…   ↑/↓ reply {}–{}/{}   ←/→ steps   Esc back",
                     exchange.visible_start + 1,
                     exchange.visible_end,
                     exchange.total_rows,
                 )
             } else {
-                "Answering…   ←/→ browse steps   Esc dismiss".into()
+                "Answering…   ←/→ steps   Esc back".into()
             };
             WalkthroughDiscussion {
                 lines: exchange.lines,

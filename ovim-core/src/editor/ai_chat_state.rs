@@ -476,6 +476,9 @@ pub struct PendingCodeExplanation {
     pub current: usize,
     /// First wrapped answer row shown in the walkthrough reply viewport.
     pub answer_scroll: usize,
+    /// Visible exchange on the current step; None shows the original step.
+    /// Independent of the streaming interaction so Esc does not cancel an answer.
+    pub visible_exchange: Option<usize>,
     /// Per-step discussion projected into the walkthrough card. The same
     /// questions and answers are also committed to the main conversation.
     pub threads: Vec<Vec<CodeExplanationExchange>>,

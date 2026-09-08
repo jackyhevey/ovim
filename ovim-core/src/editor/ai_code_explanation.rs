@@ -71,7 +71,7 @@ impl Editor {
                 }
             }
             CodeExplanationInteraction::Answering { step, exchange }
-                if *step == pending.current =>
+                if *step == pending.current && pending.visible_exchange == Some(*exchange) =>
             {
                 let exchange = pending.threads.get(*step)?.get(*exchange)?;
                 CodeExplanationDiscussionView::Answering {
@@ -81,9 +81,13 @@ impl Editor {
                 }
             }
             _ => {
-                let latest = exchanges.last();
+                let latest = pending
+                    .visible_exchange
+                    .and_then(|index| exchanges.get(index));
                 CodeExplanationDiscussionView::Navigating {
-                    question_count: exchanges.len(),
+                    question_count: pending
+                        .visible_exchange
+                        .map_or(exchanges.len(), |index| index + 1),
                     latest_question: latest.map(|exchange| exchange.question.clone()),
                     latest_answer: latest.map(|exchange| exchange.answer.clone()),
                     latest_failed: latest.is_some_and(|exchange| exchange.failed),
@@ -275,6 +279,7 @@ impl Editor {
             steps,
             current: 0,
             answer_scroll: 0,
+            visible_exchange: None,
             interaction: CodeExplanationInteraction::Navigating,
             original_active_buffer_id,
             presentation_buffer_id: None,
@@ -337,6 +342,7 @@ impl Editor {
                 false
             } else {
                 pending.current = next;
+                pending.visible_exchange = None;
                 pending.answer_scroll = 0;
                 true
             }
@@ -347,6 +353,65 @@ impl Editor {
             }
         }
         changed
+    }
+
+    /// Return to the step without discarding its discussion or interrupting inference.
+    pub fn hide_code_explanation_thread(&mut self) -> bool {
+        let Some(pending) = self
+            .ai_state
+            .chat
+            .as_mut()
+            .and_then(|chat| chat.pending_code_explanation.as_mut())
+        else {
+            return false;
+        };
+        if pending.visible_exchange.take().is_none() {
+            return false;
+        }
+        pending.answer_scroll = 0;
+        self.render_cache.code_explanation_answer_max_scroll = 0;
+        self.set_status_message("Back to walkthrough step — t reopens its thread");
+        true
+    }
+
+    pub fn open_code_explanation_thread(&mut self) -> bool {
+        let Some(pending) = self
+            .ai_state
+            .chat
+            .as_mut()
+            .and_then(|chat| chat.pending_code_explanation.as_mut())
+        else {
+            return false;
+        };
+        let Some(last) = pending.threads[pending.current].len().checked_sub(1) else {
+            self.set_status_message("No questions on this step yet — Space asks");
+            return false;
+        };
+        pending.visible_exchange = Some(last);
+        pending.answer_scroll = 0;
+        true
+    }
+
+    pub fn move_code_explanation_exchange(&mut self, forward: bool) -> bool {
+        let Some(pending) = self
+            .ai_state
+            .chat
+            .as_mut()
+            .and_then(|chat| chat.pending_code_explanation.as_mut())
+        else {
+            return false;
+        };
+        let Some(current) = pending.visible_exchange else {
+            return false;
+        };
+        let next = if forward {
+            (current + 1).min(pending.threads[pending.current].len().saturating_sub(1))
+        } else {
+            current.saturating_sub(1)
+        };
+        pending.visible_exchange = Some(next);
+        pending.answer_scroll = 0;
+        next != current
     }
 
     pub fn begin_code_explanation_question(&mut self) -> bool {
@@ -388,6 +453,7 @@ impl Editor {
             return false;
         }
         pending.interaction = CodeExplanationInteraction::Navigating;
+        pending.visible_exchange = None;
         self.set_status_message("Cancelled walkthrough question");
         true
     }
@@ -490,6 +556,7 @@ impl Editor {
                 step: step_index,
                 exchange,
             };
+            pending.visible_exchange = Some(exchange);
             pending.answer_scroll = FOLLOW_LATEST_ANSWER;
             (
                 step_index,
@@ -590,7 +657,7 @@ impl Editor {
         }
         pending.interaction = CodeExplanationInteraction::Navigating;
         self.set_status_message(
-            "Walkthrough answer ready — Up/Down reads the reply; Enter continues",
+            "Walkthrough answer ready — t opens thread; Esc returns to step; Enter continues",
         );
     }
 
@@ -1381,6 +1448,98 @@ mod tests {
         assert!(message.contains("Use read_file_at_path or list_files"));
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn escape_returns_to_step_and_thread_can_be_reopened_during_and_after_streaming() {
+        let (_dir, mut editor, _first, _second) = setup_editor();
+        let tool_call = call(json!([
+            {"path": "first.rs", "start_line": 2, "comment": "First step."},
+            {"path": "second.rs", "start_line": 2, "comment": "Second step."}
+        ]));
+        if let Err((error, _)) = editor.begin_code_explanation(tool_call, batch_continuation()) {
+            panic!("{error:?}");
+        }
+        // Seed a prior exchange and an active stream; stream events still go
+        // through the same append/finish methods as a provider response.
+        let pending = editor
+            .ai_state
+            .chat
+            .as_mut()
+            .unwrap()
+            .pending_code_explanation
+            .as_mut()
+            .unwrap();
+        pending.threads[0] = vec![
+            CodeExplanationExchange {
+                question: "Earlier?".into(),
+                answer: "Earlier answer".into(),
+                failed: false,
+            },
+            CodeExplanationExchange {
+                question: "More?".into(),
+                answer: "Part one".into(),
+                failed: false,
+            },
+        ];
+        pending.visible_exchange = Some(1);
+        pending.interaction = CodeExplanationInteraction::Answering {
+            step: 0,
+            exchange: 1,
+        };
+        let key = |editor: &mut Editor, code| {
+            crate::editor::input::InputHandler::handle_key_event(
+                editor,
+                crate::KeyEvent::new(code, crate::Modifiers::NONE),
+            )
+            .unwrap();
+        };
+        key(&mut editor, crate::KeyCode::Esc);
+        let view = editor.ai_code_explanation_view().unwrap();
+        assert_eq!(view.current, 1);
+        assert!(matches!(
+            view.discussion,
+            CodeExplanationDiscussionView::Navigating {
+                latest_answer: None,
+                ..
+            }
+        ));
+        assert!(editor.ai_code_explanation_answering());
+        editor.append_code_explanation_answer(" and two");
+        editor.finish_code_explanation_answer(None);
+        assert!(matches!(
+            editor.ai_code_explanation_view().unwrap().discussion,
+            CodeExplanationDiscussionView::Navigating {
+                latest_answer: None,
+                ..
+            }
+        ));
+        key(&mut editor, crate::KeyCode::Char('t'));
+        assert!(
+            matches!(editor.ai_code_explanation_view().unwrap().discussion,
+            CodeExplanationDiscussionView::Navigating { latest_answer: Some(ref answer), .. } if answer == "Part one and two")
+        );
+        key(&mut editor, crate::KeyCode::Char('['));
+        assert!(
+            matches!(editor.ai_code_explanation_view().unwrap().discussion,
+            CodeExplanationDiscussionView::Navigating { latest_question: Some(ref question), question_count: 1, .. } if question == "Earlier?")
+        );
+        key(&mut editor, crate::KeyCode::Char(']'));
+        key(&mut editor, crate::KeyCode::Right);
+        key(&mut editor, crate::KeyCode::Char('t'));
+        assert!(matches!(
+            editor.ai_code_explanation_view().unwrap().discussion,
+            CodeExplanationDiscussionView::Navigating {
+                latest_answer: None,
+                ..
+            }
+        ));
+        key(&mut editor, crate::KeyCode::Left);
+        key(&mut editor, crate::KeyCode::Char('t'));
+        key(&mut editor, crate::KeyCode::Esc);
+        assert_eq!(editor.ai_code_explanation_view().unwrap().current, 1);
+        key(&mut editor, crate::KeyCode::Esc);
+        assert!(!editor.ai_chat_has_pending_code_explanation());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn walkthrough_question_resumes_root_turn_and_remains_in_conversation() {
         let (_dir, mut editor, _first, _second) = setup_editor();
@@ -1522,7 +1681,7 @@ mod tests {
         );
         assert_eq!(
             editor.status_message(),
-            "Walkthrough answer ready — Up/Down reads the reply; Enter continues"
+            "Walkthrough answer ready — t opens thread; Esc returns to step; Enter continues"
         );
         let messages = editor.ai_chat_messages();
         assert!(messages.iter().any(|message| message.role

@@ -387,6 +387,7 @@ mod tests {
             }],
             current: 0,
             answer_scroll: 0,
+            visible_exchange: None,
             threads: vec![vec![CodeExplanationExchange {
                 question: "Why?".into(),
                 answer: String::new(),

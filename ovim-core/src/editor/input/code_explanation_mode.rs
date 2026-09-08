@@ -86,7 +86,18 @@ pub(super) fn handle_key(editor: &mut Editor, key_event: KeyEvent) -> bool {
                 }
             }
             KeyCode::Esc => {
-                editor.finish_code_explanation(true);
+                if !editor.hide_code_explanation_thread() {
+                    editor.finish_code_explanation(true);
+                }
+            }
+            KeyCode::Char('t') => {
+                editor.open_code_explanation_thread();
+            }
+            KeyCode::Char('[') => {
+                editor.move_code_explanation_exchange(false);
+            }
+            KeyCode::Char(']') => {
+                editor.move_code_explanation_exchange(true);
             }
             KeyCode::Char(' ') => {
                 if editor.ai_code_explanation_answering() {
