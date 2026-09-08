@@ -746,6 +746,30 @@ file = { path = "src/syntax/queries/wgsl.scm" }
 # default; users can add one with a language override if desired.
 
 # ============================================================================
+# Properties and INI configuration files
+# ============================================================================
+
+[[language]]
+id = "properties"
+name = "Java Properties"
+extensions = ["properties", "prefs"]
+
+[language.syntax]
+grammar = "tree-sitter-properties"
+official = { crate = "tree_sitter_properties", constant = "HIGHLIGHTS_QUERY" }
+
+[[language]]
+id = "ini"
+name = "INI"
+extensions = ["ini"]
+filenames = [".editorconfig", ".gitconfig", ".gitmodules"]
+path_filenames = [".git/config", ".git/config.worktree"]
+
+[language.syntax]
+grammar = "tree-sitter-ini"
+file = { path = "src/syntax/queries/ini.scm" }
+
+# ============================================================================
 # Companion LSP Servers
 # ============================================================================
 # Companion servers provide additional LSP support alongside primary servers.

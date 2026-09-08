@@ -566,6 +566,12 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             Motions::method_end_backward(editor.buffer_mut(), count);
             editor.clear_count();
         }
+        ('[', KeyCode::Char('D')) | (']', KeyCode::Char('D')) => {
+            for _ in 0..editor.effective_count() {
+                editor.goto_error_diagnostic(pending == ']');
+            }
+            editor.clear_count();
+        }
         ('[', KeyCode::Char('d')) => {
             editor.goto_prev_diagnostic();
             editor.clear_count();

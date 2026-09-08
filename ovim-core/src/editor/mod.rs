@@ -2400,56 +2400,58 @@ impl Editor {
         self.buffer().change_manager().last_change()
     }
 
-    /// Jump to next diagnostic (]d)
+    /// Jump to next diagnostic (]d).
     pub fn goto_next_diagnostic(&mut self) {
-        let current_line = self.buffer().cursor().line();
-        let current_col = self.buffer().cursor().col();
-        let current_col_utf16 = self.col_to_utf16(current_line, current_col.0);
-        let diagnostics = &self.lsp.state.current_file_diagnostics;
-
-        // Find first diagnostic after current position (compare line, then column)
-        let next = diagnostics
-            .iter()
-            .filter(|d| {
-                let dl = d.range.start.line as usize;
-                dl > current_line
-                    || (dl == current_line && d.range.start.character > current_col_utf16)
-            })
-            .min_by_key(|d| (d.range.start.line, d.range.start.character));
-
-        let target = next
-            .or_else(|| diagnostics.first())
-            .map(|d| (d.range.start.line as usize, d.range.start.character));
-
-        if let Some((line, character)) = target {
-            let col = self.utf16_to_grapheme_col(line, character);
-            self.buffer_mut()
-                .cursor_mut()
-                .set_position(line, GraphemeCol(col));
-        }
+        self.goto_diagnostic(true, false);
     }
 
-    /// Jump to previous diagnostic ([d)
+    /// Jump to previous diagnostic ([d).
     pub fn goto_prev_diagnostic(&mut self) {
-        let current_line = self.buffer().cursor().line();
-        let current_col = self.buffer().cursor().col();
-        let current_col_utf16 = self.col_to_utf16(current_line, current_col.0);
-        let diagnostics = &self.lsp.state.current_file_diagnostics;
+        self.goto_diagnostic(false, false);
+    }
 
-        // Find last diagnostic before current position (compare line, then column)
-        let prev = diagnostics
+    /// Navigate error diagnostics only (]D / [D).
+    pub fn goto_error_diagnostic(&mut self, forward: bool) {
+        self.goto_diagnostic(forward, true);
+    }
+
+    fn goto_diagnostic(&mut self, forward: bool, errors_only: bool) {
+        let line = self.buffer().cursor().line();
+        let current = (
+            line,
+            self.col_to_utf16(line, self.buffer().cursor().col().0),
+        );
+        let positions = self
+            .lsp
+            .state
+            .current_file_diagnostics
             .iter()
-            .filter(|d| {
-                let dl = d.range.start.line as usize;
-                dl < current_line
-                    || (dl == current_line && d.range.start.character < current_col_utf16)
+            .filter(|diagnostic| {
+                !errors_only
+                    || diagnostic
+                        .severity
+                        .unwrap_or(lsp_types::DiagnosticSeverity::ERROR)
+                        == lsp_types::DiagnosticSeverity::ERROR
             })
-            .max_by_key(|d| (d.range.start.line, d.range.start.character));
-
-        let target = prev
-            .or_else(|| diagnostics.last())
-            .map(|d| (d.range.start.line as usize, d.range.start.character));
-
+            .map(|diagnostic| {
+                (
+                    diagnostic.range.start.line as usize,
+                    diagnostic.range.start.character,
+                )
+            });
+        let target = if forward {
+            positions
+                .clone()
+                .filter(|position| *position > current)
+                .min()
+                .or_else(|| positions.min())
+        } else {
+            positions
+                .clone()
+                .filter(|position| *position < current)
+                .max()
+                .or_else(|| positions.max())
+        };
         if let Some((line, character)) = target {
             let col = self.utf16_to_grapheme_col(line, character);
             self.buffer_mut()

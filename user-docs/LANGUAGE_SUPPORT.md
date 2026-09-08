@@ -50,6 +50,20 @@ These languages have full LSP support and will auto-install the language server 
 - HCL (`.hcl`, `.nomad`, `.vault`)
 - Diff (`.diff`, `.patch`, `.rej`) — also used by the branch diff review (`<Space>gd`)
 - WGSL (`.wgsl`), including Bevy shader preprocessor directives
+- Java Properties (`.properties`, `.prefs`)
+- INI (`.ini`), plus `.editorconfig`, `.gitconfig`, `.gitmodules`, `.git/config`, and `.git/config.worktree`
+
+Properties and INI highlighting also works in Markdown fences tagged `properties` or
+`ini` (aliases: `prefs`, `editorconfig`, `gitconfig`). Generic `.conf` and `.cfg`
+extensions are left unassigned because they are used by several different formats.
+
+## Diagnostic Navigation
+
+Use `]d` / `[d` to visit the next / previous diagnostic of any severity.
+Use `]D` / `[D` to visit errors only, skipping warnings, information, and hints.
+Both wrap at the end of the file; uppercase navigation accepts counts, such as
+`3]D`. If there are no errors, the cursor stays in place. Diagnostics without an
+explicit severity follow ovim’s existing convention and count as errors.
 
 ## Auto-Install
 
