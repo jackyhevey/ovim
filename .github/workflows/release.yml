@@ -97,10 +97,23 @@ jobs:
             echo "::error::$gui_binary is too small to be the Ovim GUI executable"
             exit 1
           fi
-          if ! grep -aFq "Only one file or directory can be opened at startup" "$gui_binary"; then
-            echo "::error::$gui_binary does not contain the Ovim GUI entry point"
-            exit 1
-          fi
+          # Scan raw bytes: native executables are not locale-encoded text.
+          python3 - "$gui_binary" <<'PYVERIFY'
+          import pathlib
+          import sys
+          binary = pathlib.Path(sys.argv[1])
+          marker = b"Only one file or directory can be opened at startup"
+          if marker not in binary.read_bytes():
+              sys.exit(f"::error::{binary} does not contain the Ovim GUI entry point")
+          print(f"Verified native GUI entry point: {binary}")
+          PYVERIFY
+      - name: Retain failed GUI verification binary
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failed-gui-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/ovim-gui
+          if-no-files-found: ignore
       - name: Bundle native desktop package
         shell: bash
         run: |
