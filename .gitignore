@@ -12,3 +12,5 @@
 /.impeccable
 .mcp.json
 .DS_Store
+/ovim/gui/test-results
+/ovim/gui/playwright-report

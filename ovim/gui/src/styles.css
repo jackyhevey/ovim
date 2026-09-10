@@ -894,7 +894,9 @@ button:focus-visible {
     overflow: hidden;
     padding: 8px 13px 10px 0;
     font: 13.5px/22px var(--editor-font);
-    font-variant-ligatures: contextual;
+    /* Shaping must not change when cursor/highlight boundaries split a run. */
+    font-variant-ligatures: none;
+    font-kerning: none;
     tab-size: 4;
 }
 .code-line {

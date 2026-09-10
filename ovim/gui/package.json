@@ -9,9 +9,10 @@
     "check": "tsc --noEmit",
     "format": "prettier --write src scripts",
     "format:check": "prettier --check src scripts",
-    "test": "vitest run",
+    "test": "vitest run src",
     "icons:generate": "node scripts/generate-icons.mjs",
-    "bundle": "npm run build && cd .. && cargo build --release --bin ovim-gui && tauri bundle"
+    "bundle": "npm run build && cd .. && cargo build --release --bin ovim-gui && tauri bundle",
+    "test:layout": "playwright test"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
@@ -20,6 +21,7 @@
     "solid-js": "^1.9.9"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@solidjs/testing-library": "^0.8.10",
     "@tauri-apps/cli": "^2.11.4",
     "jsdom": "^30.0.1",

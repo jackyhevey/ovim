@@ -25,6 +25,20 @@ target/debug/ovim gui README.md
 `dist/` is intentionally checked in because Cargo embeds it in the native
 binary without requiring Node during a Rust build.
 
+### Editor text placement tests
+
+```sh
+npm ci
+npx playwright install chromium webkit
+npm run test:layout
+```
+
+These real-browser tests compare segment and glyph positions against continuous
+text in Normal and Insert modes, with different cursor and syntax boundaries and
+on a line without a cursor. They also verify that font completion updates existing
+segments. WebKit covers the macOS GUI's rendering engine; Chromium covers the web
+preview. Screenshots are saved under `test-results/`.
+
 ### Native browser smoke test
 
 The debug GUI includes an opt-in end-to-end smoke test for the embedded

@@ -1239,7 +1239,7 @@ function App() {
     let inputSink!: HTMLTextAreaElement;
     let chatInput: HTMLTextAreaElement | undefined;
     let lspDialog: HTMLElement | undefined;
-    let cellWidth = FALLBACK_CELL_WIDTH;
+    const [cellWidth, setCellWidth] = createSignal(FALLBACK_CELL_WIDTH);
     let composing = false;
     let ignoreNextInput = false;
     let wheelRemainder = 0;
@@ -1430,7 +1430,7 @@ function App() {
         const paneTree = editorBody?.querySelector<HTMLElement>(".pane-tree");
         const paneColumns = Math.floor(
             (paneTree?.clientWidth || editorBody?.clientWidth || 960) /
-                cellWidth,
+                cellWidth(),
         );
         // The shared core viewport contract consumes full terminal dimensions and
         // subtracts its own tree/status/tab chrome. Add those cells back after
@@ -1805,7 +1805,7 @@ function App() {
 
     const themeVars = createMemo(() => ({
         ...themeVariables(view().theme),
-        "--cell-width": `${cellWidth}px`,
+        "--cell-width": `${cellWidth()}px`,
     }));
 
     const breadcrumbs = createMemo(() => {
@@ -2061,7 +2061,7 @@ function App() {
                 0,
                 Math.floor(
                     (event.clientX - target.getBoundingClientRect().left) /
-                        cellWidth,
+                        cellWidth(),
                 ),
             );
         void mutate("gui_set_cursor", { pane, line: line - 1, displayColumn });
@@ -2107,7 +2107,7 @@ function App() {
         const position = anchoredOverlayPosition({
             anchorX:
                 Math.max(0, displayColumn - view().horizontalOffset) *
-                    cellWidth +
+                    cellWidth() +
                 66,
             anchorY: Math.max(0, line - view().firstLine + 1) * LINE_HEIGHT + 6,
             containerWidth: editorBody?.clientWidth || 960,
@@ -2256,7 +2256,7 @@ function App() {
                                         <span
                                             class="line-content"
                                             style={{
-                                                transform: `translateX(-${Math.max(0, props.pane.horizontalOffset - line.displayStart) * cellWidth}px)`,
+                                                transform: `translateX(-${Math.max(0, props.pane.horizontalOffset - line.displayStart) * cellWidth()}px)`,
                                             }}
                                             onMouseDown={(event) =>
                                                 setCursor(
@@ -2289,7 +2289,7 @@ function App() {
                                                                           .token
                                                                   ]
                                                                 : undefined,
-                                                            width: `${segment.cells * cellWidth}px`,
+                                                            width: `${segment.cells * cellWidth()}px`,
                                                         }}
                                                     >
                                                         {segment.text}
@@ -3050,15 +3050,29 @@ function App() {
     );
 
     onMount(() => {
-        const canvas = document.createElement("canvas");
-        const context = canvas.getContext("2d");
-        if (context) {
-            context.font =
-                getComputedStyle(document.documentElement).getPropertyValue(
-                    "--editor-font",
-                ) || "13.5px monospace";
-            cellWidth = context.measureText("M").width || FALLBACK_CELL_WIDTH;
-        }
+        const measureCellWidth = () => {
+            const viewport =
+                editorBody.querySelector<HTMLElement>(".code-viewport");
+            if (!viewport) return;
+            // Measure DOM text in the same font/shaping context as the code.
+            // WebKit's DOM advances can differ from canvas at fractional sizes.
+            const probe = document.createElement("span");
+            probe.textContent = "M".repeat(100);
+            probe.style.cssText =
+                "position:absolute;visibility:hidden;pointer-events:none;white-space:pre";
+            viewport.append(probe);
+            const width = probe.getBoundingClientRect().width / 100;
+            probe.remove();
+            setCellWidth(width || FALLBACK_CELL_WIDTH);
+            syncDimensions();
+        };
+        measureCellWidth();
+        // A font loaded after mount must update text, hit-testing and overlays together.
+        let disposed = false;
+        void document.fonts?.ready.then(() => {
+            if (!disposed) measureCellWidth();
+        });
+        document.fonts?.addEventListener("loadingdone", measureCellWidth);
         window.addEventListener("keydown", handleKeyDown, { capture: true });
         window.addEventListener("paste", handlePaste);
         window.addEventListener("copy", handleCopy);
@@ -3114,6 +3128,11 @@ function App() {
         }
         restoreInputFocus();
         onCleanup(() => {
+            disposed = true;
+            document.fonts?.removeEventListener(
+                "loadingdone",
+                measureCellWidth,
+            );
             window.removeEventListener("keydown", handleKeyDown, {
                 capture: true,
             });
@@ -3545,7 +3564,7 @@ function App() {
                             class="input-sink"
                             style={{
                                 top: `${Math.max(0, view().cursor.line - view().firstLine) * LINE_HEIGHT + 8}px`,
-                                left: `${Math.max(0, view().cursor.displayColumn - view().horizontalOffset) * cellWidth + 66}px`,
+                                left: `${Math.max(0, view().cursor.displayColumn - view().horizontalOffset) * cellWidth() + 66}px`,
                             }}
                             aria-label="Ovim editor input"
                             aria-multiline="true"
@@ -3563,7 +3582,7 @@ function App() {
                                     class="ime-preview"
                                     style={{
                                         top: `${Math.max(0, view().cursor.line - view().firstLine) * LINE_HEIGHT + 8}px`,
-                                        left: `${Math.max(0, view().cursor.displayColumn - view().horizontalOffset) * cellWidth + 66}px`,
+                                        left: `${Math.max(0, view().cursor.displayColumn - view().horizontalOffset) * cellWidth() + 66}px`,
                                     }}
                                 >
                                     {text()}
