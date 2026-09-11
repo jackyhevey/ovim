@@ -112,3 +112,29 @@ impl MacroManager {
         self.aborted = false;
     }
 }
+
+impl super::Editor {
+    /// Replay a register in the caller's execution scope. Counted and nested
+    /// playback share clipboard state until the outermost dispatch completes.
+    pub(crate) fn play_macro(&mut self, register: char, count: usize) -> anyhow::Result<()> {
+        let Some(events) = self.get_macro(register).cloned() else {
+            return Ok(());
+        };
+        self.with_execution_scope(|editor| {
+            editor.clear_macro_abort();
+            let result = (|| {
+                for _ in 0..count {
+                    for event in &events {
+                        super::InputHandler::handle_key_event(editor, *event)?;
+                        if editor.macro_aborted() {
+                            return Ok(());
+                        }
+                    }
+                }
+                Ok(())
+            })();
+            editor.clear_macro_abort();
+            result
+        })
+    }
+}

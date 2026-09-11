@@ -89,7 +89,9 @@ impl InputHandler {
     /// Processes a keyboard event without marking the editor dirty.
     /// Use this for batch processing where dirty should be marked once at the end.
     pub fn handle_key_event_no_dirty(editor: &mut Editor, key_event: KeyEvent) -> Result<()> {
-        Self::handle_key_event_internal(editor, key_event, true, true, 0)
+        editor.with_execution_scope(|editor| {
+            Self::handle_key_event_internal(editor, key_event, true, true, 0)
+        })
     }
 
     fn handle_key_event_internal(
@@ -514,7 +516,7 @@ impl InputHandler {
 
     /// Wrapper to call commands module's handle_command_mode
     pub fn handle_command_mode_wrapper(editor: &mut Editor, key_event: KeyEvent) -> Result<()> {
-        commands::handle_command_mode(editor, key_event)
+        editor.with_execution_scope(|editor| commands::handle_command_mode(editor, key_event))
     }
 
     /// Wrapper to call commands module's parse_range

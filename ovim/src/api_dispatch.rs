@@ -52,14 +52,16 @@ pub(crate) async fn handle_api_request(
             let events_result = parse_key_string(&keys);
             let response = match events_result {
                 Ok(events) => {
-                    let mut input_error = None;
-
-                    for event in events {
-                        if let Err(error) = InputHandler::handle_key_event_no_dirty(editor, event) {
-                            input_error = Some(error.to_string());
-                            break;
+                    let input_error = editor.with_execution_scope(|editor| {
+                        for event in events {
+                            if let Err(error) =
+                                InputHandler::handle_key_event_no_dirty(editor, event)
+                            {
+                                return Some(error.to_string());
+                            }
                         }
-                    }
+                        None
+                    });
 
                     refresh_after_input(editor);
 

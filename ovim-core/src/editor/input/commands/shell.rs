@@ -51,19 +51,21 @@ pub(super) fn handle_shell_command(
         }
 
         // Run command with input piped
-        let output = Command::new(shell)
-            .arg(shell_arg)
-            .arg(shell_cmd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                if let Some(ref mut stdin) = child.stdin {
-                    stdin.write_all(input_text.as_bytes())?;
-                }
-                child.wait_with_output()
-            });
+        let output = editor.with_external_effects(|_| {
+            Command::new(shell)
+                .arg(shell_arg)
+                .arg(shell_cmd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    if let Some(ref mut stdin) = child.stdin {
+                        stdin.write_all(input_text.as_bytes())?;
+                    }
+                    child.wait_with_output()
+                })
+        });
 
         match output {
             Ok(output) => {
@@ -136,12 +138,14 @@ pub(super) fn handle_read_shell_command(
     let shell_arg = if cfg!(windows) { "/C" } else { "-c" };
 
     // Run the command
-    let output = Command::new(shell)
-        .arg(shell_arg)
-        .arg(&shell_cmd)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output();
+    let output = editor.with_external_effects(|_| {
+        Command::new(shell)
+            .arg(shell_arg)
+            .arg(shell_cmd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+    });
 
     match output {
         Ok(output) => {
@@ -244,8 +248,6 @@ pub(super) fn handle_write_to_command(
     range_str: &str,
     shell_cmd: &str,
 ) -> Result<()> {
-    use std::io::Write;
-
     // Expand % and # in the shell command
     let current_file = editor.buffer().file_path().unwrap_or("").to_string();
     let alternate_file = editor.registers().get(Some('#'));
@@ -274,10 +276,22 @@ pub(super) fn handle_write_to_command(
         return Ok(());
     };
 
+    editor.with_external_effects(|editor| {
+        write_to_command(editor, shell, shell_arg, &shell_cmd, &content)
+    })
+}
+
+fn write_to_command(
+    editor: &mut Editor,
+    shell: &str,
+    shell_arg: &str,
+    shell_cmd: &str,
+    content: &str,
+) -> Result<()> {
     // Run the command with content piped to stdin
     let mut child = match Command::new(shell)
         .arg(shell_arg)
-        .arg(&shell_cmd)
+        .arg(shell_cmd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

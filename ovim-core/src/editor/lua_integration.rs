@@ -197,6 +197,10 @@ impl Editor {
 
     /// Executes Lua code
     pub fn execute_lua(&mut self, code: &str) -> Result<String> {
+        self.with_external_effects(|editor| editor.execute_lua_inner(code))
+    }
+
+    fn execute_lua_inner(&mut self, code: &str) -> Result<String> {
         if let Some(ref context) = self.lua_context {
             // Sync state to bridge before execution
             self.update_lua_state();
@@ -210,6 +214,10 @@ impl Editor {
 
     /// Executes a Lua file
     pub fn execute_lua_file(&mut self, path: &str) -> Result<()> {
+        self.with_external_effects(|editor| editor.execute_lua_file_inner(path))
+    }
+
+    fn execute_lua_file_inner(&mut self, path: &str) -> Result<()> {
         if let Some(ref mut context) = self.lua_context {
             context.execute_file(path)?;
             Ok(())

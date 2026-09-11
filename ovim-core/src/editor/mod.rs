@@ -38,6 +38,7 @@ mod blame_commands;
 mod buffer_manager;
 mod build_state;
 mod change_tracking;
+mod clipboard;
 mod code_explanation;
 mod command_context;
 mod command_history;
@@ -46,6 +47,9 @@ mod debug_integration;
 pub mod decoration;
 mod diff_review;
 mod editing_state;
+mod execution;
+#[cfg(test)]
+mod execution_tests;
 mod filetree;
 pub mod fuzzy;
 pub mod grep;
@@ -1939,7 +1943,6 @@ impl Editor {
                     return;
                 }
                 '+' | '*' => {
-                    self.registers.set_clipboard(text.clone());
                     self.registers.set_with_type(Some(reg), text, reg_type);
                     return;
                 }
@@ -1986,7 +1989,6 @@ impl Editor {
                     return;
                 }
                 '+' | '*' => {
-                    self.registers.set_clipboard(text.clone());
                     self.registers.set_with_type(Some(reg), text, reg_type);
                     return;
                 }

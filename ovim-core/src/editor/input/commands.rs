@@ -408,7 +408,7 @@ fn parse_copy_move_dest<'a>(cmd_part: &'a str, long: &str, short: &str) -> Optio
 
 /// Executes a command string directly (used for API/Lua commands)
 pub fn execute_command_string(editor: &mut Editor, command: &str) -> Result<()> {
-    execute_command_impl(editor, command)
+    editor.with_execution_scope(|editor| execute_command_impl(editor, command))
 }
 
 /// Executes a command string on behalf of the headless API / CLI, returning a
@@ -422,6 +422,10 @@ pub fn execute_command_string(editor: &mut Editor, command: &str) -> Result<()> 
 /// interactively worked. Routing through the same dispatcher the interactive
 /// command line uses keeps the two paths in parity.
 pub fn execute_command_string_api(editor: &mut Editor, command: &str) -> CommandResult {
+    editor.with_execution_scope(|editor| execute_command_string_api_inner(editor, command))
+}
+
+fn execute_command_string_api_inner(editor: &mut Editor, command: &str) -> CommandResult {
     use crate::command_result::{err, ok, ok_silent};
 
     let command = command.trim();

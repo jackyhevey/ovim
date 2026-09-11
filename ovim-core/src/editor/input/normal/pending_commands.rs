@@ -499,38 +499,14 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             if let Some(register) = editor.last_played_macro() {
                 let count = editor.effective_count();
                 editor.clear_count();
-                if let Some(events) = editor.get_macro(register) {
-                    let events = events.clone();
-                    editor.clear_macro_abort();
-                    'outer_repeat: for _ in 0..count {
-                        for event in &events {
-                            crate::editor::input::InputHandler::handle_key_event(editor, *event)?;
-                            if editor.macro_aborted() {
-                                break 'outer_repeat;
-                            }
-                        }
-                    }
-                    editor.clear_macro_abort();
-                }
+                editor.play_macro(register, count)?;
             }
         }
         ('@', KeyCode::Char(ch)) if ch.is_ascii_lowercase() => {
             let count = editor.effective_count();
             editor.clear_count();
             editor.set_last_played_macro(ch);
-            if let Some(events) = editor.get_macro(ch) {
-                let events = events.clone();
-                editor.clear_macro_abort();
-                'outer: for _ in 0..count {
-                    for event in &events {
-                        crate::editor::input::InputHandler::handle_key_event(editor, *event)?;
-                        if editor.macro_aborted() {
-                            break 'outer;
-                        }
-                    }
-                }
-                editor.clear_macro_abort();
-            }
+            editor.play_macro(ch, count)?;
         }
 
         // =====================================================================

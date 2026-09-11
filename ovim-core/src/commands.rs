@@ -209,6 +209,10 @@ pub fn jump_to_quickfix_entry(editor: &mut Editor, entry: &QuickfixEntry) -> Com
 
 /// Execute a command (e.g., :w, :q, :tabnew)
 pub fn execute_command(editor: &mut Editor, command: &str) -> CommandResult {
+    editor.with_execution_scope(|editor| execute_command_inner(editor, command))
+}
+
+fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
     if editor.is_pseudocode_buffer() {
         if matches!(
             command,
@@ -1754,7 +1758,7 @@ fn parse_file_line_col(location: &str, message: &str) -> Option<QuickfixEntry> {
 }
 
 /// Execute a shell command with % and # expansion, and return the output
-fn execute_shell_command_with_expansion(editor: &Editor, cmd: &str) -> CommandResult {
+fn execute_shell_command_with_expansion(editor: &mut Editor, cmd: &str) -> CommandResult {
     use crate::editor::shell_expansion::expand_shell_command;
 
     // Get current and alternate file for expansion
@@ -1764,7 +1768,7 @@ fn execute_shell_command_with_expansion(editor: &Editor, cmd: &str) -> CommandRe
     // Expand % and # in the command
     let expanded_cmd = expand_shell_command(cmd, &current_file, &alternate_file);
 
-    execute_shell_command(&expanded_cmd)
+    editor.with_external_effects(|_| execute_shell_command(&expanded_cmd))
 }
 
 /// Execute a shell command and return the output
