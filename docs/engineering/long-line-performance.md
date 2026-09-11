@@ -100,3 +100,18 @@ Validation:
 - Independent review used Astra for segmentation/layout correctness, Sol for GUI projection/caches, and Terra for motion/probe work and wrap-invalidation review.
 
 Raw data: [long-line-release-results.csv](long-line-release-results.csv).
+
+## Live demo-project verification
+
+A release build was exercised through an actual headless session in `~/Testing/demo-project`, including the terminal renderer endpoint. The real `app.js` passed edit/save/undo/redo and was restored byte-for-byte. Dedicated ASCII, Unicode, macro, and Markdown fixtures passed 62 live assertions, including exact saved contents, grapheme deletion, line split/undo, reload invalidation, search, resize, and both split directions.
+
+This caught two gaps beyond the core microbenchmarks:
+
+- Cursor, hover, and completion placement still used full-line text scans. They now share indexed screen-coordinate projection, including raw-to-concealed hover coordinates.
+- Splitting a deeply wrapped line discarded its subrow and failed to keep the cursor visible after reflow. Split state now carries a one-shot cursor-row anchor; each pane applies it at its actual dimensions. Rendering also updates the split tree with the whole buffer-region dimensions rather than the focused pane's dimensions.
+
+Identical headless render requests can hit a whole-frame response cache. The live performance probe therefore moves the cursor before each timed render, invalidating that cache. Its final median fresh-frame times, including local HTTP overhead, were 0.98 ms for a million-character ASCII fixture and 0.58 ms for the Unicode fixture (previously 35.2 ms and 44.0 ms in the same harness). Dense-search rendering on the million-character ASCII line took 0.89 ms. A batch of 999 recorded macro replays took 11.6 ms; 99 insertion-macro replays on the million-character ASCII line took 3.45 ms. These short local measurements are not native GUI frame timings or latency guarantees.
+
+The Unicode early-insertion limitation remains: this live run measured 55.6 ms. This work does not claim incremental Unicode suffix repair is complete.
+
+Validation for the follow-up fixes: 1,729 core unit tests; 431 frontend unit and selected integration tests, with 8 ignored tests including 6 requiring a live rust-analyzer setup; focused indexed-cursor and actual split-render assertions. Full live evidence and a reproducible harness remain in `~/Testing/demo-project/ovim-smoke/` (`README.md`, `report.json`, `run.py`, fixtures, and rendered grids).

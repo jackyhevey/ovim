@@ -3,6 +3,15 @@ use crate::buffer::Buffer;
 use crate::buffer::Cursor;
 use crate::coordinates::DisplayCol;
 
+/// Cursor and viewport transferred together when splitting an existing view.
+#[derive(Clone, Copy)]
+struct SplitViewport {
+    cursor: Cursor,
+    scroll_offset: usize,
+    scroll_subrow: usize,
+    wrap_cursor_row: Option<usize>,
+}
+
 /// Represents a window - a viewport into a buffer
 #[derive(Debug, Clone)]
 pub struct Window {
@@ -33,6 +42,10 @@ pub struct Window {
     /// belong to the buffer, not the window, so inlay-hint arrivals must rebuild
     /// every window's wrap map.
     wrap_decoration_generation: u64,
+    /// One-shot screen-row anchor captured when this window was split. Once the
+    /// pane has rebuilt its wrap geometry at its final width, it keeps the
+    /// copied cursor visible at this row and clears the anchor.
+    pending_wrap_reflow_cursor_row: Option<usize>,
 }
 
 impl Window {
@@ -48,6 +61,7 @@ impl Window {
             height,
             wrap_map: None,
             wrap_decoration_generation: 0,
+            pending_wrap_reflow_cursor_row: None,
         }
     }
 
@@ -120,6 +134,16 @@ impl Window {
     pub fn set_scroll_position(&mut self, offset: usize, subrow: usize) {
         self.scroll_offset = offset;
         self.scroll_subrow = subrow;
+    }
+
+    /// Queue a one-shot cursor visibility repair after split reflow.
+    pub fn set_pending_wrap_reflow_cursor_row(&mut self, row: Option<usize>) {
+        self.pending_wrap_reflow_cursor_row = row;
+    }
+
+    /// Screen-row anchor awaiting a split-time wrap reflow repair.
+    pub fn pending_wrap_reflow_cursor_row(&self) -> Option<usize> {
+        self.pending_wrap_reflow_cursor_row
     }
 
     /// Gets the horizontal scroll offset (display columns).
@@ -641,7 +665,6 @@ impl WindowManager {
             buffer_id,
             0,
             None,
-            None,
         );
     }
 
@@ -652,6 +675,8 @@ impl WindowManager {
         buffer_id: usize,
         cursor: Cursor,
         scroll_offset: usize,
+        scroll_subrow: usize,
+        wrap_reflow_cursor_row: Option<usize>,
     ) {
         let focused_idx = self.focused_window;
         Self::split_window_by_index_static(
@@ -660,8 +685,12 @@ impl WindowManager {
             direction,
             buffer_id,
             0,
-            Some(cursor),
-            Some(scroll_offset),
+            Some(SplitViewport {
+                cursor,
+                scroll_offset,
+                scroll_subrow,
+                wrap_cursor_row: wrap_reflow_cursor_row,
+            }),
         );
     }
 
@@ -672,8 +701,7 @@ impl WindowManager {
         direction: SplitDirection,
         buffer_id: usize,
         current_index: usize,
-        cursor: Option<Cursor>,
-        scroll_offset: Option<usize>,
+        viewport: Option<SplitViewport>,
     ) -> (bool, usize) {
         match node {
             WindowNode::Leaf(window) => {
@@ -681,19 +709,17 @@ impl WindowManager {
                     // Found the window to split - create new window with same dimensions
                     let mut new_window = Window::new(buffer_id, window.width(), window.height());
 
-                    // Copy cursor and scroll state to both windows
-                    if let Some(ref cursor) = cursor {
-                        window
-                            .cursor_mut()
-                            .set_position(cursor.line(), cursor.col());
-                        new_window
-                            .cursor_mut()
-                            .set_position(cursor.line(), cursor.col());
+                    // Copy the full viewport as one unit to both windows.
+                    if let Some(view) = viewport {
+                        for pane in [&mut *window, &mut new_window] {
+                            pane.cursor_mut()
+                                .set_position(view.cursor.line(), view.cursor.col());
+                            pane.set_scroll_position(view.scroll_offset, view.scroll_subrow);
+                        }
                     }
-                    if let Some(scroll) = scroll_offset {
-                        window.set_scroll_offset(scroll);
-                        new_window.set_scroll_offset(scroll);
-                    }
+                    let anchor = viewport.and_then(|view| view.wrap_cursor_row);
+                    window.set_pending_wrap_reflow_cursor_row(anchor);
+                    new_window.set_pending_wrap_reflow_cursor_row(anchor);
 
                     let old_window = std::mem::replace(window, Window::new(0, 0, 0));
 
@@ -716,8 +742,7 @@ impl WindowManager {
                     direction,
                     buffer_id,
                     current_index,
-                    cursor,
-                    scroll_offset,
+                    viewport,
                 );
                 if found {
                     (true, next_index)
@@ -728,8 +753,7 @@ impl WindowManager {
                         direction,
                         buffer_id,
                         next_index,
-                        cursor,
-                        scroll_offset,
+                        viewport,
                     )
                 }
             }

@@ -55,8 +55,25 @@ pub fn handle_viewport_resize(editor: &mut Editor, width: u16, height: u16) {
     // Keep the wrap map in sync with the new width so vertical scrolling stays accurate
     // in wrap mode.
     if editor.options.wrap {
-        let text_width = compute_text_width(editor, content_width);
-        editor.ensure_wrap_map(text_width);
+        // Split panes have distinct widths and heights. Build their final
+        // geometry before consuming a split's pending cursor-row anchor.
+        let panes: Vec<_> = editor
+            .window_manager()
+            .map(|manager| {
+                (0..manager.window_count())
+                    .filter_map(|index| {
+                        manager
+                            .get_window(index)
+                            .map(|window| (index, window.width(), window.height() as usize))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (index, pane_width, pane_height) in panes {
+            let text_width = compute_text_width(editor, pane_width);
+            editor.ensure_wrap_map_for_window(index, text_width);
+            editor.repair_pending_split_wrap_viewport(index, pane_height);
+        }
     }
 
     // Re-run scroll update so the cursor remains visible in the resized viewport.

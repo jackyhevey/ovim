@@ -33,6 +33,8 @@ impl Editor {
         // Get current cursor position to copy to new window
         let cursor = *self.buffer().cursor();
         let scroll_offset = self.scroll_offset();
+        let scroll_subrow = self.scroll_subrow();
+        let wrap_reflow_cursor_row = self.visible_cursor_row_before_split(cursor);
 
         if let Some(wm) = &mut self.window_manager {
             wm.split_focused_with_cursor(
@@ -40,6 +42,8 @@ impl Editor {
                 self.current_buffer_index,
                 cursor,
                 scroll_offset,
+                scroll_subrow,
+                wrap_reflow_cursor_row,
             );
         }
     }
@@ -54,6 +58,8 @@ impl Editor {
         // Get current cursor position to copy to new window
         let cursor = *self.buffer().cursor();
         let scroll_offset = self.scroll_offset();
+        let scroll_subrow = self.scroll_subrow();
+        let wrap_reflow_cursor_row = self.visible_cursor_row_before_split(cursor);
 
         if let Some(wm) = &mut self.window_manager {
             wm.split_focused_with_cursor(
@@ -61,7 +67,88 @@ impl Editor {
                 self.current_buffer_index,
                 cursor,
                 scroll_offset,
+                scroll_subrow,
+                wrap_reflow_cursor_row,
             );
+        }
+    }
+
+    /// Return the cursor's current screen row only when it is already visible.
+    /// A split copies explicit scroll positions unchanged; it requests a
+    /// reflow repair only for the normal cursor-following viewport state.
+    fn visible_cursor_row_before_split(&mut self, cursor: crate::buffer::Cursor) -> Option<usize> {
+        if !self.options.wrap {
+            return None;
+        }
+        if let Some(width) = self.wrap_map().map(super::WrapMap::wrap_width) {
+            self.ensure_wrap_map(width);
+        }
+        let (cursor_visual_row, _) = self.cursor_visual_position(cursor.line(), cursor.col())?;
+        let map = self.wrap_map()?;
+        let viewport_top = map.viewport_top_visual_row(self.scroll_offset(), self.scroll_subrow());
+        // A cursor above an explicitly scrolled viewport has no screen-row
+        // anchor to preserve. Saturating here would incorrectly treat it as
+        // the first visible row and override that explicit scroll position.
+        let screen_row = cursor_visual_row.checked_sub(viewport_top)?;
+        (screen_row < self.focused_visible_rows()).then_some(screen_row)
+    }
+
+    /// Consume a split-time wrap anchor after this window has a map at its
+    /// actual pane width. The split copied the logical scroll position (and
+    /// its sub-row), which is meaningful at the old width but can place a
+    /// deeply wrapped cursor outside a reflowed pane. Keep the cursor at its
+    /// previous on-screen row, clamped to the new pane height.
+    ///
+    /// This is intentionally one-shot: ordinary resizing and explicit
+    /// scrolling continue to use their existing viewport behavior.
+    pub fn repair_pending_split_wrap_viewport(&mut self, window_idx: usize, visible_rows: usize) {
+        let Some((anchor, cursor)) = self.window_manager.as_ref().and_then(|manager| {
+            manager.get_window(window_idx).and_then(|window| {
+                window
+                    .pending_wrap_reflow_cursor_row()
+                    .map(|anchor| (anchor, *window.cursor()))
+            })
+        }) else {
+            return;
+        };
+
+        let char_col = self
+            .buffer()
+            .line_index(cursor.line())
+            .grapheme_to_char(cursor.col())
+            .0;
+        let visible_rows = visible_rows.max(1);
+        let Some((scroll_offset, scroll_subrow)) =
+            self.window_manager.as_ref().and_then(|manager| {
+                let window = manager.get_window(window_idx)?;
+                let map = window.wrap_map()?;
+                let position = map.line_layout(cursor.line())?.position_for_char(char_col);
+                let cursor_row = map.logical_to_visual(cursor.line()) + position.row;
+                let requested_top = cursor_row.saturating_sub(anchor.min(visible_rows - 1));
+                let max_top = map.total_visual_lines().saturating_sub(visible_rows);
+                Some(map.visual_to_logical(requested_top.min(max_top)))
+            })
+        else {
+            // The map has not yet been built for this pane. Keep the pending
+            // anchor for the real pane-width render instead of guessing.
+            return;
+        };
+
+        let is_focused = self
+            .window_manager
+            .as_ref()
+            .is_some_and(|manager| manager.focused_window_index() == window_idx);
+        if let Some(window) = self
+            .window_manager
+            .as_mut()
+            .and_then(|manager| manager.get_window_mut(window_idx))
+        {
+            window.set_scroll_position(scroll_offset, scroll_subrow);
+            window.set_pending_wrap_reflow_cursor_row(None);
+        }
+        if is_focused {
+            self.viewport.scroll_offset = scroll_offset;
+            self.viewport.scroll_subrow = scroll_subrow;
         }
     }
 

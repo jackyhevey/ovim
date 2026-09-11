@@ -10,7 +10,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::ai_chat::TEXT_DIM;
-use super::helpers::{grapheme_col_to_display_col, truncate_to_width};
+use super::helpers::{cursor_screen_position, truncate_to_width};
 use super::layout::OverlayContext;
 
 fn hover_content_width(rendered_lines: &[Line<'_>], hover_text: &str, is_preview: bool) -> usize {
@@ -101,49 +101,14 @@ pub fn render_hover_window(
 
     let gutter_width = layout.gutter_width;
 
-    // Convert cursor to screen coordinates
-    let rope = editor.buffer().rope();
-    let line_text = ovim_core::display::line_content(rope, cursor_line);
-    let tab_width = editor.indent_options().tab_width;
-    let char_col = ovim_core::unicode::grapheme_to_char_col(
-        &line_text,
-        ovim_core::unicode::GraphemeCol(cursor_col),
-    )
-    .0;
-    let base_display_col = grapheme_col_to_display_col(&line_text, cursor_col, tab_width);
-    let edit_log = editor.buffer().edit_log();
-    let inline_offset =
-        editor
-            .decorations
-            .inline_width_before_projected(cursor_line, char_col, rope, edit_log);
-    let display_col = base_display_col + inline_offset;
     let text_width = layout.text_width;
-    let inline_widths =
-        editor
-            .decorations
-            .inline_decorations_for_line_projected(cursor_line, rope, edit_log);
-
-    let (screen_line, visual_col) = if editor.options.wrap && text_width > 0 {
-        if let Some(wrap_map) = editor.wrap_map() {
-            let (abs_row, vcol) = wrap_map.cursor_to_visual_with_decorations(
-                cursor_line,
-                display_col,
-                &line_text,
-                &inline_widths,
-            );
-            let viewport_row =
-                wrap_map.viewport_top_visual_row(viewport_start, editor.scroll_subrow());
-            (abs_row.saturating_sub(viewport_row), vcol)
-        } else {
-            (cursor_line.saturating_sub(viewport_start), display_col)
-        }
-    } else {
-        let h_offset = editor.horizontal_offset();
-        (
-            cursor_line.saturating_sub(viewport_start),
-            display_col.saturating_sub(h_offset),
-        )
-    };
+    let (screen_line, visual_col) = cursor_screen_position(
+        editor,
+        cursor_line,
+        ovim_core::unicode::GraphemeCol(cursor_col),
+        viewport_start,
+        text_width,
+    );
 
     let cursor_screen_x = buffer_area.x + gutter_width as u16 + visual_col as u16;
     let cursor_screen_y = buffer_area.y + screen_line as u16;
@@ -294,51 +259,14 @@ pub fn render_completion_menu(frame: &mut Frame, editor: &Editor, ctx: &OverlayC
     let cursor_line = cursor.line();
     let cursor_col = cursor.col().0;
 
-    // Get the line text and convert character column to display column
-    let rope = editor.buffer().rope();
-    let line_text = ovim_core::display::line_content(rope, cursor_line);
-
-    // Convert character column to display column (accounting for tabs, emojis, and inline decorations)
-    let tab_width = editor.indent_options().tab_width;
-    let char_col = ovim_core::unicode::grapheme_to_char_col(
-        &line_text,
-        ovim_core::unicode::GraphemeCol(cursor_col),
-    )
-    .0;
-    let base_display_col = grapheme_col_to_display_col(&line_text, cursor_col, tab_width);
-    let edit_log = editor.buffer().edit_log();
-    let inline_offset =
-        editor
-            .decorations
-            .inline_width_before_projected(cursor_line, char_col, rope, edit_log);
-    let display_col = base_display_col + inline_offset;
     let text_width = layout.text_width;
-    let inline_widths =
-        editor
-            .decorations
-            .inline_decorations_for_line_projected(cursor_line, rope, edit_log);
-
-    let (screen_line, visual_col) = if editor.options.wrap && text_width > 0 {
-        if let Some(wrap_map) = editor.wrap_map() {
-            let (abs_row, vcol) = wrap_map.cursor_to_visual_with_decorations(
-                cursor_line,
-                display_col,
-                &line_text,
-                &inline_widths,
-            );
-            let viewport_row =
-                wrap_map.viewport_top_visual_row(viewport_start, editor.scroll_subrow());
-            (abs_row.saturating_sub(viewport_row), vcol)
-        } else {
-            (cursor_line.saturating_sub(viewport_start), display_col)
-        }
-    } else {
-        let h_offset = editor.horizontal_offset();
-        (
-            cursor_line.saturating_sub(viewport_start),
-            display_col.saturating_sub(h_offset),
-        )
-    };
+    let (screen_line, visual_col) = cursor_screen_position(
+        editor,
+        cursor_line,
+        ovim_core::unicode::GraphemeCol(cursor_col),
+        viewport_start,
+        text_width,
+    );
 
     let gutter_width = layout.gutter_width;
 

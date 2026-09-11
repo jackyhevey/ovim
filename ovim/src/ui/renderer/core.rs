@@ -617,78 +617,18 @@ fn set_cursor_position(
             }
         }
     } else {
-        let rope = editor.buffer().rope();
-        let line_text = ovim_core::display::line_content(rope, cursor_line);
-
-        let tab_width = editor.indent_options().tab_width;
-
-        // Compute the cursor's flat display column: sum of display widths
-        // (tab stops, caret-notation control chars, wide chars) before the
-        // cursor, then add inline decoration widths before the cursor's char
-        // position. This must be a display COLUMN, not an expanded char
-        // index — they agree for tabs and control chars (which expand to
-        // width-1 chars) but diverge for wide chars (1 char, 2 columns),
-        // which previously placed the cursor short of its real column and,
-        // near wrap boundaries, a full visual row too high.
-        let char_col = ovim_core::unicode::grapheme_to_char_col(&line_text, cursor_col).0;
-        let expanded_col =
-            ovim_core::display::char_col_to_display_col(&line_text, char_col, tab_width);
-        let inline_offset = editor.decorations.inline_width_before_projected(
-            cursor_line,
-            char_col,
-            editor.buffer().rope(),
-            editor.buffer().edit_log(),
-        );
-        let display_col = expanded_col + inline_offset;
-
         let buffer_area = layout.buffer_area;
         let gutter_width = layout.gutter_width;
         let text_width = layout.text_width;
-
-        let (cursor_y, cursor_x) = if editor.options.wrap && text_width > 0 {
-            // Use WrapMap's cursor_to_visual_with_decorations which correctly
-            // handles wide chars pushed to next row, variable-width tabs at
-            // row boundaries, and decorations spanning multiple visual rows.
-            let rope = editor.buffer().rope();
-            let inline_widths = editor.decorations.inline_decorations_for_line_projected(
-                cursor_line,
-                rope,
-                editor.buffer().edit_log(),
-            );
-
-            let (abs_visual_row, visual_col) = if let Some(wrap_map) = editor.wrap_map() {
-                wrap_map.cursor_to_visual_with_decorations(
-                    cursor_line,
-                    display_col,
-                    &line_text,
-                    &inline_widths,
-                )
-            } else {
-                // Fallback: simple division when no wrap map
-                let sub_row = display_col / text_width;
-                let col = display_col % text_width;
-                (cursor_line + sub_row, col)
-            };
-
-            let viewport_visual_row = if let Some(wrap_map) = editor.wrap_map() {
-                wrap_map.viewport_top_visual_row(viewport_start, editor.scroll_subrow())
-            } else {
-                viewport_start
-            };
-            let screen_row = abs_visual_row.saturating_sub(viewport_visual_row);
-            (
-                screen_row.min(buffer_area.height.saturating_sub(1) as usize),
-                visual_col.min(text_width.saturating_sub(1)),
-            )
-        } else {
-            let screen_line = cursor_line.saturating_sub(viewport_start);
-            let h_offset = editor.horizontal_offset();
-            let adjusted_col = display_col.saturating_sub(h_offset);
-            (
-                screen_line.min(buffer_area.height.saturating_sub(1) as usize),
-                adjusted_col.min(text_width.saturating_sub(1)),
-            )
-        };
+        let (cursor_y, cursor_x) = super::helpers::cursor_screen_position(
+            editor,
+            cursor_line,
+            cursor_col,
+            viewport_start,
+            text_width,
+        );
+        let cursor_y = cursor_y.min(buffer_area.height.saturating_sub(1) as usize);
+        let cursor_x = cursor_x.min(text_width.saturating_sub(1));
 
         frame.set_cursor_position((
             buffer_area.x + gutter_width as u16 + cursor_x as u16,
@@ -721,7 +661,7 @@ fn render_window_tree(
     area: Rect,
 ) -> Option<(usize, BufferLayout)> {
     match node {
-        WindowViewNode::Leaf(view) => {
+        WindowViewNode::Leaf(_) => {
             let window_idx = *ctx.current_index;
             let is_focused = window_idx == ctx.focused_index;
             *ctx.current_index += 1;
@@ -735,16 +675,30 @@ fn render_window_tree(
             if ctx.editor.options.wrap {
                 ctx.editor
                     .ensure_wrap_map_for_window(window_idx, layout.text_width);
+                // A split copied the old wrapped viewport. Once this leaf has
+                // its real pane width, consume its one-shot cursor anchor so a
+                // deep cursor stays visible on this first render.
+                ctx.editor.repair_pending_split_wrap_viewport(
+                    window_idx,
+                    layout.buffer_area.height as usize,
+                );
             }
 
             // For non-focused windows, override cursor / scroll / wrap-map with
             // the window's own state; the focused window *is* the editor.
+            // Read it after the repair above rather than from the snapshot
+            // captured before this render pass.
             let window_context = if !is_focused {
+                let window = ctx
+                    .editor
+                    .window_manager()
+                    .and_then(|manager| manager.get_window(window_idx))
+                    .expect("window tree leaf must have a live window");
                 Some(WindowRenderContext {
-                    cursor: Some(view.cursor),
-                    scroll_offset: Some(view.scroll_offset),
-                    scroll_subrow: Some(view.scroll_subrow),
-                    horizontal_offset: Some(view.horizontal_offset),
+                    cursor: Some(*window.cursor()),
+                    scroll_offset: Some(window.scroll_offset()),
+                    scroll_subrow: Some(window.scroll_subrow()),
+                    horizontal_offset: Some(window.horizontal_offset()),
                     wrap_map_window_index: Some(window_idx),
                 })
             } else {
@@ -953,7 +907,9 @@ impl Renderer {
             layout.blame_width,
         );
         if let Some(wm) = editor.window_manager_mut() {
-            wm.update_dimensions(layout.buffer_area.width, layout.buffer_area.height);
+            // The tree owns the whole buffer region, not the focused leaf.
+            // Feeding a leaf's size back here would split its dimensions twice.
+            wm.update_dimensions(areas.buffer_chunk.width, areas.buffer_chunk.height);
         }
 
         // Render chat panel (if in AiChat mode)
