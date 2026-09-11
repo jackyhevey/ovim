@@ -20,6 +20,7 @@ use super::styles::{
 };
 use crate::syntax::HighlightGroup;
 use ovim_core::buffer::Cursor;
+use ovim_core::line_layout::{LayoutFragment, LayoutFragmentKind, LayoutRow};
 use ovim_core::unicode::{
     char_to_grapheme_col, grapheme_count, grapheme_to_char_col, CharCol, GraphemeCol,
 };
@@ -415,7 +416,7 @@ fn find_matching_bracket_position(buffer: &crate::buffer::Buffer) -> Option<(usi
     }
 
     let line = rope.line(line_idx);
-    let col = cursor.col().0;
+    let col = buffer.cursor_char_col().0;
 
     if col >= line.len_chars() {
         return None;
@@ -1276,7 +1277,271 @@ fn split_line_into_rows(line: Line<'static>, width: usize) -> Vec<Line<'static>>
     rows
 }
 
-/// Renders the buffer content and returns the viewport start line
+/// Rendered fragments carry source coordinates, so overlays only allocate for
+/// the visible rows. The legacy line renderer remains the small-line oracle.
+struct IndexedRowStyles<'a> {
+    theme: &'a Theme,
+    syntax: Vec<(Range<usize>, HighlightGroup)>,
+    selected: Option<Range<usize>>,
+    search: &'a [(usize, usize)],
+    diagnostics: Vec<RemappedDiagnostic>,
+    backgrounds: Vec<(Range<usize>, Color)>,
+    cursorline: bool,
+    yank: Option<Range<usize>>,
+    ai: Option<Range<usize>>,
+    links: &'a [ovim_core::markdown_conceal::ConcealedLink],
+    bracket: Option<usize>,
+    walkthrough: bool,
+}
+
+/// Resolve the original specificity/ordering rules with an interval sweep.
+/// The result contains only style changes inside the visible byte interval.
+fn resolve_indexed_syntax(
+    highlights: &[(Range<usize>, HighlightGroup)],
+    visible: Range<usize>,
+) -> Vec<(Range<usize>, HighlightGroup)> {
+    use std::{cmp::Reverse, collections::BinaryHeap};
+    let mut events = Vec::new();
+    let mut boundaries = vec![visible.start, visible.end];
+    for (ordinal, (range, _)) in highlights.iter().enumerate() {
+        let start = range.start.max(visible.start);
+        let end = range.end.min(visible.end);
+        if start < end {
+            events.push((start, range.end.saturating_sub(range.start), ordinal, end));
+            boundaries.extend([start, end]);
+        }
+    }
+    events.sort_unstable();
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut active = BinaryHeap::new();
+    let mut event = 0;
+    let mut result: Vec<(Range<usize>, HighlightGroup)> = Vec::new();
+    for pair in boundaries.windows(2) {
+        let start = pair[0];
+        while event < events.len() && events[event].0 <= start {
+            let (_, size, ordinal, end) = events[event];
+            active.push(Reverse((size, ordinal, end)));
+            event += 1;
+        }
+        while active
+            .peek()
+            .is_some_and(|Reverse((_, _, end))| *end <= start)
+        {
+            active.pop();
+        }
+        if let Some(&Reverse((_, ordinal, _))) = active.peek() {
+            let group = highlights[ordinal].1;
+            if let Some((range, previous)) = result.last_mut() {
+                if *previous == group && range.end == start {
+                    range.end = pair[1];
+                    continue;
+                }
+            }
+            result.push((start..pair[1], group));
+        }
+    }
+    result
+}
+
+impl IndexedRowStyles<'_> {
+    fn style(&self, byte: usize, chars: Range<usize>, control: bool) -> Style {
+        let overlaps = |range: &Range<usize>| range.start < chars.end && chars.start < range.end;
+        let selected = self.selected.as_ref().is_some_and(overlaps);
+        let search_pos = self.search.partition_point(|&(_, end)| end <= chars.start);
+        let search = self
+            .search
+            .get(search_pos)
+            .is_some_and(|&(start, end)| overlaps(&(start..end)));
+        let syntax_pos = self.syntax.partition_point(|(range, _)| range.end <= byte);
+        let syntax = self
+            .syntax
+            .get(syntax_pos)
+            .filter(|(range, _)| range.contains(&byte))
+            .map(|(_, group)| *group);
+        let mut style = if selected {
+            Style::default()
+                .bg(crate::key_convert::convert_core_color(
+                    self.theme.get_ui_color(UiGroup::Visual),
+                ))
+                .fg(Color::White)
+        } else if search {
+            Style::default()
+                .bg(crate::key_convert::convert_core_color(
+                    self.theme.get_ui_color(UiGroup::Search),
+                ))
+                .fg(Color::Black)
+        } else if control {
+            Style::default().fg(crate::key_convert::convert_core_color(
+                self.theme.get_color(HighlightGroup::SpecialKey),
+            ))
+        } else if let Some(group) = syntax {
+            let mut style = Style::default().fg(crate::key_convert::convert_core_color(
+                self.theme.get_color(group),
+            ));
+            if matches!(
+                group,
+                HighlightGroup::MarkupHeading | HighlightGroup::MarkupBold
+            ) {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            if group == HighlightGroup::MarkupItalic {
+                style = style.add_modifier(Modifier::ITALIC);
+            }
+            style
+        } else {
+            Style::default()
+        };
+        if !selected && !search {
+            if let Some((_, color)) = self
+                .backgrounds
+                .iter()
+                .rev()
+                .find(|(range, _)| range.contains(&byte))
+            {
+                style = style.bg(*color);
+            }
+        }
+        if let Some(diagnostic) = self
+            .diagnostics
+            .iter()
+            .find(|d| overlaps(&(d.start..d.end)))
+        {
+            style = style
+                .fg(diagnostic.color)
+                .add_modifier(Modifier::UNDERLINED);
+        }
+        if self.cursorline
+            && self.yank.is_none()
+            && (style.bg.is_none() || style.bg == Some(Color::Reset))
+        {
+            style = style.bg(Color::Rgb(40, 40, 50));
+        }
+        if self.yank.as_ref().is_some_and(overlaps) {
+            style = style.bg(Color::Rgb(60, 50, 20));
+        }
+        if self.ai.as_ref().is_some_and(overlaps) {
+            style = style.bg(if self.walkthrough {
+                WALKTHROUGH_SELECTION_BG
+            } else {
+                Color::Rgb(62, 70, 82)
+            });
+        }
+        let link_pos = self
+            .links
+            .partition_point(|link| link.view_end <= chars.start);
+        if self
+            .links
+            .get(link_pos)
+            .is_some_and(|link| overlaps(&(link.view_start..link.view_end)))
+        {
+            style = style
+                .fg(Color::Rgb(100, 149, 237))
+                .add_modifier(Modifier::UNDERLINED);
+        }
+        if self.bracket.is_some_and(|col| chars.contains(&col)) {
+            style = style.fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        }
+        style
+    }
+}
+
+fn push_indexed_span(spans: &mut Vec<Span<'static>>, text: &str, style: Style) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = spans.last_mut() {
+        if last.style == style {
+            last.content.to_mut().push_str(text);
+            return;
+        }
+    }
+    spans.push(Span::styled(text.to_owned(), style));
+}
+
+fn inline_fragment_text(text: &str, offset: usize, cells: usize) -> String {
+    let mut position = 0;
+    let mut result = String::new();
+    let mut used = 0;
+    for g in text.graphemes(true) {
+        let width = grapheme_display_width(g);
+        if position >= offset + cells {
+            break;
+        }
+        if position >= offset && position + width <= offset + cells {
+            result.push_str(g);
+            used += width;
+        } else if position + width > offset && position < offset + cells {
+            let clipped = (position + width).min(offset + cells) - position.max(offset);
+            result.push_str(&" ".repeat(clipped));
+            used += clipped;
+        }
+        position += width;
+    }
+    if used < cells {
+        result.push_str(&" ".repeat(cells - used));
+    }
+    result
+}
+
+fn render_indexed_fragments(
+    fragments: &[LayoutFragment],
+    styles: &IndexedRowStyles<'_>,
+    inline: &[&Decoration],
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    for fragment in fragments {
+        match &fragment.kind {
+            LayoutFragmentKind::InlineDecoration { index, cell_offset } => {
+                if let Some(decoration) = inline.get(*index) {
+                    let text = if fragment.text.is_empty() {
+                        inline_fragment_text(&decoration.text, *cell_offset, fragment.cells)
+                    } else {
+                        fragment.text.clone()
+                    };
+                    push_indexed_span(
+                        &mut spans,
+                        &text,
+                        decoration_to_ratatui_style(&decoration.style),
+                    );
+                } else {
+                    push_indexed_span(&mut spans, &" ".repeat(fragment.cells), Style::default());
+                }
+            }
+            LayoutFragmentKind::Padding => {
+                push_indexed_span(&mut spans, &fragment.text, Style::default())
+            }
+            LayoutFragmentKind::Tab | LayoutFragmentKind::Control => {
+                let style = fragment
+                    .source
+                    .as_ref()
+                    .map(|source| {
+                        styles.style(
+                            source.bytes.start,
+                            source.chars.clone(),
+                            matches!(fragment.kind, LayoutFragmentKind::Control),
+                        )
+                    })
+                    .unwrap_or_default();
+                push_indexed_span(&mut spans, &fragment.text, style);
+            }
+            LayoutFragmentKind::Text => {
+                if let Some(source) = &fragment.source {
+                    let mut char_col = source.chars.start;
+                    for (offset, grapheme) in fragment.text.grapheme_indices(true) {
+                        let end = char_col + grapheme.chars().count();
+                        let style = styles.style(source.bytes.start + offset, char_col..end, false);
+                        push_indexed_span(&mut spans, grapheme, style);
+                        char_col = end;
+                    }
+                }
+            }
+        }
+    }
+    Line::from(spans)
+}
+
+/// Renders the buffer content and returns the viewport start line.
 pub fn render_buffer(
     frame: &mut Frame,
     editor: &Editor,
@@ -1370,8 +1635,18 @@ pub fn render_buffer(
 
     // Find matching bracket position if showmatch is enabled
     let bracket_positions: Option<((usize, usize), (usize, usize))> = if editor.options.showmatch {
-        find_matching_bracket_position(buffer)
-            .map(|matching_pos| ((cursor.line(), cursor.col().0), matching_pos))
+        find_matching_bracket_position(buffer).map(|matching_pos| {
+            (
+                (
+                    cursor.line(),
+                    buffer
+                        .line_index(cursor.line())
+                        .grapheme_to_char(cursor.col())
+                        .0,
+                ),
+                matching_pos,
+            )
+        })
     } else {
         None
     };
@@ -1405,9 +1680,9 @@ pub fn render_buffer(
     if !has_wrap {
         top_skip = 0;
     }
-    // To start rendering `top_skip` visual rows into the top logical line, emit
-    // that many extra rows and drop them from the top after the layout loop.
-    let emit_budget = visible_lines + top_skip;
+    // Indexed geometry seeks directly to a scrolled sub-row; never construct
+    // the offscreen prefix just to discard it.
+    let emit_budget = visible_lines;
     let mut visual_rows_used = 0;
     let buffer_version = buffer.version();
     let buffer_id = buffer.id();
@@ -1525,6 +1800,338 @@ pub fn render_buffer(
                 &projected_diagnostics,
                 line_idx,
             );
+
+            // Long logical lines and sub-row viewports render from shared
+            // source-aware fragments. All temporary strings/style runs are
+            // bounded by the visible rows, including deeply scrolled lines.
+            let source_index = buffer.line_index(line_idx);
+            if source_index.len_bytes() > 4096 || (line_idx == start_line && top_skip > 0) {
+                let line_start_char = rope.line_to_char(line_idx);
+                let line_decorations = projected_decorations.for_line(line_idx);
+                let mut inline: Vec<&Decoration> = line_decorations
+                    .iter()
+                    .filter(|d| matches!(d.placement, DecorationPlacement::Inline { .. }))
+                    .collect();
+                inline.sort_by_key(|d| (d.placement.char_offset(), d.priority));
+                let eol: Vec<&Decoration> = line_decorations
+                    .iter()
+                    .filter(|d| matches!(d.placement, DecorationPlacement::EndOfLine { .. }))
+                    .collect();
+                let map_layout = has_wrap
+                    .then(|| wrap_map.and_then(|map| map.line_layout(line_idx)))
+                    .flatten();
+                let cached_indexed = if map_layout.is_none() {
+                    Some(line_cache.indexed_line(
+                        buffer_id,
+                        line_idx,
+                        source_index.clone(),
+                        text_width,
+                        tab_width,
+                        is_md_file && md_conceal && !is_cursor_line_for_conceal,
+                        dec_hash,
+                        &inline,
+                        line_start_char,
+                    ))
+                } else {
+                    None
+                };
+                let indexed_layout =
+                    map_layout.unwrap_or_else(|| &cached_indexed.as_ref().unwrap().layout);
+                let transform = if map_layout.is_some() {
+                    wrap_map.and_then(|map| map.line_transform(line_idx))
+                } else {
+                    cached_indexed
+                        .as_ref()
+                        .and_then(|cached| cached.transform.as_deref())
+                };
+                let links = if map_layout.is_some() {
+                    wrap_map
+                        .map(|map| map.line_concealed_links(line_idx))
+                        .unwrap_or(&[])
+                } else {
+                    cached_indexed
+                        .as_ref()
+                        .map(|cached| cached.links.as_ref())
+                        .unwrap_or(&[])
+                };
+                let view_index = indexed_layout.line();
+                let source_byte_to_view_char = |byte: usize| -> usize {
+                    transform
+                        .map(|map| {
+                            map.src_to_view
+                                .get(byte)
+                                .copied()
+                                .unwrap_or(view_index.len_chars())
+                        })
+                        .unwrap_or_else(|| source_index.byte_to_char(byte))
+                };
+                let source_char_to_view = |col: usize| -> usize {
+                    source_byte_to_view_char(source_index.char_to_byte(col))
+                };
+                let source_byte_to_view_byte = |byte: usize| -> usize {
+                    if transform.is_some() {
+                        view_index.char_to_byte(source_byte_to_view_char(byte))
+                    } else {
+                        byte.min(view_index.len_bytes())
+                    }
+                };
+                let mut precedes = false;
+                let mut extends = false;
+                let mut content_budget = text_width;
+                let rows = if has_wrap {
+                    let first = if line_idx == start_line { top_skip } else { 0 };
+                    indexed_layout
+                        .row_fragments(first..first.saturating_add(emit_budget - visual_rows_used))
+                } else {
+                    let total = indexed_layout
+                        .display_range_for_row(indexed_layout.row_count().saturating_sub(1))
+                        .map(|range| range.end)
+                        .unwrap_or(0);
+                    let requested_start = if total <= text_width { 0 } else { h_offset };
+                    let first = indexed_layout.fragments_for_display_range(
+                        requested_start..requested_start.saturating_add(1),
+                    );
+                    let actual_start = first
+                        .first()
+                        .map(|fragment| fragment.display_start)
+                        .unwrap_or(requested_start);
+                    precedes = total > text_width && h_offset > 0;
+                    let available = text_width.saturating_sub(usize::from(precedes));
+                    extends = total.saturating_sub(actual_start) > available
+                        && (!precedes || text_width > 1);
+                    content_budget = available.saturating_sub(usize::from(extends));
+                    vec![LayoutRow {
+                        index: 0,
+                        display_start: actual_start,
+                        display_end: actual_start.saturating_add(content_budget).min(total),
+                        fragments: indexed_layout.fragments_for_display_range(
+                            actual_start..actual_start.saturating_add(content_budget),
+                        ),
+                    }]
+                };
+                let visible_byte_start = rows
+                    .iter()
+                    .flat_map(|row| &row.fragments)
+                    .filter_map(|fragment| {
+                        fragment.source.as_ref().map(|source| source.bytes.start)
+                    })
+                    .min()
+                    .unwrap_or(0);
+                let visible_byte_end = rows
+                    .iter()
+                    .flat_map(|row| &row.fragments)
+                    .filter_map(|fragment| fragment.source.as_ref().map(|source| source.bytes.end))
+                    .max()
+                    .unwrap_or(0);
+                let source_byte_window = if let Some(mapped) = transform {
+                    let view_start = view_index.byte_to_char(visible_byte_start);
+                    let view_end = view_index.byte_to_char(visible_byte_end);
+                    let after_start = mapped.src_to_view.partition_point(|&col| col <= view_start);
+                    let prior = mapped
+                        .src_to_view
+                        .get(after_start.saturating_sub(1))
+                        .copied()
+                        .unwrap_or(0);
+                    let start = mapped.src_to_view.partition_point(|&col| col < prior);
+                    let end = mapped.src_to_view.partition_point(|&col| col < view_end);
+                    start..end.min(source_index.len_bytes())
+                } else {
+                    visible_byte_start..visible_byte_end
+                };
+                let mapped_syntax: Vec<_> = buffer
+                    .highlights_in_byte_range(line_idx, source_byte_window)
+                    .iter()
+                    .map(|(range, group)| {
+                        (
+                            source_byte_to_view_byte(range.start)
+                                ..source_byte_to_view_byte(range.end),
+                            *group,
+                        )
+                    })
+                    .collect();
+                let syntax =
+                    resolve_indexed_syntax(&mapped_syntax, visible_byte_start..visible_byte_end);
+                let selected = visual_selection.and_then(|((sl, sc), (el, ec))| {
+                    if line_idx < sl || line_idx > el {
+                        return None;
+                    }
+                    let block = editor.mode() == crate::mode::Mode::VisualBlock;
+                    let start = if block || line_idx == sl { sc } else { 0 };
+                    let end = if block || line_idx == el {
+                        ec.saturating_add(1)
+                    } else {
+                        source_index.grapheme_count()
+                    };
+                    Some(
+                        source_char_to_view(source_index.grapheme_to_char(GraphemeCol(start)).0)
+                            ..source_char_to_view(
+                                source_index.grapheme_to_char(GraphemeCol(end)).0,
+                            ),
+                    )
+                });
+                let search = current_search
+                    .map(|search| search.find_all_in_index(view_index))
+                    .unwrap_or_default();
+                let diagnostics = projected_diagnostics
+                    .covering(line_idx)
+                    .filter_map(|diagnostic| {
+                        let start = if line_idx == diagnostic.range.start.line as usize {
+                            source_index.utf16_to_char(diagnostic.range.start.character as usize)
+                        } else {
+                            0
+                        };
+                        let end = if line_idx == diagnostic.range.end.line as usize {
+                            source_index.utf16_to_char(diagnostic.range.end.character as usize)
+                        } else {
+                            source_index.len_chars()
+                        };
+                        if start >= end {
+                            return None;
+                        }
+                        let start = source_index
+                            .grapheme_to_char(source_index.char_to_grapheme(CharCol(start)))
+                            .0;
+                        let last = source_index.char_to_grapheme(CharCol(end - 1));
+                        let end = source_index.grapheme_to_char(GraphemeCol(last.0 + 1)).0;
+                        let color = match diagnostic.severity {
+                            Some(lsp_types::DiagnosticSeverity::WARNING) => Color::Yellow,
+                            Some(lsp_types::DiagnosticSeverity::INFORMATION) => Color::Cyan,
+                            Some(lsp_types::DiagnosticSeverity::HINT) => Color::Gray,
+                            _ => Color::Red,
+                        };
+                        Some(RemappedDiagnostic {
+                            start: source_char_to_view(start),
+                            end: source_char_to_view(end),
+                            color,
+                        })
+                    })
+                    .collect();
+                let backgrounds = diff_review_tints
+                    .map(|state| {
+                        state
+                            .line_tints(line_idx)
+                            .into_iter()
+                            .map(|(range, added)| {
+                                (
+                                    source_byte_to_view_byte(range.start)
+                                        ..source_byte_to_view_byte(range.end),
+                                    diff_tint_color(added),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let trailing_background = diff_review_tints
+                    .and_then(|state| state.line_trailing_tint(line_idx))
+                    .map(diff_tint_color);
+                let yank = editor
+                    .yank_flash()
+                    .filter(|flash| flash.contains_line(line_idx))
+                    .map(|flash| {
+                        flash
+                            .col_range_for_line(line_idx)
+                            .map(|(start, end)| {
+                                source_char_to_view(start)
+                                    ..source_char_to_view(end.saturating_add(1))
+                            })
+                            .unwrap_or(0..view_index.len_chars())
+                    });
+                let ai = ai_selection
+                    .filter(|selection| {
+                        line_idx >= selection.start_line && line_idx <= selection.end_line
+                    })
+                    .map(|selection| {
+                        let start = if selection.selection_mode == crate::mode::Mode::VisualLine
+                            || line_idx != selection.start_line
+                        {
+                            0
+                        } else {
+                            selection
+                                .start_char
+                                .saturating_sub(line_start_char)
+                                .min(source_index.len_chars())
+                        };
+                        let end = if selection.selection_mode == crate::mode::Mode::VisualLine
+                            || line_idx != selection.end_line
+                        {
+                            source_index.len_chars()
+                        } else {
+                            selection
+                                .end_char
+                                .saturating_sub(line_start_char)
+                                .min(source_index.len_chars())
+                        };
+                        source_char_to_view(start)..source_char_to_view(end)
+                    });
+                let bracket = bracket_positions.and_then(|((l1, c1), (l2, c2))| {
+                    if line_idx == l1 {
+                        Some(source_char_to_view(c1))
+                    } else if line_idx == l2 {
+                        Some(source_char_to_view(c2))
+                    } else {
+                        None
+                    }
+                });
+                let styles = IndexedRowStyles {
+                    theme,
+                    syntax,
+                    selected,
+                    search: &search,
+                    diagnostics,
+                    backgrounds,
+                    cursorline: is_cursor_line_early,
+                    yank,
+                    ai,
+                    links,
+                    bracket,
+                    walkthrough: walkthrough_range.is_some(),
+                };
+                for row in rows {
+                    let mut rendered = render_indexed_fragments(&row.fragments, &styles, &inline);
+                    if !has_wrap {
+                        truncate_line_to_width(&mut rendered, content_budget);
+                        pad_line_to(&mut rendered, content_budget);
+                        if precedes {
+                            rendered.spans.insert(0, Span::raw("<"));
+                        }
+                        if extends {
+                            rendered.spans.push(Span::raw(">"));
+                        }
+                        place_eol_on_line(&mut rendered, &eol, text_width, render_width);
+                    } else if row.index + 1 == indexed_layout.row_count() {
+                        place_eol_on_line(&mut rendered, &eol, text_width, render_width);
+                    } else if render_width > text_width {
+                        apply_eol_decorations(
+                            &mut rendered,
+                            &[],
+                            EolPlacement::AtBoxEdge {
+                                code_box_width: text_width,
+                                render_width,
+                            },
+                        );
+                    }
+                    if let Some(color) = trailing_background {
+                        pad_line_to_styled(&mut rendered, render_width, color);
+                    } else {
+                        pad_line_to(&mut rendered, render_width);
+                    }
+                    if gutter_area.is_some() {
+                        gutter_lines.push(build_gutter_line(
+                            &gutter_ctx,
+                            line_idx,
+                            has_wrap && row.index > 0,
+                            line_diagnostics_early,
+                            blame_brackets
+                                .as_ref()
+                                .and_then(|brackets| brackets.get(line_idx - start_line)),
+                        ));
+                    }
+                    lines.push(rendered);
+                    visual_rows_used += 1;
+                }
+                line_idx += 1;
+                continue;
+            }
 
             if is_stable {
                 if let Some(cached_line) = line_cache.get(
@@ -2213,19 +2820,6 @@ pub fn render_buffer(
         line_idx += 1;
     }
 
-    // Drop the first `top_skip` visual rows so the viewport begins partway into
-    // the wrapped top logical line. These rows always belong to `start_line` (a
-    // real line with gutter entries), so `lines` and `gutter_lines` stay aligned.
-    if top_skip > 0 {
-        let drop = top_skip.min(lines.len());
-        lines.drain(0..drop);
-        if !gutter_lines.is_empty() {
-            let gdrop = top_skip.min(gutter_lines.len());
-            gutter_lines.drain(0..gdrop);
-        }
-        visual_rows_used = visual_rows_used.saturating_sub(top_skip);
-    }
-
     // Fill remaining rows with blanks
     while visual_rows_used < visible_lines {
         lines.push(Line::from(blank_line.clone()));
@@ -2526,6 +3120,233 @@ mod tests {
         assert!(line_is_in_walkthrough(range, 6));
         assert!(!line_is_in_walkthrough(range, 7));
         assert!(!line_is_in_walkthrough(None, 5));
+    }
+
+    fn plain_indexed_styles(theme: &Theme) -> IndexedRowStyles<'_> {
+        IndexedRowStyles {
+            theme,
+            syntax: Vec::new(),
+            selected: None,
+            search: &[],
+            diagnostics: Vec::new(),
+            backgrounds: Vec::new(),
+            cursorline: false,
+            yank: None,
+            ai: None,
+            links: &[],
+            bracket: None,
+            walkthrough: false,
+        }
+    }
+
+    #[test]
+    fn indexed_visible_rows_match_legacy_tabs_wide_and_overlay_priority() {
+        let theme = Theme::default();
+        let text = "a\t中e\u{301}yz";
+        let index = ovim_core::text_index::LineIndex::from_text(text);
+        let geometry =
+            ovim_core::line_layout::IndexedLineLayout::new(index, 5, 4, std::sync::Arc::from([]));
+        let expanded = expand_tabs_with_mapping(text, 4);
+        let legacy = split_line_into_rows(Line::from(expanded.text), 5);
+        let rows = geometry.row_fragments(0..geometry.row_count());
+        let plain = plain_indexed_styles(&theme);
+        let rendered: Vec<_> = rows
+            .iter()
+            .map(|row| {
+                let mut line = render_indexed_fragments(&row.fragments, &plain, &[]);
+                pad_line_to(&mut line, 5);
+                line
+            })
+            .collect();
+        let strings = |lines: &[Line<'_>]| {
+            lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(strings(&rendered), strings(&legacy));
+
+        let mut styled = plain_indexed_styles(&theme);
+        styled.selected = Some(1..3); // tab and CJK glyph, including split-tab spaces
+        styled.search = &[(0, 4)];
+        styled.diagnostics = vec![RemappedDiagnostic {
+            start: 1,
+            end: 3,
+            color: Color::Red,
+        }];
+        let row = render_indexed_fragments(&rows[0].fragments, &styled, &[]);
+        let tab = row
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "   ")
+            .unwrap();
+        assert_eq!(
+            tab.style.bg,
+            Some(crate::key_convert::convert_core_color(
+                theme.get_ui_color(UiGroup::Visual)
+            ))
+        );
+        assert_eq!(tab.style.fg, Some(Color::Red));
+        assert!(tab.style.add_modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn indexed_syntax_sweep_preserves_original_specificity_after_clipping() {
+        let highlights = vec![
+            (0..100, HighlightGroup::String),
+            (45..55, HighlightGroup::Keyword),
+            (49..51, HighlightGroup::Function),
+        ];
+        let resolved = resolve_indexed_syntax(&highlights, 48..53);
+        assert_eq!(
+            resolved,
+            vec![
+                (48..49, HighlightGroup::Keyword),
+                (49..51, HighlightGroup::Function),
+                (51..53, HighlightGroup::Keyword)
+            ]
+        );
+    }
+
+    #[test]
+    fn long_line_subrow_renderer_seeks_directly_and_continues_to_next_line() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut editor = Editor::with_content(&format!("{}END\ntail\n", "a".repeat(10_000)));
+        editor.options.wrap = true;
+        editor.options.cursorline = false;
+        editor.options.showmatch = false;
+        editor.ensure_wrap_map(5);
+        let layout = BufferLayout {
+            buffer_area: Rect::new(0, 0, 5, 3),
+            render_area: Rect::new(0, 0, 5, 3),
+            gutter_width: 0,
+            text_width: 5,
+            line_num_width: 0,
+            blame_width: 0,
+            scrollbar_area: None,
+        };
+        let context = WindowRenderContext {
+            scroll_offset: Some(0),
+            scroll_subrow: Some(2000),
+            ..Default::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(5, 3)).unwrap();
+        let mut cache = super::super::line_cache::LineRenderCache::new();
+        terminal
+            .draw(|frame| {
+                render_buffer(
+                    frame,
+                    &editor,
+                    &Theme::default(),
+                    &layout,
+                    &mut cache,
+                    Some(&context),
+                );
+            })
+            .unwrap();
+        let cells = terminal.backend().buffer();
+        let row = |y| (0..5).map(|x| cells[(x, y)].symbol()).collect::<String>();
+        assert_eq!(row(0), "END  ");
+        assert_eq!(row(1), "tail ");
+        assert_eq!(row(2), "     ");
+    }
+
+    #[test]
+    fn long_nowrap_viewport_snaps_left_wide_glyph_and_keeps_indicators() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut editor = Editor::with_content(&format!("{}界word", "x".repeat(5000)));
+        editor.options.wrap = false;
+        editor.options.cursorline = false;
+        editor.options.showmatch = false;
+        let layout = BufferLayout {
+            buffer_area: Rect::new(0, 0, 5, 1),
+            render_area: Rect::new(0, 0, 5, 1),
+            gutter_width: 0,
+            text_width: 5,
+            line_num_width: 0,
+            blame_width: 0,
+            scrollbar_area: None,
+        };
+        let context = WindowRenderContext {
+            scroll_offset: Some(0),
+            horizontal_offset: Some(5001),
+            ..Default::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(5, 1)).unwrap();
+        let mut cache = super::super::line_cache::LineRenderCache::new();
+        terminal
+            .draw(|frame| {
+                render_buffer(
+                    frame,
+                    &editor,
+                    &Theme::default(),
+                    &layout,
+                    &mut cache,
+                    Some(&context),
+                );
+            })
+            .unwrap();
+        let cells = terminal.backend().buffer();
+        assert_eq!(cells[(0, 0)].symbol(), "<");
+        assert_eq!(cells[(1, 0)].symbol(), "界");
+        assert_eq!(cells[(3, 0)].symbol(), "w");
+        assert_eq!(cells[(4, 0)].symbol(), ">");
+    }
+
+    #[test]
+    fn long_concealed_line_uses_cached_source_mapping_for_visible_link_style() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut editor = Editor::with_content(&format!(
+            "cursor\n{}[link](https://example.test)x\n",
+            "a".repeat(5000)
+        ));
+        editor.buffer_mut().set_file_path("long.md".to_string());
+        editor.options.wrap = true;
+        editor.options.markdown_conceal = true;
+        editor.options.cursorline = false;
+        editor.options.showmatch = false;
+        editor.ensure_wrap_map(5);
+        let layout = BufferLayout {
+            buffer_area: Rect::new(0, 0, 5, 1),
+            render_area: Rect::new(0, 0, 5, 1),
+            gutter_width: 0,
+            text_width: 5,
+            line_num_width: 0,
+            blame_width: 0,
+            scrollbar_area: None,
+        };
+        let context = WindowRenderContext {
+            scroll_offset: Some(1),
+            scroll_subrow: Some(1000),
+            ..Default::default()
+        };
+        let mut terminal = Terminal::new(TestBackend::new(5, 1)).unwrap();
+        let mut cache = super::super::line_cache::LineRenderCache::new();
+        terminal
+            .draw(|frame| {
+                render_buffer(
+                    frame,
+                    &editor,
+                    &Theme::default(),
+                    &layout,
+                    &mut cache,
+                    Some(&context),
+                );
+            })
+            .unwrap();
+        let cells = terminal.backend().buffer();
+        assert_eq!(
+            (0..5).map(|x| cells[(x, 0)].symbol()).collect::<String>(),
+            "linkx"
+        );
+        assert_eq!(cells[(0, 0)].fg, Color::Rgb(100, 149, 237));
+        assert!(cells[(0, 0)].modifier.contains(Modifier::UNDERLINED));
+        assert!(!cells[(4, 0)].modifier.contains(Modifier::UNDERLINED));
     }
 
     #[test]

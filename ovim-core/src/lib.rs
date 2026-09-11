@@ -25,6 +25,7 @@ pub mod indentation;
 pub mod key;
 pub mod language_catalog;
 pub mod language_config;
+pub mod line_layout;
 pub mod log;
 pub mod lsp;
 #[cfg(feature = "lua")]
@@ -44,6 +45,7 @@ pub mod run_log;
 pub mod search;
 pub mod session;
 pub mod syntax;
+pub mod text_index;
 pub mod textobjects;
 pub mod unicode;
 pub mod wrap;

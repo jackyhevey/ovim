@@ -57,23 +57,21 @@ pub fn move_right(editor: &mut Editor) {
     let count = editor.effective_count();
     let line_idx = editor.buffer().cursor().line();
     let mode = editor.mode();
-    if let Some(line) = editor.buffer().line_text(line_idx) {
-        let line_len = grapheme_count(&line);
-        let cursor = editor.buffer_mut().cursor_mut();
+    let line_len = editor.buffer().line_index(line_idx).grapheme_count();
+    let cursor = editor.buffer_mut().cursor_mut();
 
-        // In VisualBlock mode, allow cursor beyond line end for rectangular selection
-        // In Insert mode, allow cursor one past end (for appending)
-        let max_col = if mode == Mode::VisualBlock {
-            usize::MAX // No limit in visual block
-        } else if mode == Mode::Insert {
-            line_len // Can be at position after last char
-        } else {
-            line_len.saturating_sub(1) // Normal mode: on last char
-        };
+    // In VisualBlock mode, allow cursor beyond line end for rectangular selection.
+    // In Insert mode, allow cursor one past end for appending.
+    let max_col = if mode == Mode::VisualBlock {
+        usize::MAX
+    } else if mode == Mode::Insert {
+        line_len
+    } else {
+        line_len.saturating_sub(1)
+    };
 
-        let new_col = (cursor.col().0 + count).min(max_col);
-        cursor.set_col(GraphemeCol(new_col));
-    }
+    let new_col = cursor.col().0.saturating_add(count).min(max_col);
+    cursor.set_col(GraphemeCol(new_col));
     editor.clear_count();
 }
 
@@ -106,48 +104,42 @@ pub fn move_down(editor: &mut Editor) {
 
 pub fn clamp_cursor_to_line(editor: &mut Editor) {
     let line_idx = editor.buffer().cursor().line();
-    if let Some(line) = editor.buffer().line_text(line_idx) {
-        let line_len = grapheme_count(&line);
-        let cursor = editor.buffer_mut().cursor_mut();
-        if cursor.col().0 >= line_len {
-            let new_col = if line_len > 0 { line_len - 1 } else { 0 };
-            cursor.set_col(GraphemeCol(new_col));
-        }
+    let line_len = editor.buffer().line_index(line_idx).grapheme_count();
+    let cursor = editor.buffer_mut().cursor_mut();
+    if cursor.col().0 >= line_len {
+        cursor.set_col(GraphemeCol(line_len.saturating_sub(1)));
     }
 }
 
 pub fn clamp_cursor_with_goal_column(editor: &mut Editor) {
     let line_idx = editor.buffer().cursor().line();
     let mode = editor.mode();
-    if let Some(line) = editor.buffer().line_text(line_idx) {
-        let line_len = grapheme_count(&line);
-        let max_col = if line_len > 0 { line_len - 1 } else { 0 };
-        let cursor = editor.buffer_mut().cursor_mut();
-        let desired = cursor.desired_col();
+    let line_len = editor.buffer().line_index(line_idx).grapheme_count();
+    let max_col = line_len.saturating_sub(1);
+    let cursor = editor.buffer_mut().cursor_mut();
+    let desired = cursor.desired_col();
 
-        // In VisualBlock mode, preserve desired column even if beyond line end
-        let target_col = if mode == Mode::VisualBlock {
-            desired
-        } else if desired == usize::MAX {
-            // usize::MAX is a sentinel value meaning "always end of line"
-            max_col
-        } else {
-            desired.min(max_col)
-        };
+    // In VisualBlock mode, preserve desired column even if beyond line end.
+    let target_col = if mode == Mode::VisualBlock {
+        desired
+    } else if desired == usize::MAX {
+        // usize::MAX is a sentinel value meaning "always end of line".
+        max_col
+    } else {
+        desired.min(max_col)
+    };
 
-        cursor.set_col_preserve_desired(GraphemeCol(target_col));
-    }
+    cursor.set_col_preserve_desired(GraphemeCol(target_col));
 }
 
 pub fn insert_char(editor: &mut Editor, c: char) -> Result<()> {
     let cursor = editor.buffer().cursor();
     let line_idx = cursor.line();
     let grapheme_col = cursor.col();
-    // Convert grapheme col to char col for buffer operations
-    let char_col = {
-        let line_text = editor.buffer().line_text(line_idx).unwrap_or_default();
-        grapheme_to_char_col(&line_text, grapheme_col)
-    };
+    let char_col = editor
+        .buffer()
+        .line_index(line_idx)
+        .grapheme_to_char(grapheme_col);
 
     // Insert-mode recording captures the edit; the undo entry is pushed as a
     // single `Recorded` at finalize_change_building time.
@@ -169,7 +161,10 @@ pub fn insert_newline(editor: &mut Editor) -> Result<()> {
         .line_text(line_idx)
         .unwrap_or_default()
         .to_string();
-    let char_col = grapheme_to_char_col(&line_text, grapheme_col);
+    let char_col = editor
+        .buffer()
+        .line_index(line_idx)
+        .grapheme_to_char(grapheme_col);
     let position = ApplyPos::new(line_idx, char_col);
 
     // Special case: when the buffer does not end with a newline and the cursor
@@ -276,11 +271,7 @@ pub fn delete_char_before_cursor(editor: &mut Editor) -> Result<()> {
     let (start_pos, end_pos) = if grapheme_col.0 == 0 {
         // Delete newline at end of previous line
         // Use char count for the position (delete_range expects char indices)
-        let prev_line_char_len = editor
-            .buffer()
-            .line_text(line_idx - 1)
-            .map(|s| s.chars().count())
-            .unwrap_or(0);
+        let prev_line_char_len = editor.buffer().line_index(line_idx - 1).len_chars();
         (
             ApplyPos::new(line_idx - 1, CharCol(prev_line_char_len)),
             ApplyPos::new(line_idx, CharCol::ZERO),
@@ -289,7 +280,10 @@ pub fn delete_char_before_cursor(editor: &mut Editor) -> Result<()> {
         // Delete character before cursor on same line.
         // Convert grapheme col to char col for rope operations.
         let line_text = editor.buffer().line_text(line_idx).unwrap_or_default();
-        let char_col = grapheme_to_char_col(&line_text, grapheme_col);
+        let char_col = editor
+            .buffer()
+            .line_index(line_idx)
+            .grapheme_to_char(grapheme_col);
         let before: String = line_text.chars().take(char_col.0).collect();
         let options = editor.indent_options();
 
@@ -318,7 +312,10 @@ pub fn delete_char_before_cursor(editor: &mut Editor) -> Result<()> {
         }
 
         // Normal single-grapheme delete.
-        let prev_char_col = grapheme_to_char_col(&line_text, GraphemeCol(grapheme_col.0 - 1));
+        let prev_char_col = editor
+            .buffer()
+            .line_index(line_idx)
+            .grapheme_to_char(GraphemeCol(grapheme_col.0 - 1));
         (
             ApplyPos::new(line_idx, prev_char_col),
             ApplyPos::new(line_idx, char_col),
@@ -352,11 +349,7 @@ pub fn delete_word_backward_insert(editor: &mut Editor) -> Result<()> {
 
     // If at start of line, delete the newline character
     if grapheme_col.0 == 0 {
-        let prev_line_len = editor
-            .buffer()
-            .line_text(line_idx - 1)
-            .map(|s| s.chars().count())
-            .unwrap_or(0);
+        let prev_line_len = editor.buffer().line_index(line_idx - 1).len_chars();
         let start_pos = ApplyPos::new(line_idx - 1, CharCol(prev_line_len));
         let end_pos = ApplyPos::new(line_idx, CharCol::ZERO);
         editor.record_session_edit(|buf| {
@@ -371,35 +364,43 @@ pub fn delete_word_backward_insert(editor: &mut Editor) -> Result<()> {
         return Ok(());
     }
 
-    // Get the line text (borrow ends when we collect)
-    let line_text = editor.buffer().line_text(line_idx).unwrap_or_default();
-    let chars: Vec<char> = line_text.chars().collect();
-    // Word-boundary scanning uses chars directly, so convert the cursor to char-space.
-    let char_col = grapheme_to_char_col(&line_text, grapheme_col);
+    // Scan the rope slice directly so Ctrl-W does not materialize a long line.
+    let index = editor.buffer().line_index(line_idx);
+    let char_col = index.grapheme_to_char(grapheme_col);
     let col = char_col.0;
+    let mut before_cursor = editor
+        .buffer()
+        .rope()
+        .line(line_idx)
+        .chars_at(col)
+        .reversed()
+        .peekable();
 
     // Find the start of the word to delete
     let mut start_col = col;
 
     // Skip trailing whitespace (Vim deletes whitespace + preceding word)
-    while start_col > 0 && chars.get(start_col - 1).is_some_and(|c| c.is_whitespace()) {
+    while before_cursor
+        .peek()
+        .is_some_and(|character| character.is_whitespace())
+    {
+        before_cursor.next();
         start_col -= 1;
     }
 
     // Then delete the preceding word or punctuation run
     if start_col > 0 {
-        let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
-
-        if let Some(&ch) = chars.get(start_col - 1) {
-            if is_word_char(ch) {
-                while start_col > 0 && chars.get(start_col - 1).is_some_and(|&c| is_word_char(c)) {
+        let is_word_char = |character: char| character.is_alphanumeric() || character == '_';
+        if let Some(character) = before_cursor.next() {
+            start_col -= 1;
+            if is_word_char(character) {
+                while before_cursor.next().is_some_and(is_word_char) {
                     start_col -= 1;
                 }
-            } else {
-                while start_col > 0
-                    && chars
-                        .get(start_col - 1)
-                        .is_some_and(|&c| !is_word_char(c) && !c.is_whitespace())
+            } else if !character.is_whitespace() {
+                while before_cursor
+                    .next()
+                    .is_some_and(|candidate| !candidate.is_whitespace() && !is_word_char(candidate))
                 {
                     start_col -= 1;
                 }
@@ -433,14 +434,10 @@ pub fn delete_to_line_start_insert(editor: &mut Editor) -> Result<()> {
         return Ok(());
     }
 
-    // Convert grapheme col to char col for rope ops (delete_range / Range).
-    let line_text_owned = editor
+    let char_col = editor
         .buffer()
-        .line_text(line_idx)
-        .unwrap_or_default()
-        .to_string();
-    let line_text = line_text_owned;
-    let char_col = grapheme_to_char_col(&line_text, grapheme_col);
+        .line_index(line_idx)
+        .grapheme_to_char(grapheme_col);
 
     // Delete from start of line to cursor. `delete_range_positioning_cursor`
     // lands the cursor at char col 0 (== grapheme col 0) on the current line.
@@ -1506,32 +1503,31 @@ fn extract_word_at_cursor(editor: &Editor) -> Option<String> {
     let cursor = editor.buffer().cursor();
     let line_idx = cursor.line();
     let col = cursor.col().0;
-
-    let line_text = editor.buffer().line_text(line_idx)?;
-    let chars: Vec<char> = line_text.chars().collect();
-
-    if col >= chars.len() {
+    let index = editor.buffer().line_index(line_idx);
+    if col >= index.grapheme_count() {
         return None;
     }
 
-    // Extract word under cursor
-    let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
-    let start = chars[..=col]
-        .iter()
-        .rposition(|&c| !is_word_char(c))
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    let end = chars[col..]
-        .iter()
-        .position(|&c| !is_word_char(c))
-        .map(|i| col + i)
-        .unwrap_or(chars.len());
-
-    if start < end {
-        Some(chars[start..end].iter().collect())
-    } else {
-        None
+    let is_word = |grapheme_col: usize| {
+        index
+            .grapheme_first_char(GraphemeCol(grapheme_col))
+            .is_some_and(|character| character.is_alphanumeric() || character == '_')
+    };
+    if !is_word(col) {
+        return None;
     }
+
+    let mut start = col;
+    while start > 0 && is_word(start - 1) {
+        start -= 1;
+    }
+    let mut end = col + 1;
+    while end < index.grapheme_count() && is_word(end) {
+        end += 1;
+    }
+    Some(index.slice_chars(
+        index.grapheme_to_char(GraphemeCol(start)).0..index.grapheme_to_char(GraphemeCol(end)).0,
+    ))
 }
 
 /// Sets up and executes a search for the given text

@@ -41,6 +41,58 @@ const MAX_FILE_TREE_ITEMS: usize = 300;
 const MAX_PICKER_ITEMS: usize = 24;
 const MAX_COMPLETION_ITEMS: usize = 12;
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct GuiLayoutCacheKey {
+    line_identity: usize,
+    width: usize,
+    tab_width: usize,
+    inline: std::sync::Arc<[(usize, std::sync::Arc<str>)]>,
+}
+
+#[derive(Default)]
+struct GuiProjectionCache {
+    layouts: std::collections::HashMap<
+        GuiLayoutCacheKey,
+        std::sync::Arc<ovim_core::line_layout::IndexedLineLayout>,
+    >,
+    used: std::collections::HashSet<GuiLayoutCacheKey>,
+}
+
+impl GuiProjectionCache {
+    fn begin_snapshot(&mut self) {
+        self.used.clear();
+    }
+
+    fn finish_snapshot(&mut self) {
+        self.layouts.retain(|key, _| self.used.contains(key));
+    }
+
+    fn layout(
+        &mut self,
+        line: std::sync::Arc<ovim_core::text_index::LineIndex>,
+        width: usize,
+        tab_width: usize,
+        inline: std::sync::Arc<[(usize, std::sync::Arc<str>)]>,
+    ) -> std::sync::Arc<ovim_core::line_layout::IndexedLineLayout> {
+        let key = GuiLayoutCacheKey {
+            line_identity: std::sync::Arc::as_ptr(&line) as usize,
+            width,
+            tab_width,
+            inline: inline.clone(),
+        };
+        self.used.insert(key.clone());
+        if let Some(layout) = self.layouts.get(&key) {
+            return layout.clone();
+        }
+        let layout =
+            std::sync::Arc::new(ovim_core::line_layout::IndexedLineLayout::with_inline_text(
+                line, width, tab_width, inline,
+            ));
+        self.layouts.insert(key, layout.clone());
+        layout
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuiKeyInput {
@@ -1228,9 +1280,10 @@ async fn run_editor(
     let mut last_external_check = Instant::now();
     let mut revision = 1u64;
     let mut dimensions = (120u16, 40u16);
+    let mut projection_cache = GuiProjectionCache::default();
 
     handle_viewport_resize(&mut editor, dimensions.0, dimensions.1);
-    let mut last_snapshot = snapshot(&editor, revision);
+    let mut last_snapshot = snapshot_with_cache(&editor, revision, &mut projection_cache);
     let mut last_render_version = editor.render_input_version();
     updates.send_replace(Some(last_snapshot.clone()));
     let _ = ready.send(Ok(()));
@@ -1251,6 +1304,7 @@ async fn run_editor(
                     &mut last_snapshot,
                     &mut last_render_version,
                     &updates,
+                    &mut projection_cache,
                 );
             }
             request = requests.recv() => {
@@ -1258,7 +1312,13 @@ async fn run_editor(
                 if matches!(request, GuiRequest::Shutdown) {
                     break;
                 }
-                handle_request(request, &mut editor, &mut dimensions, &mut revision).await;
+                handle_request(
+                    request,
+                    &mut editor,
+                    &mut dimensions,
+                    &mut revision,
+                    &mut projection_cache,
+                ).await;
                 let rejected_terminal = editor.take_pending_terminal_session().is_some();
                 let rejected_shell = editor.take_pending_shell_command().is_some();
                 if rejected_terminal || rejected_shell {
@@ -1270,6 +1330,7 @@ async fn run_editor(
                     &mut last_snapshot,
                     &mut last_render_version,
                     &updates,
+                    &mut projection_cache,
                 );
             }
         }
@@ -1284,6 +1345,7 @@ fn publish_if_changed(
     previous: &mut GuiSnapshot,
     previous_render_version: &mut u64,
     updates: &watch::Sender<Option<GuiSnapshot>>,
+    projection_cache: &mut GuiProjectionCache,
 ) {
     let render_version = editor.render_input_version();
     if render_version == *previous_render_version {
@@ -1292,7 +1354,7 @@ fn publish_if_changed(
     *previous_render_version = render_version;
     // Compare at the current revision so time-based runtime ticks that did not
     // affect the visible projection produce no webview traffic or DOM work.
-    let mut next = snapshot(editor, *revision);
+    let mut next = snapshot_with_cache(editor, *revision, projection_cache);
     if next == *previous {
         return;
     }
@@ -1409,6 +1471,7 @@ async fn handle_request(
     editor: &mut Editor,
     dimensions: &mut (u16, u16),
     revision: &mut u64,
+    projection_cache: &mut GuiProjectionCache,
 ) {
     let reply = match request {
         GuiRequest::Snapshot {
@@ -1421,7 +1484,7 @@ async fn handle_request(
                 *dimensions = next;
                 handle_viewport_resize(editor, next.0, next.1);
             }
-            let _ = reply.send(Ok(snapshot(editor, *revision)));
+            let _ = reply.send(Ok(snapshot_with_cache(editor, *revision, projection_cache)));
             return;
         }
         GuiRequest::VectorSource { reply } => {
@@ -1856,6 +1919,15 @@ async fn handle_request(
 
 /// Project the editor into a bounded DOM-friendly view model.
 pub fn snapshot(editor: &Editor, revision: u64) -> GuiSnapshot {
+    snapshot_with_cache(editor, revision, &mut GuiProjectionCache::default())
+}
+
+fn snapshot_with_cache(
+    editor: &Editor,
+    revision: u64,
+    projection_cache: &mut GuiProjectionCache,
+) -> GuiSnapshot {
+    projection_cache.begin_snapshot();
     let buffer = editor.buffer();
     let cursor = buffer.cursor();
     let total_lines = buffer.line_count();
@@ -1884,6 +1956,8 @@ pub fn snapshot(editor: &Editor, revision: u64) -> GuiSnapshot {
         true,
         tab_width,
         wrap_width,
+        editor.wrap_map(),
+        projection_cache,
         editor.horizontal_offset(),
         text_view_width,
     );
@@ -1918,9 +1992,10 @@ pub fn snapshot(editor: &Editor, revision: u64) -> GuiSnapshot {
         first_line,
         cursor_display_column,
         tab_width,
+        projection_cache,
     );
 
-    GuiSnapshot {
+    let snapshot = GuiSnapshot {
         revision,
         mode: editor.mode().display_name().to_string(),
         dashboard: editor.should_show_dashboard(),
@@ -2009,7 +2084,9 @@ pub fn snapshot(editor: &Editor, revision: u64) -> GuiSnapshot {
         debug: debug_panel(editor),
         theme: theme(editor),
         should_quit: editor.should_quit(),
-    }
+    };
+    projection_cache.finish_snapshot();
+    snapshot
 }
 
 fn display_column(
@@ -2018,12 +2095,9 @@ fn display_column(
     grapheme_column: usize,
     tab_width: usize,
 ) -> usize {
-    let text = buffer
-        .line_text(line)
-        .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
-        .unwrap_or_default();
-    let char_column = crate::unicode::grapheme_to_char_col(&text, GraphemeCol(grapheme_column));
-    crate::display::char_col_to_display_col(&text, char_column.0, tab_width)
+    let index = buffer.line_index(line);
+    let char_column = index.grapheme_to_char(GraphemeCol(grapheme_column));
+    index.char_to_display(char_column.0, tab_width)
 }
 
 fn diff_line_kind(text: &str) -> &'static str {
@@ -2057,6 +2131,8 @@ fn project_lines(
     focused: bool,
     tab_width: usize,
     wrap_width: Option<usize>,
+    wrap_map: Option<&crate::editor::WrapMap>,
+    projection_cache: &mut GuiProjectionCache,
     horizontal_offset: usize,
     text_view_width: usize,
 ) -> Vec<GuiLine> {
@@ -2083,16 +2159,44 @@ fn project_lines(
         Mode::Visual
     };
     let highlights = focused.then(|| editor.current_search()).flatten();
+    let projected_decorations = if focused {
+        editor
+            .decorations
+            .project_all(buffer.rope(), buffer.edit_log())
+    } else {
+        Default::default()
+    };
     let mut projected = Vec::with_capacity(visible);
 
     'lines: for line_index in first_line..buffer.line_count() {
-        let text = buffer
-            .line_text(line_index)
-            .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
-            .unwrap_or_default();
-        let syntax = buffer.highlights_for_line(line_index);
+        let indexed_line = buffer.line_index(line_index);
+        let line_start = buffer.rope().line_to_char(line_index);
+        let inline_text: std::sync::Arc<[(usize, std::sync::Arc<str>)]> = projected_decorations
+            .for_line(line_index)
+            .iter()
+            .filter_map(|decoration| match decoration.placement {
+                ovim_core::editor::decoration::DecorationPlacement::Inline { char_offset } => {
+                    Some((
+                        char_offset.saturating_sub(line_start),
+                        std::sync::Arc::<str>::from(decoration.text.as_str()),
+                    ))
+                }
+                ovim_core::editor::decoration::DecorationPlacement::EndOfLine { .. } => None,
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let eol_display = indexed_line.display_width(tab_width)
+            + inline_text
+                .iter()
+                .filter(|(anchor, _)| *anchor < indexed_line.len_chars())
+                .map(|(_, text)| {
+                    text.graphemes(true)
+                        .map(crate::display::grapheme_display_width)
+                        .sum::<usize>()
+                })
+                .sum::<usize>();
         let search_matches = highlights
-            .map(|search| search.find_all_in_line(&text))
+            .map(|search| search.find_all_in_index(&indexed_line))
             .unwrap_or_default();
         let diagnostic = if focused {
             editor.diagnostics_for_line(line_index)
@@ -2118,27 +2222,118 @@ fn project_lines(
                     .saturating_add(HORIZONTAL_OVERSCAN),
             )
         });
-        let (segment_start, segments) = segments_for_line(
-            &text,
-            line_index,
-            cursor_line,
-            cursor_column,
-            selection_mode,
-            selection,
-            &syntax,
-            &search_matches,
-            tab_width,
-            display_window,
-        );
-        let visual_rows = if wrap_width.is_some() {
-            split_visual_rows(segments, wrap_width)
+        let remaining = visible.saturating_sub(projected.len());
+        let visual_rows = if let Some(width) = wrap_width {
+            let cached_layout = wrap_map
+                .and_then(|map| map.line_layout(line_index))
+                .filter(|layout| std::sync::Arc::ptr_eq(layout.line(), &indexed_line))
+                .cloned();
+            let layout = cached_layout.unwrap_or_else(|| {
+                projection_cache.layout(indexed_line.clone(), width, tab_width, inline_text.clone())
+            });
+            let skip = if line_index == first_line {
+                scroll_subrow.min(layout.row_count().saturating_sub(1))
+            } else {
+                0
+            };
+            let mut rows = layout
+                .row_fragments(skip..skip.saturating_add(remaining))
+                .into_iter()
+                .map(|row| {
+                    let byte_range = fragment_source_byte_range(&row.fragments);
+                    let char_range = fragment_source_char_range(&row.fragments);
+                    let syntax = buffer.highlights_in_byte_range(line_index, byte_range);
+                    let visible_matches = matches_in_char_range(&search_matches, char_range);
+                    let segments = gui_segments_from_layout(
+                        &row.fragments,
+                        line_index,
+                        cursor_line,
+                        cursor_column,
+                        selection_mode,
+                        selection,
+                        &syntax,
+                        visible_matches,
+                    );
+                    (row.index, row.display_start, segments)
+                })
+                .collect::<Vec<_>>();
+            if line_index == cursor_line && cursor_column >= indexed_line.grapheme_count() {
+                let position = layout.position_for_char(indexed_line.len_chars());
+                if position.row >= skip && position.row < skip.saturating_add(remaining) {
+                    let cursor = GuiSegment {
+                        text: " ".to_string(),
+                        cells: 1,
+                        token: None,
+                        cursor: true,
+                        selected: false,
+                        search_match: false,
+                    };
+                    if let Some((_, _, segments)) =
+                        rows.iter_mut().find(|(row, _, _)| *row == position.row)
+                    {
+                        segments.push(cursor);
+                    } else if rows.len() < remaining {
+                        let display_start = layout
+                            .display_range_for_row(layout.row_count().saturating_sub(1))
+                            .map(|range| range.end)
+                            .unwrap_or(0);
+                        rows.push((position.row, display_start, vec![cursor]));
+                    }
+                }
+            }
+            rows
         } else {
-            vec![(segment_start, coalesce_segments(segments))]
-        };
-        let skip = if line_index == first_line {
-            scroll_subrow.min(visual_rows.len().saturating_sub(1))
-        } else {
-            0
+            let (start, end) = display_window.unwrap_or((0, usize::MAX));
+            let fragments = if inline_text.is_empty() {
+                ovim_core::line_layout::source_fragments_for_display_range(
+                    &indexed_line,
+                    tab_width,
+                    start..end,
+                )
+            } else {
+                projection_cache
+                    .layout(
+                        indexed_line.clone(),
+                        text_view_width,
+                        tab_width,
+                        inline_text.clone(),
+                    )
+                    .fragments_for_display_range(start..end)
+            };
+            let display_start = fragments
+                .first()
+                .map(|fragment| fragment.display_start)
+                .unwrap_or(start);
+            let byte_range = fragment_source_byte_range(&fragments);
+            let char_range = fragment_source_char_range(&fragments);
+            let syntax = buffer.highlights_in_byte_range(line_index, byte_range);
+            let visible_matches = matches_in_char_range(&search_matches, char_range);
+            let segments = gui_segments_from_layout(
+                &fragments,
+                line_index,
+                cursor_line,
+                cursor_column,
+                selection_mode,
+                selection,
+                &syntax,
+                visible_matches,
+            );
+            let mut segments = segments;
+            if line_index == cursor_line
+                && cursor_column >= indexed_line.grapheme_count()
+                && eol_display >= start
+                && eol_display < end
+            {
+                segments.push(GuiSegment {
+                    text: " ".to_string(),
+                    cells: 1,
+                    token: None,
+                    cursor: true,
+                    selected: false,
+                    search_match: false,
+                });
+            }
+            vec![(0, display_start, segments)]
         };
         let git = buffer
             .git_status()
@@ -2153,11 +2348,22 @@ fn project_lines(
         let diff = buffer
             .display_name()
             .filter(|name| name.starts_with("Diff · "))
-            .map(|_| diff_line_kind(&text).to_string());
-        for (visual_index, (display_start, segments)) in
-            visual_rows.into_iter().enumerate().skip(skip)
-        {
+            .map(|_| {
+                let prefix = indexed_line.slice_chars(0..indexed_line.len_chars().min(64));
+                diff_line_kind(&prefix).to_string()
+            });
+        for (visual_index, display_start, mut segments) in visual_rows {
             let continuation = visual_index > 0;
+            if segments.is_empty() {
+                segments.push(GuiSegment {
+                    text: " ".to_string(),
+                    cells: 1,
+                    token: None,
+                    cursor: line_index == cursor_line && cursor_column == 0,
+                    selected: false,
+                    search_match: false,
+                });
+            }
             projected.push(GuiLine {
                 number: line_index + 1,
                 continuation,
@@ -2183,6 +2389,7 @@ fn project_panes(
     active_first_line: usize,
     active_display_column: usize,
     tab_width: usize,
+    projection_cache: &mut GuiProjectionCache,
 ) -> (GuiLayoutNode, Vec<GuiPane>) {
     let Some(manager) = editor.window_manager() else {
         let cursor = editor.buffer().cursor();
@@ -2253,19 +2460,18 @@ fn project_panes(
                     editor.options.wrap.then(|| {
                         crate::frontend::compute_text_width(editor, window.width()).max(1)
                     }),
+                    window.wrap_map(),
+                    projection_cache,
                     window.horizontal_offset(),
                     crate::frontend::compute_text_width(editor, window.width()).max(1),
                 )
             };
-            let line_text = buffer
-                .line_text(cursor.line())
-                .map(|line| line.trim_end_matches(['\r', '\n']).to_string())
-                .unwrap_or_default();
-            let char_column = crate::unicode::grapheme_to_char_col(&line_text, cursor.col());
+            let cursor_line_index = buffer.line_index(cursor.line());
+            let char_column = cursor_line_index.grapheme_to_char(cursor.col());
             let display_column = if focused {
                 active_display_column
             } else {
-                crate::display::char_col_to_display_col(&line_text, char_column.0, tab_width)
+                cursor_line_index.char_to_display(char_column.0, tab_width)
             };
             let file_name = buffer
                 .file_path()
@@ -2323,7 +2529,135 @@ fn project_layout(node: &crate::editor::WindowNode, pane: &mut usize) -> GuiLayo
     }
 }
 
+fn fragment_source_byte_range(
+    fragments: &[ovim_core::line_layout::LayoutFragment],
+) -> std::ops::Range<usize> {
+    fragment_source_range(fragments, |source| source.bytes.clone())
+}
+
+fn fragment_source_char_range(
+    fragments: &[ovim_core::line_layout::LayoutFragment],
+) -> std::ops::Range<usize> {
+    fragment_source_range(fragments, |source| source.chars.clone())
+}
+
+fn fragment_source_range(
+    fragments: &[ovim_core::line_layout::LayoutFragment],
+    range: impl Fn(&ovim_core::line_layout::SourceSpan) -> std::ops::Range<usize>,
+) -> std::ops::Range<usize> {
+    let mut start = usize::MAX;
+    let mut end = 0;
+    for source in fragments
+        .iter()
+        .filter_map(|fragment| fragment.source.as_ref())
+    {
+        let source = range(source);
+        start = start.min(source.start);
+        end = end.max(source.end);
+    }
+    if start == usize::MAX {
+        0..0
+    } else {
+        start..end
+    }
+}
+
+fn matches_in_char_range(
+    matches: &[(usize, usize)],
+    range: std::ops::Range<usize>,
+) -> &[(usize, usize)] {
+    if range.start >= range.end {
+        return &[];
+    }
+    let start = matches.partition_point(|&(_, end)| end <= range.start);
+    let count = matches[start..].partition_point(|&(match_start, _)| match_start < range.end);
+    &matches[start..start + count]
+}
+
 #[allow(clippy::too_many_arguments)]
+fn gui_segments_from_layout(
+    fragments: &[ovim_core::line_layout::LayoutFragment],
+    line: usize,
+    cursor_line: usize,
+    cursor_column: usize,
+    mode: Mode,
+    selection: Option<((usize, usize), (usize, usize))>,
+    highlights: &[(std::ops::Range<usize>, HighlightGroup)],
+    search_matches: &[(usize, usize)],
+) -> Vec<GuiSegment> {
+    use ovim_core::line_layout::LayoutFragmentKind;
+
+    let mut segments = Vec::new();
+    let mut highlight_sweep = LastRangeSweep::new(highlights);
+    let mut search_sweep = AnyRangeSweep::new(search_matches);
+
+    for fragment in fragments {
+        if matches!(fragment.kind, LayoutFragmentKind::Padding) {
+            continue;
+        }
+        if matches!(fragment.kind, LayoutFragmentKind::InlineDecoration { .. }) {
+            if !fragment.text.is_empty() {
+                segments.push(GuiSegment {
+                    text: fragment.text.clone(),
+                    cells: fragment.cells,
+                    token: None,
+                    cursor: false,
+                    selected: false,
+                    search_match: false,
+                });
+            }
+            continue;
+        }
+        let Some(source) = fragment.source.as_ref() else {
+            continue;
+        };
+
+        match fragment.kind {
+            LayoutFragmentKind::Text => {
+                let mut char_offset = 0usize;
+                for (grapheme_offset, (byte_offset, grapheme)) in
+                    fragment.text.grapheme_indices(true).enumerate()
+                {
+                    let byte = source.bytes.start + byte_offset;
+                    let char_column = source.chars.start + char_offset;
+                    let grapheme_column = source.graphemes.start + grapheme_offset;
+                    segments.push(GuiSegment {
+                        text: grapheme.to_string(),
+                        cells: crate::display::grapheme_display_width(grapheme),
+                        token: highlight_sweep
+                            .value_at(byte)
+                            .map(|group| syntax_name(*group).to_string()),
+                        cursor: line == cursor_line && grapheme_column == cursor_column,
+                        selected: selection
+                            .is_some_and(|range| selected_at(line, grapheme_column, mode, range)),
+                        search_match: search_sweep.contains(char_column),
+                    });
+                    char_offset += grapheme.chars().count();
+                }
+            }
+            LayoutFragmentKind::Tab | LayoutFragmentKind::Control => {
+                let grapheme_column = source.graphemes.start;
+                let char_column = source.chars.start;
+                segments.push(GuiSegment {
+                    text: fragment.text.clone(),
+                    cells: fragment.cells,
+                    token: highlight_sweep
+                        .value_at(source.bytes.start)
+                        .map(|group| syntax_name(*group).to_string()),
+                    cursor: line == cursor_line && grapheme_column == cursor_column,
+                    selected: selection
+                        .is_some_and(|range| selected_at(line, grapheme_column, mode, range)),
+                    search_match: search_sweep.contains(char_column),
+                });
+            }
+            LayoutFragmentKind::InlineDecoration { .. } | LayoutFragmentKind::Padding => {}
+        }
+    }
+    coalesce_segments(segments)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn segments_for_line(
     text: &str,
     line: usize,
@@ -2341,18 +2675,22 @@ fn segments_for_line(
     let mut char_column = 0usize;
     let mut grapheme_count = 0usize;
     let mut first_display_column = None;
+    let mut highlight_sweep = LastRangeSweep::new(highlights);
+    let mut search_sweep = AnyRangeSweep::new(search_matches);
+    let mut reached_line_end = true;
 
     for (column, (byte, grapheme)) in text.grapheme_indices(true).enumerate() {
-        let token = highlights
-            .iter()
-            .rev()
-            .find(|(range, _)| range.start <= byte && byte < range.end)
-            .map(|(_, group)| syntax_name(*group));
+        if display_window.is_some_and(|(_, end)| display_column >= end) {
+            reached_line_end = false;
+            break;
+        }
+
+        let token = highlight_sweep
+            .value_at(byte)
+            .map(|group| syntax_name(*group));
         let cursor = line == cursor_line && column == cursor_column;
         let selected = selection.is_some_and(|range| selected_at(line, column, mode, range));
-        let search_match = search_matches
-            .iter()
-            .any(|(start, end)| *start <= char_column && char_column < *end);
+        let search_match = search_sweep.contains(char_column);
         let control = if grapheme.chars().count() == 1 {
             grapheme
                 .chars()
@@ -2395,7 +2733,7 @@ fn segments_for_line(
         grapheme_count = column + 1;
     }
 
-    if line == cursor_line && cursor_column >= grapheme_count {
+    if reached_line_end && line == cursor_line && cursor_column >= grapheme_count {
         let visible = display_window.is_none_or(|(start, end)| {
             display_column.saturating_add(1) > start && display_column < end
         });
@@ -2428,6 +2766,85 @@ fn segments_for_line(
     (first_display_column.unwrap_or(0), segments)
 }
 
+/// Monotonic interval lookup that preserves the previous "last range wins"
+/// rule for overlapping syntax highlights. Input order is the precedence
+/// order; ranges do not need to be sorted by start.
+struct LastRangeSweep<'a, T> {
+    ranges: &'a [(std::ops::Range<usize>, T)],
+    starts: Vec<usize>,
+    next: usize,
+    active: std::collections::BinaryHeap<usize>,
+}
+
+impl<'a, T> LastRangeSweep<'a, T> {
+    fn new(ranges: &'a [(std::ops::Range<usize>, T)]) -> Self {
+        let mut starts: Vec<usize> = (0..ranges.len()).collect();
+        starts.sort_by_key(|&index| (ranges[index].0.start, index));
+        Self {
+            ranges,
+            starts,
+            next: 0,
+            active: std::collections::BinaryHeap::new(),
+        }
+    }
+
+    fn value_at(&mut self, position: usize) -> Option<&'a T> {
+        while self.next < self.starts.len() {
+            let index = self.starts[self.next];
+            let range = &self.ranges[index].0;
+            if range.start > position {
+                break;
+            }
+            self.next += 1;
+            if range.start < range.end {
+                self.active.push(index);
+            }
+        }
+
+        while let Some(&index) = self.active.peek() {
+            if position < self.ranges[index].0.end {
+                return Some(&self.ranges[index].1);
+            }
+            self.active.pop();
+        }
+        None
+    }
+}
+
+/// Monotonic union lookup for search-match intervals.
+struct AnyRangeSweep {
+    ranges: Vec<(usize, usize)>,
+    next: usize,
+    active_ends: std::collections::BinaryHeap<usize>,
+}
+
+impl AnyRangeSweep {
+    fn new(ranges: &[(usize, usize)]) -> Self {
+        let mut ranges = ranges.to_vec();
+        ranges.sort_unstable_by_key(|&(start, end)| (start, end));
+        Self {
+            ranges,
+            next: 0,
+            active_ends: std::collections::BinaryHeap::new(),
+        }
+    }
+
+    fn contains(&mut self, position: usize) -> bool {
+        while self.next < self.ranges.len() && self.ranges[self.next].0 <= position {
+            let (start, end) = self.ranges[self.next];
+            self.next += 1;
+            if start < end {
+                self.active_ends.push(end);
+            }
+        }
+        while self.active_ends.peek().is_some_and(|&end| end <= position) {
+            self.active_ends.pop();
+        }
+        !self.active_ends.is_empty()
+    }
+}
+
+#[cfg(test)]
 fn split_visual_rows(
     segments: Vec<GuiSegment>,
     wrap_width: Option<usize>,
@@ -3213,6 +3630,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn gui_projection_cache_reuses_warm_layout_and_releases_stale_line_versions() {
+        let mut cache = GuiProjectionCache::default();
+        let old_line = ovim_core::text_index::LineIndex::from_text("abcdefgh");
+        let old_line_weak = std::sync::Arc::downgrade(&old_line);
+        let first_inline: std::sync::Arc<[(usize, std::sync::Arc<str>)]> =
+            std::sync::Arc::from([(2, std::sync::Arc::<str>::from(": A"))]);
+
+        cache.begin_snapshot();
+        let first = cache.layout(old_line.clone(), 4, 4, first_inline.clone());
+        cache.finish_snapshot();
+        let first_weak = std::sync::Arc::downgrade(&first);
+
+        cache.begin_snapshot();
+        let warm = cache.layout(old_line.clone(), 4, 4, first_inline);
+        assert!(std::sync::Arc::ptr_eq(&first, &warm));
+        let changed_inline = cache.layout(
+            old_line.clone(),
+            4,
+            4,
+            std::sync::Arc::from([(2, std::sync::Arc::<str>::from(": B"))]),
+        );
+        assert!(!std::sync::Arc::ptr_eq(&warm, &changed_inline));
+        let inline_text: String = changed_inline
+            .row_fragments(0..changed_inline.row_count())
+            .iter()
+            .flat_map(|row| &row.fragments)
+            .filter(|fragment| {
+                matches!(
+                    fragment.kind,
+                    ovim_core::line_layout::LayoutFragmentKind::InlineDecoration { .. }
+                )
+            })
+            .map(|fragment| fragment.text.as_str())
+            .collect();
+        assert_eq!(inline_text, ": B");
+        cache.finish_snapshot();
+
+        drop(first);
+        drop(warm);
+        drop(changed_inline);
+        drop(old_line);
+
+        let new_line = ovim_core::text_index::LineIndex::from_text("abcdXefgh");
+        cache.begin_snapshot();
+        let current = cache.layout(new_line, 4, 4, std::sync::Arc::from([]));
+        cache.finish_snapshot();
+
+        assert!(first_weak.upgrade().is_none());
+        assert!(old_line_weak.upgrade().is_none());
+        assert_eq!(current.line().len_chars(), 9);
+    }
+
+    #[test]
     fn markdown_pseudo_snapshot_carries_document_only_for_its_pane() {
         let mut editor = Editor::with_content("# Hello\n\n**world**\n");
         editor.set_file_path("/example/readme.md".into());
@@ -3616,6 +4086,56 @@ mod tests {
     }
 
     #[test]
+    fn gui_interval_sweeps_preserve_overlap_precedence_and_search_union() {
+        let highlights = vec![
+            (0..6, HighlightGroup::String),
+            (2..4, HighlightGroup::Comment),
+            (1..5, HighlightGroup::Keyword),
+        ];
+        let searches = vec![(4, 6), (1, 3)];
+
+        let (_, segments) = segments_for_line(
+            "abcdef",
+            0,
+            1,
+            0,
+            Mode::Normal,
+            None,
+            &highlights,
+            &searches,
+            4,
+            None,
+        );
+
+        assert_eq!(
+            segments[0].token.as_deref(),
+            Some(syntax_name(HighlightGroup::String))
+        );
+        assert_eq!(
+            segments[1].token.as_deref(),
+            Some(syntax_name(HighlightGroup::Keyword))
+        );
+        assert_eq!(
+            segments[2].token.as_deref(),
+            Some(syntax_name(HighlightGroup::Keyword))
+        );
+        assert_eq!(
+            segments[4].token.as_deref(),
+            Some(syntax_name(HighlightGroup::Keyword))
+        );
+        assert_eq!(
+            segments[5].token.as_deref(),
+            Some(syntax_name(HighlightGroup::String))
+        );
+        assert!(!segments[0].search_match);
+        assert!(segments[1].search_match);
+        assert!(segments[2].search_match);
+        assert!(!segments[3].search_match);
+        assert!(segments[4].search_match);
+        assert!(segments[5].search_match);
+    }
+
+    #[test]
     fn snapshot_projects_the_real_split_tree() {
         let mut editor = Editor::with_content("one\ntwo\nthree\n");
         editor.init_window_manager(100, 30);
@@ -3644,6 +4164,7 @@ mod tests {
         let mut previous = snapshot(&editor, revision);
         let mut render_version = editor.render_input_version();
         let (updates, receiver) = watch::channel(None);
+        let mut projection_cache = GuiProjectionCache::default();
 
         publish_if_changed(
             &editor,
@@ -3651,6 +4172,7 @@ mod tests {
             &mut previous,
             &mut render_version,
             &updates,
+            &mut projection_cache,
         );
         assert!(receiver.borrow().is_none());
 
@@ -3662,6 +4184,7 @@ mod tests {
             &mut previous,
             &mut render_version,
             &updates,
+            &mut projection_cache,
         );
         assert_eq!(
             receiver.borrow().as_ref().map(|view| view.revision),
@@ -3675,6 +4198,7 @@ mod tests {
             &mut previous,
             &mut render_version,
             &updates,
+            &mut projection_cache,
         );
         assert!(receiver.borrow().is_none());
     }

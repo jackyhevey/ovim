@@ -42,7 +42,9 @@ impl Buffer {
         // Shift highlights BEFORE modifying rope
         self.shift_highlights_for_insertion(line, byte_col, text);
 
+        let text_edit = self.prepare_text_edit(insert_pos, insert_pos);
         self.rope.insert(insert_pos, text);
+        self.finish_text_edit(text_edit, text);
         self.modified = true;
 
         let recorded_edit = Edit::Insert {
@@ -217,7 +219,9 @@ impl Buffer {
             end_byte_col,
         );
 
+        let text_edit = self.prepare_text_edit(start_pos, end_pos);
         self.rope.remove(start_pos..end_pos);
+        self.finish_text_edit(text_edit, "");
         self.modified = true;
 
         let recorded_edit = Edit::Delete {
@@ -292,7 +296,9 @@ impl Buffer {
         );
         self.shift_highlights_for_deletion(start_line, start_byte_col, end_line, end_byte_col);
 
+        let text_edit = self.prepare_text_edit(start_pos, end_pos);
         self.rope.remove(start_pos..end_pos);
+        self.finish_text_edit(text_edit, "");
         self.modified = true;
 
         let recorded_edit = Edit::Delete {

@@ -172,18 +172,6 @@ pub use visual_context::{VisualContext, VisualSelection};
 pub use window::{SplitDirection, Window, WindowManager, WindowNode, WindowView, WindowViewNode};
 pub use wrap_map::WrapMap;
 
-/// Outcome of [`Editor::refresh_wrap_map`] — what the caller should do with the
-/// wrap-map slot it owns (editor-global or per-`Window`).
-enum WrapMapRefresh {
-    /// Wrap is off — the slot should be cleared.
-    Disable,
-    /// The existing map (if any) is still valid — leave it as-is.
-    UpToDate,
-    /// A freshly built map, plus the `DecorationMap::generation` it reflects
-    /// (the caller stores both).
-    Rebuilt(WrapMap, u64),
-}
-
 /// Margin background color for textwidth shading
 #[derive(Debug, Clone, PartialEq)]
 pub enum MarginColor {
@@ -1023,168 +1011,185 @@ impl Editor {
             self.ensure_wrap_map_for_window(focused_idx, text_width);
             return;
         }
-        // No window manager (headless / test harness) — editor-global slot.
-        match self.refresh_wrap_map(
+        let existing = self.viewport.wrap_map.take();
+        let (map, generation) = self.refresh_wrap_map(
             text_width,
-            self.viewport.wrap_map.as_ref(),
+            existing,
             self.viewport.wrap_decoration_generation,
-        ) {
-            WrapMapRefresh::Disable => self.viewport.wrap_map = None,
-            WrapMapRefresh::UpToDate => {}
-            WrapMapRefresh::Rebuilt(map, dec_gen) => {
-                self.viewport.wrap_map = Some(map);
-                self.viewport.wrap_decoration_generation = dec_gen;
-            }
-        }
+        );
+        self.viewport.wrap_map = map;
+        self.viewport.wrap_decoration_generation = generation;
     }
 
-    /// Ensures window `window_idx`'s own wrap map is built and up-to-date for a
-    /// viewport of `text_width` columns. No-op if there is no window manager or
-    /// no such window. (roadmap 19 — split panes wrap at their own width.)
+    /// Refresh the requested window without cloning its cached line geometry.
     pub fn ensure_wrap_map_for_window(&mut self, window_idx: usize, text_width: usize) {
-        // The window must exist.
-        if self
+        let Some(window) = self
             .window_manager
-            .as_ref()
-            .and_then(|wm| wm.get_window(window_idx))
-            .is_none()
-        {
+            .as_mut()
+            .and_then(|wm| wm.get_window_mut(window_idx))
+        else {
             return;
-        }
-        let existing_dec_gen = self
-            .window_manager
-            .as_ref()
-            .and_then(|wm| wm.get_window(window_idx))
-            .map(|w| w.wrap_decoration_generation())
-            .unwrap_or(0);
-        // `refresh_wrap_map` only reads `self` (shared) — passing it a `&WrapMap`
-        // borrowed from `self.window_manager` is fine: both are shared borrows.
-        let refresh = self.refresh_wrap_map(
-            text_width,
-            self.window_manager
-                .as_ref()
-                .and_then(|wm| wm.get_window(window_idx))
-                .and_then(|w| w.wrap_map()),
-            existing_dec_gen,
-        );
+        };
+        let generation = window.wrap_decoration_generation();
+        let existing = window.wrap_map_mut().take().map(|map| *map);
+        let (map, generation) = self.refresh_wrap_map(text_width, existing, generation);
         if let Some(window) = self
             .window_manager
             .as_mut()
             .and_then(|wm| wm.get_window_mut(window_idx))
         {
-            match refresh {
-                WrapMapRefresh::Disable => {
-                    window.invalidate_wrap_map();
-                }
-                WrapMapRefresh::UpToDate => {}
-                WrapMapRefresh::Rebuilt(map, dec_gen) => {
-                    *window.wrap_map_mut() = Some(map);
-                    window.set_wrap_decoration_generation(dec_gen);
-                }
-            }
+            *window.wrap_map_mut() = map.map(Box::new);
+            window.set_wrap_decoration_generation(generation);
         }
     }
 
-    /// Recompute a wrap map for a viewport of `text_width` columns against the
-    /// current buffer + decorations, given the caller's existing map (if any)
-    /// and the decoration generation it was built at. Pure w.r.t. `self`
-    /// (shared borrow only) — the caller decides which slot to store the
-    /// result in. Shared by `ensure_wrap_map` (editor-global slot) and
-    /// `ensure_wrap_map_for_window` (per-`Window` slot).
+    /// Text edits replay line splices onto the existing count index. Geometry
+    /// changes or lost mutation history rebuild safely, preserving per-window policy.
     fn refresh_wrap_map(
         &self,
         text_width: usize,
-        existing: Option<&WrapMap>,
+        mut existing: Option<WrapMap>,
         existing_dec_gen: u64,
-    ) -> WrapMapRefresh {
+    ) -> (Option<WrapMap>, u64) {
+        let dec_gen = self.decorations.generation;
         if !self.options.wrap {
-            return WrapMapRefresh::Disable;
+            return (None, dec_gen);
         }
         let width = text_width.max(1);
-        let tab_width = self.indent_options().tab_width;
-        // Use the rope's raw line count (includes the trailing empty line after
-        // a final `\n`) so the wrap map covers every valid cursor position.
-        let line_count = self.buffer().rope().len_lines();
-        let buf_version = self.buffer().version();
-        let dec_gen = self.decorations.generation;
-        // When markdown conceal is active, the renderer draws concealed (often
-        // much shorter) text for every line *except* the cursor line, which it
-        // reveals so editing isn't blind. The wrap map must mirror that exactly
-        // or row counts (and therefore cursor row / scrolling) drift from what
-        // is drawn. `conceal_cursor_line` is `Some(cursor_line)` only when
-        // conceal affects layout, so plain buffers never rebuild on j/k.
+        let tab_width = self.indent_options().tab_width.max(1);
+        let buffer = self.buffer();
+        let version = buffer.version();
+        let line_count = buffer.rope().len_lines();
         let conceal_active = self.options.markdown_conceal
-            && self
-                .buffer()
-                .file_path()
-                .map(|p| p.ends_with(".md"))
-                .unwrap_or(false);
-        let cursor_line = self.buffer().cursor().line();
-        let conceal_cursor_line = if conceal_active {
-            Some(cursor_line)
-        } else {
-            None
-        };
-        if let Some(map) = existing {
-            if map.buffer_version() == buf_version
-                && map.wrap_width() == width
-                && map.line_count() == line_count
-                && existing_dec_gen == dec_gen
-                && map.conceal_cursor_line() == conceal_cursor_line
-            {
-                return WrapMapRefresh::UpToDate;
-            }
-        }
-
-        let rope = self.buffer().rope();
-        let edit_log = self.buffer().edit_log();
-        // Feed the wrap walker the *visible* line content (terminator stripped),
-        // matching what the renderer's `apply_inline_decorations` sees — without
-        // this the walker treats a trailing `\n` as a 1-col character and
-        // disagrees with the renderer about row counts at width boundaries.
-        // (OV-00257) `display::line_content` is the shared "line content for a
-        // `&Rope` holder" helper (mirrors `Buffer::line_text`).
-        //
-        // When conceal is active, replace links/images with their concealed
-        // form on every line but the cursor line, mirroring the renderer
-        // (`render_buffer` skips conceal on `is_cursor_line_for_conceal`).
-        let make_line_text = |line_idx: usize| {
-            let raw = crate::display::line_content(rope, line_idx);
-            if conceal_active && line_idx != cursor_line {
+            && buffer.file_path().is_some_and(|path| path.ends_with(".md"));
+        let cursor_line = buffer.cursor().line();
+        let conceal_cursor_line = conceal_active.then_some(cursor_line);
+        let make_layout = |line: usize| {
+            let mut transform = None;
+            let mut links = Vec::new();
+            let index = if conceal_active && line != cursor_line {
+                let raw = buffer.line_text(line).unwrap_or_default();
                 let spans = crate::markdown_conceal::scan_markdown_conceal(&raw);
                 if spans.is_empty() {
-                    raw
+                    buffer.line_index(line)
                 } else {
-                    crate::markdown_conceal::apply_conceal(&raw, &spans).text
+                    let view = crate::markdown_conceal::apply_conceal(&raw, &spans);
+                    links = crate::markdown_conceal::extract_concealed_links(&spans, &view);
+                    let index = crate::text_index::LineIndex::from_text(&view.text);
+                    transform = Some(std::sync::Arc::new(view));
+                    index
                 }
             } else {
-                raw
+                buffer.line_index(line)
+            };
+            let line_start = buffer.rope().line_to_char(line);
+            let mut inline: Vec<(usize, std::sync::Arc<str>)> = self
+                .decorations
+                .for_line_projected(line, buffer.rope(), buffer.edit_log())
+                .into_iter()
+                .filter_map(|decoration| match decoration.placement {
+                    decoration::DecorationPlacement::Inline { char_offset } => Some((
+                        char_offset.saturating_sub(line_start),
+                        decoration.text.into(),
+                    )),
+                    decoration::DecorationPlacement::EndOfLine { .. } => None,
+                })
+                .collect();
+            // Decoration anchors originate in raw character space; conceal
+            // changes that space before wrapping and must transform them too.
+            if let Some(view) = transform.as_ref() {
+                let raw = buffer.line_index(line);
+                for (column, _) in &mut inline {
+                    let byte = raw.char_to_byte(*column);
+                    *column = view
+                        .src_to_view
+                        .get(byte)
+                        .copied()
+                        .unwrap_or(index.len_chars());
+                }
+            }
+            wrap_map::IndexedWrapLine {
+                layout: std::sync::Arc::new(
+                    crate::line_layout::IndexedLineLayout::with_inline_text(
+                        index,
+                        width,
+                        tab_width,
+                        inline.into(),
+                    ),
+                ),
+                transform,
+                links: links.into(),
             }
         };
-        // Wrap-width calculation reads *projected* decoration widths so wrap
-        // points match what the renderer will draw (decorations are immutable
-        // after placement; the projection replays `edit_log` since each
-        // decoration's `source_version` — see `decoration.rs`).
-        let inline_widths = |line_idx: usize| {
-            self.decorations
-                .inline_decorations_for_line_projected(line_idx, rope, edit_log)
-        };
-
-        let mut map = WrapMap::new_with_decorations(
-            line_count,
+        if let Some(map) = existing.as_mut() {
+            let same_policy = map.source_buffer_id() == Some(buffer.id())
+                && map.wrap_width() == width
+                && map.tab_width() == tab_width
+                && existing_dec_gen == dec_gen
+                && map.conceal_cursor_line().is_some() == conceal_cursor_line.is_some();
+            if same_policy {
+                if let Some(changes) = buffer.line_changes_since(map.buffer_version()) {
+                    // The old revealed line belongs to the map's snapshot.
+                    // Carry it through structural edits before invalidating
+                    // reveal/conceal geometry in final line coordinates.
+                    let mut old_revealed = map.conceal_cursor_line();
+                    for change in &changes {
+                        old_revealed = old_revealed.and_then(|line| {
+                            let end = change.start_line + change.old_line_count;
+                            if line < change.start_line {
+                                Some(line)
+                            } else if line >= end {
+                                Some(line - change.old_line_count + change.new_line_count)
+                            } else {
+                                // Replaced lines are already dirty in the journal.
+                                None
+                            }
+                        });
+                    }
+                    let mut extra = Vec::new();
+                    if old_revealed != conceal_cursor_line {
+                        extra.extend(old_revealed);
+                        extra.extend(conceal_cursor_line);
+                    }
+                    if map.refresh_indexed(&changes, line_count, version, &extra, make_layout) {
+                        map.set_conceal_cursor_line(conceal_cursor_line);
+                        return (existing, dec_gen);
+                    }
+                }
+            }
+        }
+        let mut map = WrapMap::from_layouts(
+            (0..line_count).map(make_layout).collect(),
             width,
             tab_width,
-            buf_version,
-            make_line_text,
-            inline_widths,
+            version,
         );
+        map.set_source_buffer_id(buffer.id());
         map.set_conceal_cursor_line(conceal_cursor_line);
-        WrapMapRefresh::Rebuilt(map, dec_gen)
+        (Some(map), dec_gen)
     }
 
     fn cursor_grapheme_to_char_col(&self, line_idx: usize, grapheme_col: GraphemeCol) -> usize {
-        let line_text = self.buffer().line_text(line_idx).unwrap_or_default();
-        grapheme_to_char_col(&line_text, grapheme_col).0
+        self.buffer()
+            .line_index(line_idx)
+            .grapheme_to_char(grapheme_col)
+            .0
+    }
+
+    fn cursor_visual_position(&self, line: usize, col: GraphemeCol) -> Option<(usize, usize)> {
+        let map = self.wrap_map()?;
+        let char_col = self.buffer().line_index(line).grapheme_to_char(col).0;
+        if let Some(layout) = map.line_layout(line) {
+            let position = layout.position_for_char(char_col);
+            Some((map.logical_to_visual(line) + position.row, position.column))
+        } else {
+            let text = self.cursor_line_text(line);
+            let display = self
+                .buffer()
+                .line_index(line)
+                .char_to_display(char_col, self.indent_options().tab_width);
+            Some(map.cursor_to_visual(line, display, &text))
+        }
     }
 
     fn cursor_line_text(&self, line_idx: usize) -> String {
@@ -1215,6 +1220,16 @@ impl Editor {
             return;
         }
 
+        // Reuse indexed geometry and update only changed lines before scrolling.
+        // Macro playback can edit without an intervening render pass.
+        if self.options.wrap {
+            let width = self.wrap_map().map(WrapMap::wrap_width).or_else(|| {
+                (self.render_cache.last_text_width > 0).then_some(self.render_cache.last_text_width)
+            });
+            if let Some(width) = width {
+                self.ensure_wrap_map(width);
+            }
+        }
         let cursor_line = self.buffer().cursor().line();
         let visible_lines = if let Some(wm) = &self.window_manager {
             if let Some(window) = wm.focused_window() {
@@ -1280,16 +1295,9 @@ impl Editor {
         if wrap_map_usable {
             if let Some(wrap_map) = self.wrap_map() {
                 // Wrap-aware scrolling: work in absolute visual rows.
-                let line_text = self.cursor_line_text(cursor_line);
-                let cursor_char_col =
-                    self.cursor_grapheme_to_char_col(cursor_line, self.buffer().cursor().col());
-                let disp_col = crate::display::char_col_to_display_col(
-                    &line_text,
-                    cursor_char_col,
-                    self.indent_options().tab_width,
-                );
-                let (cursor_visual_row, _) =
-                    wrap_map.cursor_to_visual(cursor_line, disp_col, &line_text);
+                let (cursor_visual_row, _) = self
+                    .cursor_visual_position(cursor_line, self.buffer().cursor().col())
+                    .unwrap_or((0, 0));
                 let viewport_visual_start =
                     wrap_map.logical_to_visual(current_offset) + current_subrow;
 
@@ -1372,9 +1380,10 @@ impl Editor {
         let cursor_char_col =
             self.cursor_grapheme_to_char_col(cursor_line, self.buffer().cursor().col());
         let cursor_display_col = {
-            let line_text = self.buffer().line_text(cursor_line).unwrap_or_default();
-            let raw_col =
-                crate::display::char_col_to_display_col(&line_text, cursor_char_col, tab_width);
+            let raw_col = self
+                .buffer()
+                .line_index(cursor_line)
+                .char_to_display(cursor_char_col, tab_width);
             // Include inline decoration widths (inlay hints) so horizontal
             // scroll keeps the *decorated* cursor position visible.  Without
             // this, h_offset is set from raw text only, but the renderer adds
@@ -2811,5 +2820,141 @@ mod per_window_wrap_tests {
         // Only window 0 exists; targeting index 5 must not panic / allocate.
         editor.ensure_wrap_map_for_window(5, 20);
         assert!(editor.window_manager().unwrap().get_window(5).is_none());
+    }
+}
+
+#[cfg(test)]
+mod incremental_wrap_tests {
+    use super::Editor;
+    use crate::unicode::{CharCol, GraphemeCol};
+    use std::sync::Arc;
+
+    #[test]
+    fn same_line_edit_reuses_other_line_geometry() {
+        let mut editor = Editor::with_content(&"abcdef\n".repeat(100));
+        editor.options.wrap = true;
+        editor.ensure_wrap_map(4);
+        let unchanged = editor.wrap_map().unwrap().line_layout(80).unwrap().clone();
+        editor.buffer_mut().insert_text_at(3, CharCol(1), "12345");
+        editor.ensure_wrap_map(4);
+        let map = editor.wrap_map().unwrap();
+        assert_eq!(map.last_recomputed_lines(), 1);
+        assert_eq!(map.visual_lines_for(3), 3);
+        assert!(Arc::ptr_eq(&unchanged, map.line_layout(80).unwrap()));
+        assert_eq!(map.logical_to_visual(4), 9);
+    }
+
+    #[test]
+    fn structural_edits_shift_reusable_geometry_and_refresh_touched_lines() {
+        let mut editor = Editor::with_content("abcdef\nghijkl\nmnopqr\n");
+        editor.options.wrap = true;
+        editor.ensure_wrap_map(4);
+        let tail = editor.wrap_map().unwrap().line_layout(2).unwrap().clone();
+        editor.buffer_mut().insert_text_at(0, CharCol(3), "\n");
+        editor.ensure_wrap_map(4);
+        let map = editor.wrap_map().unwrap();
+        assert_eq!(map.last_recomputed_lines(), 2);
+        assert_eq!(map.visual_lines_for(0), 1);
+        assert_eq!(map.visual_lines_for(1), 1);
+        assert!(Arc::ptr_eq(&tail, map.line_layout(3).unwrap()));
+        editor
+            .buffer_mut()
+            .delete_range(0, CharCol(3), 1, CharCol::ZERO);
+        editor.ensure_wrap_map(4);
+        let map = editor.wrap_map().unwrap();
+        assert_eq!(map.last_recomputed_lines(), 1);
+        assert!(Arc::ptr_eq(&tail, map.line_layout(2).unwrap()));
+        assert_eq!(map.visual_lines_for(0), 2);
+    }
+
+    #[test]
+    fn raw_mutation_and_tab_policy_change_rebuild_safely() {
+        let mut editor = Editor::with_content("\tx\n");
+        editor.options.wrap = true;
+        let mut indent = editor.indent_options();
+        indent.tab_width = 8;
+        editor.set_indent_options(indent);
+        editor.ensure_wrap_map(4);
+        assert_eq!(editor.wrap_map().unwrap().visual_lines_for(0), 3);
+        indent.tab_width = 2;
+        editor.set_indent_options(indent);
+        editor.ensure_wrap_map(4);
+        assert_eq!(editor.wrap_map().unwrap().visual_lines_for(0), 1);
+        editor.buffer_mut().rope_mut().insert(0, "abcdefgh");
+        editor.ensure_wrap_map(4);
+        assert_eq!(editor.wrap_map().unwrap().visual_lines_for(0), 3);
+    }
+
+    #[test]
+    fn journal_eviction_falls_back_to_current_content() {
+        let mut editor = Editor::with_content("x\n");
+        editor.options.wrap = true;
+        editor.ensure_wrap_map(80);
+        for _ in 0..300 {
+            editor.buffer_mut().insert_text_at(0, CharCol::ZERO, "x");
+        }
+        editor.ensure_wrap_map(80);
+        assert_eq!(editor.wrap_map().unwrap().visual_lines_for(0), 4);
+        assert_eq!(editor.wrap_map().unwrap().last_recomputed_lines(), 2);
+    }
+
+    #[test]
+    fn structural_edit_reconceals_the_previously_revealed_cursor_line() {
+        let mut editor = Editor::with_content(&"[label](https://example.test/path)\n".repeat(12));
+        editor.set_file_path("/tmp/incremental-wrap.md".to_string());
+        editor.options.wrap = true;
+
+        // The initial map reveals line 5 because it owns the cursor, while
+        // every other Markdown link line is concealed.
+        editor
+            .buffer_mut()
+            .cursor_mut()
+            .set_position(5, GraphemeCol::ZERO);
+        editor.ensure_wrap_map(8);
+        assert!(editor.wrap_map().unwrap().line_transform(5).is_none());
+        assert!(editor.wrap_map().unwrap().line_transform(6).is_some());
+
+        // Move without rendering, then insert a line ahead of both cursor
+        // positions. The old revealed row shifts from 5 to 6; the active
+        // cursor becomes line 11 in final coordinates.
+        editor
+            .buffer_mut()
+            .cursor_mut()
+            .set_position(10, GraphemeCol::ZERO);
+        editor.buffer_mut().insert_text_at(0, CharCol::ZERO, "\n");
+        editor
+            .buffer_mut()
+            .cursor_mut()
+            .set_position(11, GraphemeCol::ZERO);
+        editor.ensure_wrap_map(8);
+
+        let map = editor.wrap_map().unwrap();
+        assert_eq!(map.conceal_cursor_line(), Some(11));
+        assert!(
+            map.line_transform(6).is_some(),
+            "shifted old cursor line must conceal"
+        );
+        assert!(
+            map.line_transform(11).is_none(),
+            "current cursor line must reveal"
+        );
+    }
+
+    #[test]
+    fn visual_scroll_refreshes_same_line_edit_before_using_row_counts() {
+        let mut editor = Editor::with_content("abcd\nx\n");
+        editor.options.wrap = true;
+        editor.init_window_manager(4, 1);
+        editor.ensure_wrap_map(4);
+        assert_eq!(editor.wrap_map().unwrap().visual_lines_for(0), 1);
+
+        // The map still has the old logical row count. Ctrl-E must refresh it
+        // before converting one visual-row scroll into (line, subrow).
+        editor.buffer_mut().insert_text_at(0, CharCol(4), "efgh");
+        editor.scroll_viewport_down(1);
+
+        assert_eq!(editor.wrap_map().unwrap().visual_lines_for(0), 2);
+        assert_eq!(editor.scroll_offset(), 0);
+        assert_eq!(editor.scroll_subrow(), 1);
     }
 }

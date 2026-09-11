@@ -230,6 +230,7 @@ impl Buffer {
     /// view that re-renders must set them again afterwards.
     pub fn set_forced_highlights(&mut self, highlights: LineHighlights) {
         self.forced_highlights = Some(highlights);
+        self.highlight_projection_generation = self.highlight_projection_generation.wrapping_add(1);
         self.version += 1;
     }
 
@@ -304,6 +305,7 @@ impl Buffer {
 
         // Install cached highlights so the next render shows styled text
         self.cached_highlights = Some(highlights);
+        self.highlight_projection_generation = self.highlight_projection_generation.wrapping_add(1);
 
         // Create a SyntaxHighlighter on the main thread for future incremental updates.
         // This parses the current content, which is fast (~5ms for typical files) and
@@ -366,6 +368,7 @@ impl Buffer {
     /// copy of the entire buffer the previous `&str` path required.
     pub(super) fn build_highlight_cache_from_rope(&mut self, highlighter: &SyntaxHighlighter) {
         self.cached_highlights = Some(highlighter.highlights_for_all_lines_rope(&self.rope));
+        self.highlight_projection_generation = self.highlight_projection_generation.wrapping_add(1);
 
         // For markdown-style files, also build code block cache. The
         // code-block builder still needs `&str` for its tree walk; allocate
@@ -762,17 +765,46 @@ impl Buffer {
         base
     }
 
+    /// Return syntax spans overlapping a byte window while preserving their
+    /// original order (and therefore the renderer's overlap precedence).
+    /// The per-line interval tree is reused until text or any highlight source
+    /// changes, so warm viewport queries cost O(log H + visible overlaps).
+    pub fn highlights_in_byte_range(
+        &self,
+        line_idx: usize,
+        byte_range: Range<usize>,
+    ) -> Vec<(Range<usize>, HighlightGroup)> {
+        let generation = (self.highlight_version, self.highlight_projection_generation);
+        let cached = self
+            .highlight_range_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(line_idx, generation);
+        let index = if let Some(index) = cached {
+            index
+        } else {
+            let highlights = self.highlights_for_line(line_idx).into_owned();
+            self.highlight_range_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(line_idx, generation, highlights)
+        };
+        super::highlight_index::query_cached_index(&index, byte_range)
+    }
+
     /// Sets semantic highlights decoded from LSP semantic tokens
     pub fn set_semantic_highlights(
         &mut self,
         highlights: Vec<Vec<(Range<usize>, HighlightGroup)>>,
     ) {
         self.semantic_highlights = Some(highlights);
+        self.highlight_projection_generation = self.highlight_projection_generation.wrapping_add(1);
     }
 
     /// Clears semantic highlights (e.g., when LSP disconnects)
     pub fn clear_semantic_highlights(&mut self) {
         self.semantic_highlights = None;
+        self.highlight_projection_generation = self.highlight_projection_generation.wrapping_add(1);
     }
 
     /// Checks if semantic highlights are available
@@ -823,6 +855,7 @@ impl Buffer {
         }
 
         self.semantic_highlights = Some(highlights);
+        self.highlight_projection_generation = self.highlight_projection_generation.wrapping_add(1);
     }
 
     /// Maps LSP semantic token type names to HighlightGroup
@@ -967,6 +1000,7 @@ impl Buffer {
         }
 
         self.pending_rehighlight = false;
+        self.highlight_projection_generation = self.highlight_projection_generation.wrapping_add(1);
 
         Some(version)
     }
@@ -1040,6 +1074,7 @@ impl Buffer {
                 self.injection_cache = Some(cache);
             }
         }
+        self.highlight_projection_generation = self.highlight_projection_generation.wrapping_add(1);
     }
 
     /// Applies re-highlighted results if version matches
@@ -1051,6 +1086,8 @@ impl Buffer {
         // Only apply if version matches (buffer hasn't changed since re-parse started)
         if self.highlight_version == version {
             self.cached_highlights = Some(highlights);
+            self.highlight_projection_generation =
+                self.highlight_projection_generation.wrapping_add(1);
             self.pending_rehighlight = false;
             true
         } else {
@@ -1062,6 +1099,34 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_range_highlight_index_preserves_order_and_invalidates_for_semantic_updates() {
+        let mut buffer = Buffer::new_from_str("abcdefghij");
+        buffer.cached_highlights = Some(vec![vec![
+            (0..10, HighlightGroup::String),
+            (2..8, HighlightGroup::Comment),
+            (4..6, HighlightGroup::Keyword),
+        ]]);
+
+        assert_eq!(
+            buffer.highlights_in_byte_range(0, 5..6),
+            vec![
+                (0..10, HighlightGroup::String),
+                (2..8, HighlightGroup::Comment),
+                (4..6, HighlightGroup::Keyword),
+            ]
+        );
+
+        buffer.set_semantic_highlights(vec![vec![(5..7, HighlightGroup::Variable)]]);
+        let updated = buffer.highlights_in_byte_range(0, 5..6);
+        assert!(updated
+            .iter()
+            .any(|(_, group)| *group == HighlightGroup::Variable));
+        assert!(!updated
+            .iter()
+            .any(|(range, group)| { *group == HighlightGroup::Keyword && range.contains(&5) }));
+    }
 
     #[test]
     fn semantic_overlay_splits_only_intersecting_syntax_ranges() {

@@ -446,26 +446,21 @@ pub fn handle_insert_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
             } else if c == ':' {
                 let cursor = editor.buffer().cursor();
                 if cursor.col().0 >= 2 {
-                    let line_text = editor
-                        .buffer()
-                        .line_text(cursor.line())
-                        .unwrap_or_default()
-                        .to_string();
-                    if crate::unicode::grapheme_at_index(
-                        &line_text,
-                        cursor.col().0.saturating_sub(1),
-                    ) == Some(":")
-                        && crate::unicode::grapheme_at_index(
-                            &line_text,
-                            cursor.col().0.saturating_sub(2),
-                        ) == Some(":")
+                    let index = editor.buffer().line_index(cursor.line());
+                    if index
+                        .grapheme_at(crate::unicode::GraphemeCol(cursor.col().0 - 1))
+                        .as_deref()
+                        == Some(":")
+                        && index
+                            .grapheme_at(crate::unicode::GraphemeCol(cursor.col().0 - 2))
+                            .as_deref()
+                            == Some(":")
                     {
                         editor.request_completion();
                     }
                 }
             } else if is_completion_ident_char(c) {
-                let (_, prefix) = editor.completion_trigger_context();
-                if prefix.chars().count() >= 2 {
+                if editor.has_completion_trigger_prefix() {
                     editor.request_completion();
                 }
             }

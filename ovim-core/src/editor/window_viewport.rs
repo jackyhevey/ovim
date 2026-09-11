@@ -214,6 +214,11 @@ impl Editor {
         if !self.options.wrap {
             return false;
         }
+        // A macro can edit and scroll before either frontend renders again.
+        // Refresh the geometry before using its row counts for explicit scroll.
+        if let Some(width) = self.wrap_map().map(|map| map.wrap_width()) {
+            self.ensure_wrap_map(width);
+        }
         let len_lines = self.buffer().rope().len_lines();
         if self.wrap_map().is_none_or(|m| m.line_count() < len_lines) {
             return false;
@@ -223,16 +228,11 @@ impl Editor {
         let scrolloff = self.options.scrolloff.min(visible.saturating_sub(1) / 2);
         let cur_off = self.scroll_offset();
         let cur_sub = self.scroll_subrow();
-        let tab_width = self.indent_options().tab_width;
-
-        // The cursor's flat display column, computed before borrowing the map.
+        // Source position is resolved through cached geometry below.
         let (cur_line, cur_col) = {
             let c = self.buffer().cursor();
             (c.line(), c.col())
         };
-        let line_text = self.cursor_line_text(cur_line);
-        let char_col = self.cursor_grapheme_to_char_col(cur_line, cur_col);
-        let disp_col = crate::display::char_col_to_display_col(&line_text, char_col, tab_width);
 
         let (new_off, new_sub, new_cursor_line) = {
             let map = match self.wrap_map() {
@@ -250,7 +250,9 @@ impl Editor {
             let (no, ns) = map.visual_to_logical(new_top);
 
             // Keep the cursor inside the viewport (± scrolloff) in visual rows.
-            let (cursor_visual, _) = map.cursor_to_visual(cur_line, disp_col, &line_text);
+            let (cursor_visual, _) = self
+                .cursor_visual_position(cur_line, cur_col)
+                .unwrap_or((0, 0));
             let last_visual = total_visual.saturating_sub(1);
             let new_cursor_line = if delta_down >= 0 {
                 let min_visual = (new_top + scrolloff).min(last_visual);
@@ -489,38 +491,18 @@ impl Editor {
                 // Only trust the map when it covers the whole buffer (stale maps
                 // can lag a structural edit until the next render rebuild).
                 if map.line_count() >= self.buffer().rope().len_lines() {
-                    let wrap_width = map.wrap_width().max(1);
-                    let tab_width = self.indent_options().tab_width;
-                    let line_text = self.cursor_line_text(cursor_line);
-                    let char_col = self.cursor_grapheme_to_char_col(cursor_line, cursor_col);
-                    let rope = self.buffer().rope();
-                    let edit_log = self.buffer().edit_log();
-                    let inline = self.decorations.inline_decorations_for_line_projected(
-                        cursor_line,
-                        rope,
-                        edit_log,
-                    );
-                    // Flat display column including any inline decoration widths
-                    // before the cursor (matches update_scroll_offset).
-                    let disp_col =
-                        crate::display::char_col_to_display_col(&line_text, char_col, tab_width)
-                            + self.decorations.inline_width_before_projected(
-                                cursor_line,
-                                char_col,
-                                rope,
-                                edit_log,
-                            );
-                    let subline = Self::cursor_subline_in_wrapped_line(
-                        &line_text, disp_col, wrap_width, tab_width, &inline,
-                    );
-                    let offset = self.top_offset_for_wrapped_cursor(
-                        cursor_line,
-                        subline,
-                        rows_above,
-                        wrap_width,
-                        tab_width,
-                        true,
-                    );
+                    let (cursor_visual, _) = self
+                        .cursor_visual_position(cursor_line, cursor_col)
+                        .expect("wrap map is available");
+                    let target = cursor_visual.saturating_sub(rows_above);
+                    let (target_line, subrow) = map.visual_to_logical(target);
+                    // This API positions whole logical lines. If the requested
+                    // start falls inside an earlier line, advance past it.
+                    let offset = if target_line == cursor_line || subrow == 0 {
+                        target_line
+                    } else {
+                        target_line.saturating_add(1)
+                    };
                     let max_scroll = Self::compute_wrap_max_scroll_offset(map, visible, max_line);
                     return offset.min(max_scroll);
                 }

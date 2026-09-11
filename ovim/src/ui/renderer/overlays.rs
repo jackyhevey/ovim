@@ -931,7 +931,7 @@ fn walkthrough_selection_screen_rows(
             let start_row = wrap_map.logical_to_visual(start_line);
             let end_row = wrap_map
                 .logical_to_visual(end_line)
-                .saturating_add(wrap_map.visual_lines_for(end_line) as usize)
+                .saturating_add(wrap_map.visual_lines_for(end_line))
                 .saturating_sub(1);
             return (
                 start_row as isize - viewport_row as isize,

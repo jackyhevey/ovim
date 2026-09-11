@@ -74,13 +74,11 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             let line_idx = editor.buffer().cursor().line();
             let max_line = editor.buffer().line_count().saturating_sub(1);
             let target_line = (line_idx + count - 1).min(max_line);
-            if let Some(line) = editor.buffer().line_text(target_line) {
-                let line_len = line.chars().count();
-                let col = if line_len > 0 { line_len - 1 } else { 0 };
-                let cursor = editor.buffer_mut().cursor_mut();
-                cursor.set_position(target_line, GraphemeCol(col));
-                cursor.update_desired_col(GraphemeCol(usize::MAX));
-            }
+            let line_len = editor.buffer().line_index(target_line).grapheme_count();
+            let col = line_len.saturating_sub(1);
+            let cursor = editor.buffer_mut().cursor_mut();
+            cursor.set_position(target_line, GraphemeCol(col));
+            cursor.update_desired_col(GraphemeCol(usize::MAX));
             editor.clear_count();
             Ok(true)
         }
@@ -90,14 +88,12 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             // `19|` → col('.') == 19, `99|` → col('.') == 26 (OV-00338).
             let count = editor.effective_count();
             let line_idx = editor.buffer().cursor().line();
-            if let Some(line) = editor.buffer().line_text(line_idx) {
-                let line_len = line.chars().count();
-                let max_col = line_len.saturating_sub(1);
-                let col = count.saturating_sub(1).min(max_col);
-                let cursor = editor.buffer_mut().cursor_mut();
-                cursor.set_col(GraphemeCol(col));
-                cursor.update_desired_col(GraphemeCol(col));
-            }
+            let line_len = editor.buffer().line_index(line_idx).grapheme_count();
+            let max_col = line_len.saturating_sub(1);
+            let col = count.saturating_sub(1).min(max_col);
+            let cursor = editor.buffer_mut().cursor_mut();
+            cursor.set_col(GraphemeCol(col));
+            cursor.update_desired_col(GraphemeCol(col));
             editor.clear_count();
             Ok(true)
         }

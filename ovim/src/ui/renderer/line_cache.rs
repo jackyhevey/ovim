@@ -8,6 +8,23 @@
 use ratatui::text::Line;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Weak};
+
+#[derive(Clone)]
+pub(crate) struct IndexedRenderLine {
+    pub layout: Arc<ovim_core::line_layout::IndexedLineLayout>,
+    pub transform: Option<Arc<ovim_core::markdown_conceal::LineTransform>>,
+    pub links: Arc<[ovim_core::markdown_conceal::ConcealedLink]>,
+}
+
+struct IndexedCacheEntry {
+    source: Weak<ovim_core::text_index::LineIndex>,
+    width: usize,
+    tab_width: usize,
+    conceal: bool,
+    decorations: u64,
+    rendered: IndexedRenderLine,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct ChatBubbleCacheKey {
@@ -96,6 +113,7 @@ struct CachedLine {
 ///   are rendered fresh each frame (marked `is_stable: false`).
 pub struct LineRenderCache {
     entries: HashMap<usize, (LineCacheKey, CachedLine)>,
+    indexed: HashMap<(u64, usize), IndexedCacheEntry>,
     chat_bubbles: HashMap<ChatBubbleCacheKey, CachedChatBubble>,
     /// Buffer version from the last render pass
     last_buffer_version: usize,
@@ -122,6 +140,7 @@ impl LineRenderCache {
     pub fn new() -> Self {
         Self {
             entries: HashMap::with_capacity(256),
+            indexed: HashMap::new(),
             chat_bubbles: HashMap::with_capacity(128),
             last_buffer_version: usize::MAX, // force miss on first frame
             last_buffer_id: u64::MAX,
@@ -136,6 +155,100 @@ impl LineRenderCache {
     /// Clear the entire cache (e.g., on buffer edit or resize).
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Retain core geometry for nowrap viewports, where no window WrapMap
+    /// owns it. Source identity preserves unrelated rows across buffer edits.
+    pub(crate) fn indexed_line(
+        &mut self,
+        buffer_id: u64,
+        line: usize,
+        source: Arc<ovim_core::text_index::LineIndex>,
+        width: usize,
+        tab_width: usize,
+        conceal: bool,
+        decorations: u64,
+        inline: &[&ovim_core::editor::decoration::Decoration],
+        line_start_char: usize,
+    ) -> IndexedRenderLine {
+        let key = (buffer_id, line);
+        if let Some(entry) = self.indexed.get(&key) {
+            if entry
+                .source
+                .upgrade()
+                .is_some_and(|old| Arc::ptr_eq(&old, &source))
+                && entry.width == width
+                && entry.tab_width == tab_width
+                && entry.conceal == conceal
+                && entry.decorations == decorations
+            {
+                return entry.rendered.clone();
+            }
+        }
+        let mut transform = None;
+        let mut links: Arc<[ovim_core::markdown_conceal::ConcealedLink]> = Arc::from([]);
+        let index = if conceal {
+            let raw = source.slice_chars(0..source.len_chars());
+            let spans = ovim_core::markdown_conceal::scan_markdown_conceal(&raw);
+            if spans.is_empty() {
+                source.clone()
+            } else {
+                let mapped = ovim_core::markdown_conceal::apply_conceal(&raw, &spans);
+                links =
+                    ovim_core::markdown_conceal::extract_concealed_links(&spans, &mapped).into();
+                let index = ovim_core::text_index::LineIndex::from_text(&mapped.text);
+                transform = Some(Arc::new(mapped));
+                index
+            }
+        } else {
+            source.clone()
+        };
+        let inline_text = inline
+            .iter()
+            .map(|decoration| {
+                let anchor = decoration
+                    .placement
+                    .char_offset()
+                    .saturating_sub(line_start_char);
+                let anchor = if let Some(mapped) = &transform {
+                    let byte = source.char_to_byte(anchor);
+                    mapped
+                        .src_to_view
+                        .get(byte)
+                        .copied()
+                        .unwrap_or(index.len_chars())
+                } else {
+                    anchor
+                };
+                (anchor, Arc::<str>::from(decoration.text.as_str()))
+            })
+            .collect::<Vec<_>>()
+            .into();
+        let rendered = IndexedRenderLine {
+            layout: Arc::new(ovim_core::line_layout::IndexedLineLayout::with_inline_text(
+                index,
+                width,
+                tab_width,
+                inline_text,
+            )),
+            transform,
+            links,
+        };
+        if self.indexed.len() >= self.max_entries {
+            self.indexed.clear();
+        }
+        self.indexed.insert(
+            key,
+            IndexedCacheEntry {
+                source: Arc::downgrade(&source),
+                width,
+                tab_width,
+                conceal,
+                decorations,
+                rendered: rendered.clone(),
+            },
+        );
+        rendered
     }
 
     /// Reset per-frame stats.

@@ -119,6 +119,10 @@ impl Buffer {
             cached_highlights: None,
             forced_highlights: None,
             highlight_version: 0,
+            highlight_projection_generation: 0,
+            highlight_range_cache: std::sync::Mutex::new(
+                super::highlight_index::HighlightRangeCache::default(),
+            ),
             pending_rehighlight: false,
             fold_manager: FoldManager::new(),
             git_status: GitStatus::new(),
@@ -132,6 +136,8 @@ impl Buffer {
             injection_cache: None,
             recording: None,
             edit_log: crate::edit_log::EditLog::new(),
+            text_index: std::sync::Mutex::new(crate::text_index::TextIndexCache::default()),
+            line_changes: crate::text_index::LineChangeLog::default(),
             display_name: None,
             indent_options: None,
         };

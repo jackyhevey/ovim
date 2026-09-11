@@ -5,7 +5,7 @@
 
 use super::super::Editor;
 use crate::lsp::uri_from_file_path;
-use crate::unicode::{byte_offset_for_grapheme, grapheme_at_index, grapheme_indices};
+use crate::unicode::grapheme_at_index;
 use anyhow::{anyhow, Result};
 use std::collections::HashSet;
 
@@ -20,13 +20,27 @@ impl Editor {
         let line_idx = cursor.line();
         let cursor_col = cursor.col();
 
-        let line_text = self
-            .buffer()
-            .line_text(line_idx)
-            .unwrap_or_default()
-            .to_string();
+        completion_trigger_context_from_index(&self.buffer().line_index(line_idx), cursor_col.0)
+    }
 
-        completion_trigger_context_from_line(&line_text, cursor_col.0)
+    /// Trigger decisions need only two identifier scalars, not an allocated
+    /// prefix extending back to the beginning of a potentially enormous line.
+    pub(crate) fn has_completion_trigger_prefix(&self) -> bool {
+        let cursor = self.buffer().cursor();
+        let index = self.buffer().line_index(cursor.line());
+        let mut col = cursor.col().0.min(index.grapheme_count());
+        let mut chars = 0;
+        while col > 0 && chars < 2 {
+            col -= 1;
+            let Some(grapheme) = index.grapheme_at(crate::unicode::GraphemeCol(col)) else {
+                break;
+            };
+            if !grapheme.chars().all(is_completion_keyword_char) {
+                break;
+            }
+            chars += grapheme.chars().count();
+        }
+        chars >= 2
     }
 
     /// Derives the completion prefix from textEdit ranges when available.
@@ -52,18 +66,10 @@ impl Editor {
 
             // Sanity: trigger_col must be at or before cursor
             if trigger_col <= cursor_col {
-                let line_text = self
+                let prefix = self
                     .buffer()
-                    .line_text(line_idx)
-                    .unwrap_or_default()
-                    .to_string();
-
-                // Extract prefix using char indices
-                let prefix: String = line_text
-                    .chars()
-                    .skip(trigger_col.0)
-                    .take(cursor_col.0 - trigger_col.0)
-                    .collect();
+                    .line_index(line_idx)
+                    .slice_chars(trigger_col.0..cursor_col.0);
                 return (trigger_col.0, prefix);
             }
         }
@@ -83,18 +89,9 @@ impl Editor {
             return String::new();
         }
 
-        let line_text = self
-            .buffer()
-            .line_text(self.buffer().cursor().line())
-            .unwrap_or_default()
-            .to_string();
-
-        // Extract prefix using char indices
-        line_text
-            .chars()
-            .skip(trigger_col)
-            .take(cursor_col.0 - trigger_col)
-            .collect()
+        self.buffer()
+            .line_index(self.buffer().cursor().line())
+            .slice_chars(trigger_col..cursor_col.0)
     }
 
     /// Implementation of completion request
@@ -252,24 +249,31 @@ fn is_completion_keyword_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
 }
 
-fn completion_trigger_context_from_line(line_text: &str, cursor_col: usize) -> (usize, String) {
-    let cursor_byte = byte_offset_for_grapheme(line_text, cursor_col).unwrap_or(line_text.len());
-    let before_cursor = &line_text[..cursor_byte.min(line_text.len())];
-
-    let mut start_byte = before_cursor.len();
-    let graphemes: Vec<(usize, &str)> = grapheme_indices(before_cursor).collect();
-    for (byte_offset, grapheme) in graphemes.into_iter().rev() {
-        let is_ident = grapheme.chars().all(is_completion_keyword_char);
-        if !is_ident {
+fn completion_trigger_context_from_index(
+    index: &crate::text_index::LineIndex,
+    cursor_col: usize,
+) -> (usize, String) {
+    let mut start = cursor_col.min(index.grapheme_count());
+    let end = index.grapheme_to_char(crate::unicode::GraphemeCol(start)).0;
+    while start > 0 {
+        let Some(grapheme) = index.grapheme_at(crate::unicode::GraphemeCol(start - 1)) else {
+            break;
+        };
+        if !grapheme.chars().all(is_completion_keyword_char) {
             break;
         }
-        start_byte = byte_offset;
+        start -= 1;
     }
+    let start = index.grapheme_to_char(crate::unicode::GraphemeCol(start)).0;
+    (start, index.slice_chars(start..end))
+}
 
-    let trigger_col = line_text[..start_byte.min(line_text.len())].chars().count();
-    let trigger_prefix = line_text[start_byte.min(cursor_byte)..cursor_byte].to_string();
-
-    (trigger_col, trigger_prefix)
+#[cfg(test)]
+fn completion_trigger_context_from_line(text: &str, cursor_col: usize) -> (usize, String) {
+    completion_trigger_context_from_index(
+        &crate::text_index::LineIndex::from_text(text),
+        cursor_col,
+    )
 }
 
 /// Returns the most common `textEdit.range.start.character` (UTF-16) across

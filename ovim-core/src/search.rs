@@ -1,6 +1,10 @@
 use crate::buffer::Buffer;
 use crate::unicode::{char_to_grapheme_col, grapheme_to_char_col, CharCol, GraphemeCol};
 use regex::{Regex, RegexBuilder};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, Weak};
+
+type CachedLineMatches = (Weak<crate::text_index::LineIndex>, Arc<Vec<(usize, usize)>>);
 
 /// Represents a search query with its direction
 #[derive(Clone, Debug)]
@@ -13,6 +17,8 @@ pub struct Search {
     forward: bool,
     /// Last match position (line, col)
     last_match: Option<(usize, usize)>,
+    /// Share exact regex results across frontend projections of immutable lines.
+    line_matches: Arc<Mutex<VecDeque<CachedLineMatches>>>,
 }
 
 impl Search {
@@ -24,6 +30,7 @@ impl Search {
             regex,
             forward,
             last_match: None,
+            line_matches: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -52,6 +59,7 @@ impl Search {
             regex,
             forward,
             last_match: None,
+            line_matches: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -210,15 +218,82 @@ impl Search {
     /// Returns a vector of (start_col, end_col) tuples
     pub fn find_all_in_line(&self, line_text: &str) -> Vec<(usize, usize)> {
         let mut matches = Vec::new();
-
+        let mut previous_byte = 0;
+        let mut previous_char = 0;
         if let Some(ref regex) = self.regex {
             for mat in regex.find_iter(line_text) {
-                let start_col = line_text[..mat.start()].chars().count();
-                let end_col = line_text[..mat.end()].chars().count();
+                // Matches are ordered and nonoverlapping. Convert each portion
+                // once instead of recounting the whole prefix for every match.
+                let start_col =
+                    previous_char + line_text[previous_byte..mat.start()].chars().count();
+                let end_col = start_col + line_text[mat.start()..mat.end()].chars().count();
                 matches.push((start_col, end_col));
+                previous_byte = mat.end();
+                previous_char = end_col;
             }
         }
-
         matches
+    }
+    /// Exact whole-line regex results cached by immutable text identity. This
+    /// preserves anchors and context while making repeated viewport renders cheap.
+    pub fn find_all_in_index(
+        &self,
+        index: &Arc<crate::text_index::LineIndex>,
+    ) -> Arc<Vec<(usize, usize)>> {
+        let mut cache = self
+            .line_matches
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(position) = cache
+            .iter()
+            .position(|(line, _)| line.upgrade().is_some_and(|line| Arc::ptr_eq(&line, index)))
+        {
+            let entry = cache.remove(position).unwrap();
+            let result = entry.1.clone();
+            cache.push_back(entry);
+            return result;
+        }
+        let text = index.slice_chars(0..index.len_chars());
+        let matches = Arc::new(self.find_all_in_line(&text));
+        cache.retain(|(line, _)| line.strong_count() > 0);
+        // Retain enough distinct lines for a tall viewport and split panes;
+        // a cache smaller than the viewport would thrash on every frame.
+        if cache.len() == 256 {
+            cache.pop_front();
+        }
+        cache.push_back((Arc::downgrade(index), matches.clone()));
+        matches
+    }
+}
+
+#[cfg(test)]
+mod indexed_search_tests {
+    use super::*;
+    use crate::text_index::LineIndex;
+
+    #[test]
+    fn dense_unicode_matches_keep_character_offsets() {
+        let search = Search::new("é".into(), true);
+        assert_eq!(
+            search.find_all_in_line("éé x é"),
+            vec![(0, 1), (1, 2), (5, 6)]
+        );
+        let empty = Search::new("".into(), true);
+        assert_eq!(empty.find_all_in_line("éx"), vec![(0, 0), (1, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn immutable_line_cache_preserves_anchors_and_reuses_results() {
+        let search = Search::new("^a+$".into(), true);
+        let line = LineIndex::from_text("aaaa");
+        let first = search.find_all_in_index(&line);
+        assert_eq!(*first, vec![(0, 4)]);
+        assert!(Arc::ptr_eq(
+            &first,
+            &search.clone().find_all_in_index(&line)
+        ));
+        let edited = LineIndex::from_text("baaaa");
+        assert!(search.find_all_in_index(&edited).is_empty());
+        assert_eq!(*search.find_all_in_index(&line), vec![(0, 4)]);
     }
 }

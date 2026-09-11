@@ -28,7 +28,7 @@ pub struct Window {
     /// content width. `None` when wrap is off or not yet built. Per-window so a
     /// split pane wraps at its own width rather than the focused pane's.
     /// (roadmap 19 / OV-00209)
-    wrap_map: Option<WrapMap>,
+    wrap_map: Option<Box<WrapMap>>,
     /// `DecorationMap::generation` at the time `wrap_map` was built — decorations
     /// belong to the buffer, not the window, so inlay-hint arrivals must rebuild
     /// every window's wrap map.
@@ -53,11 +53,11 @@ impl Window {
 
     /// This window's soft-wrap map (if built).
     pub fn wrap_map(&self) -> Option<&WrapMap> {
-        self.wrap_map.as_ref()
+        self.wrap_map.as_deref()
     }
 
     /// Mutable access to this window's soft-wrap map slot.
-    pub fn wrap_map_mut(&mut self) -> &mut Option<WrapMap> {
+    pub fn wrap_map_mut(&mut self) -> &mut Option<Box<WrapMap>> {
         &mut self.wrap_map
     }
 
@@ -340,8 +340,8 @@ pub struct WindowView {
 /// Render-time mirror of [`WindowNode`] that carries only the tree *shape* plus
 /// each leaf's [`WindowView`].
 ///
-/// `WindowNode::clone()` deep-copies every leaf's `wrap_map` (a `Vec<u16>` plus
-/// a `Vec<usize>`, one entry per logical line) — wasted work, since the render
+/// `WindowNode::clone()` copies every leaf's wrap-map row counts, prefix
+/// index, and layout handles — wasted work, since the render
 /// walk never reads the snapshot's wrap map: it (re)builds each pane's map into
 /// the *live* `Window` (`Editor::ensure_wrap_map_for_window`) as it descends.
 /// [`WindowNode::view_tree`] produces this cheap copy instead.
