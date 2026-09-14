@@ -1684,12 +1684,18 @@ pub fn render_buffer(
     // the offscreen prefix just to discard it.
     let emit_budget = visible_lines;
     let mut visual_rows_used = 0;
-    let buffer_version = buffer.version();
     let buffer_id = buffer.id();
-    line_cache.sync_highlight_generation(buffer.highlight_projection_generation());
-
-    // Reset per-frame cache stats
-    line_cache.reset_stats();
+    let cache_frame = super::line_cache::LineCacheFrame {
+        buffer_id,
+        buffer_version: buffer.version(),
+        highlight_generation: buffer.highlight_projection_generation(),
+        h_offset,
+        text_width,
+        wrap,
+        tab_width,
+        markdown_conceal: editor.options.markdown_conceal,
+    };
+    line_cache.begin_frame(cache_frame);
 
     // Pre-compute blame brackets for visible lines
     let blame_width = layout.blame_width;
@@ -1801,6 +1807,7 @@ pub fn render_buffer(
                 &projected_diagnostics,
                 line_idx,
             );
+            let cache_key = cache_frame.key(line_idx, dec_hash);
 
             // Long logical lines and sub-row viewports render from shared
             // source-aware fragments. All temporary strings/style runs are
@@ -2135,17 +2142,7 @@ pub fn render_buffer(
             }
 
             if is_stable {
-                if let Some(cached_line) = line_cache.get(
-                    buffer_id,
-                    line_idx,
-                    buffer_version,
-                    h_offset,
-                    text_width,
-                    wrap,
-                    tab_width,
-                    md_conceal,
-                    dec_hash,
-                ) {
+                if let Some(cached_line) = line_cache.get(&cache_key) {
                     let mut cached_line = cached_line.clone();
                     // Cached line has inline decorations but needs
                     // EOL decorations (diagnostics) applied fresh. The
@@ -2630,19 +2627,7 @@ pub fn render_buffer(
 
                 // Store in cache AFTER decorations so cache-hit frames
                 // match cursor positioning.
-                line_cache.put(
-                    buffer_id,
-                    line_idx,
-                    buffer_version,
-                    h_offset,
-                    text_width,
-                    wrap,
-                    tab_width,
-                    md_conceal,
-                    dec_hash,
-                    line.clone(),
-                    is_stable,
-                );
+                line_cache.put(cache_key, line.clone(), is_stable);
 
                 // Soft wrap: split into visual rows if needed
                 if has_wrap {
@@ -2695,19 +2680,7 @@ pub fn render_buffer(
             } else {
                 // Simple rendering path (no highlighting) — always stable
                 let simple_line = Line::from(line_text.to_string());
-                line_cache.put(
-                    buffer_id,
-                    line_idx,
-                    buffer_version,
-                    h_offset,
-                    text_width,
-                    wrap,
-                    tab_width,
-                    md_conceal,
-                    dec_hash,
-                    simple_line,
-                    true,
-                );
+                line_cache.put(cache_key, simple_line, true);
 
                 if has_wrap {
                     if line_text.is_empty() {
@@ -3560,7 +3533,7 @@ mod tests {
     /// edit/scroll/resize.
     #[test]
     fn test_diagnostic_republish_without_edit_changes_line_cache_key() {
-        use crate::ui::renderer::line_cache::LineRenderCache;
+        use crate::ui::renderer::line_cache::{LineCacheFrame, LineRenderCache};
         use ovim_core::editor::decoration::{decorations_from_diagnostics, DecorationSource};
 
         let mut editor = Editor::with_content("let x = 1;\n");
@@ -3622,10 +3595,20 @@ mod tests {
 
         // And a row cached under the old key re-renders under the new one.
         let mut cache = LineRenderCache::new();
-        let _ = cache.get(1, 0, 1, 0, 80, false, 4, false, h1); // sync version bookkeeping
-        cache.put(1, 0, 1, 0, 80, false, 4, false, h1, Line::from("row"), true);
-        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, h1).is_some());
-        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, h2).is_none());
+        let frame = LineCacheFrame {
+            buffer_id: 1,
+            buffer_version: 1,
+            highlight_generation: 0,
+            h_offset: 0,
+            text_width: 80,
+            wrap: false,
+            tab_width: 4,
+            markdown_conceal: false,
+        };
+        cache.begin_frame(frame);
+        cache.put(frame.key(0, h1), Line::from("row"), true);
+        assert!(cache.get(&frame.key(0, h1)).is_some());
+        assert!(cache.get(&frame.key(0, h2)).is_none());
     }
 
     #[test]

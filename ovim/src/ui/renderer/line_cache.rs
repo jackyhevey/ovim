@@ -55,33 +55,53 @@ pub(crate) struct CachedChatBubble {
     pub images: Vec<CachedChatImage>,
 }
 
-/// Key identifying a cached rendered line.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct LineCacheKey {
+/// Per-frame inputs every cached line's validity depends on. Built once
+/// per render pass; `key()` adds the per-line parts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LineCacheFrame {
     /// Stable buffer identity (`Buffer::id`). Must NOT be the buffer index:
     /// two different buffers can occupy the same index over time (e.g. a
     /// walkthrough replacing its presentation buffer), and both start at
     /// version 0, so index+version cannot tell them apart.
-    buffer_id: u64,
-    /// Logical line index in the buffer
-    line_idx: usize,
-    /// Buffer version when this line was rendered
-    buffer_version: usize,
+    pub buffer_id: u64,
+    /// `Buffer::version`, which moves on text edits only.
+    pub buffer_version: usize,
+    /// `Buffer::highlight_projection_generation`. Highlights can change
+    /// without a text edit (background syntax, LSP semantic tokens,
+    /// debounced rehighlight); those bump this generation but not
+    /// `buffer_version`. Without it, such frames hit the cache unchanged
+    /// and the terminal diff repaints nothing until the next edit.
+    pub highlight_generation: u64,
     /// Horizontal scroll offset (display columns)
-    h_offset: usize,
+    pub h_offset: usize,
     /// Available text width (columns)
-    text_width: usize,
-    /// Whether wrap mode was enabled
-    wrap: bool,
+    pub text_width: usize,
+    /// Whether wrap mode is enabled
+    pub wrap: bool,
     /// Tab width setting
-    tab_width: usize,
-    /// Whether markdown conceal was active for this render
-    markdown_conceal: bool,
-    /// Per-line decoration fingerprint. Replaces the previous global
-    /// `decoration_generation` so an LSP push that touches one line doesn't
-    /// invalidate the cached render for every other stable line. Computed
-    /// from the projected decorations on this line via
-    /// `ProjectedDecorations::line_hash`.
+    pub tab_width: usize,
+    /// Whether markdown conceal is active
+    pub markdown_conceal: bool,
+}
+
+impl LineCacheFrame {
+    /// Key for one line of this frame. `decoration_hash` is the per-line
+    /// decoration fingerprint from `ProjectedDecorations::line_hash`, so an
+    /// LSP push that touches one line invalidates only that line.
+    pub fn key(self, line_idx: usize, decoration_hash: u64) -> LineCacheKey {
+        LineCacheKey {
+            frame: self,
+            line_idx,
+            decoration_hash,
+        }
+    }
+}
+
+/// Key identifying a cached rendered line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LineCacheKey {
+    frame: LineCacheFrame,
+    line_idx: usize,
     decoration_hash: u64,
 }
 
@@ -102,11 +122,10 @@ struct CachedLine {
 ///
 /// # Invalidation strategy
 ///
-/// - **Buffer edit**: The entire cache is cleared when `buffer_version` changes.
-///   Fine-grained per-line invalidation would require tracking which lines
-///   shifted, which isn't worth the complexity for a first pass.
-/// - **Scroll/resize**: Cleared when `h_offset` or `text_width` changes
-///   (detected via the key including these values).
+/// - **Buffer edit / highlight arrival / scroll / resize**: The entire
+///   cache is cleared when any `LineCacheFrame` field changes. Fine-grained
+///   per-line invalidation would require tracking which lines shifted,
+///   which isn't worth the complexity.
 /// - **Cursor move**: Only the cursor line and previous cursor line are
 ///   excluded from caching (they have transient cursorline highlighting).
 /// - **Visual selection / search / yank flash**: Lines with these overlays
@@ -115,16 +134,10 @@ pub struct LineRenderCache {
     entries: HashMap<usize, (LineCacheKey, CachedLine)>,
     indexed: HashMap<(u64, usize), IndexedCacheEntry>,
     chat_bubbles: HashMap<ChatBubbleCacheKey, CachedChatBubble>,
-    /// Buffer version from the last render pass
-    last_buffer_version: usize,
-    /// `Buffer::highlight_projection_generation` from the last render pass.
-    /// Highlights can change without a text edit (background syntax, LSP
-    /// semantic tokens, debounced rehighlight); those bump this generation
-    /// but not `buffer_version`, so it needs its own invalidation check.
-    last_highlight_generation: u64,
-    /// Stable buffer identity from the last render pass. A buffer swap keeps
-    /// the version at 0 (fresh buffers), so identity must be checked too.
-    last_buffer_id: u64,
+    /// Frame the current entries were rendered under. Any change to it
+    /// (edit, highlight arrival, buffer swap, scroll, resize) makes every
+    /// entry unreachable, so `begin_frame` clears them.
+    frame: Option<LineCacheFrame>,
     /// Capacity limit to prevent unbounded growth
     max_entries: usize,
     /// Stats: cache hits this frame
@@ -147,9 +160,7 @@ impl LineRenderCache {
             entries: HashMap::with_capacity(256),
             indexed: HashMap::new(),
             chat_bubbles: HashMap::with_capacity(128),
-            last_buffer_version: usize::MAX, // force miss on first frame
-            last_highlight_generation: u64::MAX,
-            last_buffer_id: u64::MAX,
+            frame: None,
             max_entries: 1024,
             hits: 0,
             misses: 0,
@@ -283,64 +294,25 @@ impl LineRenderCache {
         self.chat_bubbles.insert(key, bubble);
     }
 
-    /// Invalidate every cached line when the buffer's highlight generation
-    /// moved since the last frame. Call once per frame before line lookups.
-    ///
-    /// Without this, highlights that arrive asynchronously (background
-    /// syntax, semantic tokens) mark the editor dirty, the frame renders,
-    /// every stable line hits the cache unchanged, and the terminal diff
-    /// repaints nothing until the next text edit bumps `buffer_version`.
-    pub fn sync_highlight_generation(&mut self, highlight_generation: u64) {
-        if highlight_generation != self.last_highlight_generation {
-            self.last_highlight_generation = highlight_generation;
+    /// Start a render pass. Clears every entry when the frame differs from
+    /// the one the entries were rendered under, and resets the hit/miss
+    /// stats. Call once per frame before any line lookup.
+    pub fn begin_frame(&mut self, frame: LineCacheFrame) {
+        if self.frame != Some(frame) {
+            self.frame = Some(frame);
             self.entries.clear();
         }
+        self.reset_stats();
     }
 
     /// Check if a rendered line is cached and still valid.
     ///
-    /// Returns `None` if:
-    /// - The line was never cached
-    /// - The buffer version changed since it was cached
-    /// - The viewport parameters changed
-    /// - The cached entry had transient highlighting
-    pub fn get(
-        &mut self,
-        buffer_id: u64,
-        line_idx: usize,
-        buffer_version: usize,
-        h_offset: usize,
-        text_width: usize,
-        wrap: bool,
-        tab_width: usize,
-        markdown_conceal: bool,
-        decoration_hash: u64,
-    ) -> Option<&Line<'static>> {
-        // Fast path: if the buffer identity or version changed, invalidate
-        // everything. Version alone is not enough: replacing a buffer with a
-        // freshly created one (both at version 0) must not reuse old lines.
-        if buffer_version != self.last_buffer_version || buffer_id != self.last_buffer_id {
-            self.clear();
-            self.last_buffer_version = buffer_version;
-            self.last_buffer_id = buffer_id;
-            self.misses += 1;
-            return None;
-        }
-
-        let key = LineCacheKey {
-            buffer_id,
-            line_idx,
-            buffer_version,
-            h_offset,
-            text_width,
-            wrap,
-            tab_width,
-            markdown_conceal,
-            decoration_hash,
-        };
-
-        if let Some((cached_key, cached)) = self.entries.get(&line_idx) {
-            if *cached_key == key && cached.is_stable {
+    /// Returns `None` if the line was never cached, its key no longer
+    /// matches (frame or decorations changed), or the cached entry had
+    /// transient highlighting.
+    pub fn get(&mut self, key: &LineCacheKey) -> Option<&Line<'static>> {
+        if let Some((cached_key, cached)) = self.entries.get(&key.line_idx) {
+            if cached_key == key && cached.is_stable {
                 self.hits += 1;
                 return Some(&cached.line);
             }
@@ -353,44 +325,20 @@ impl LineRenderCache {
     ///
     /// `is_stable` should be `false` for lines with transient overlays
     /// (cursor line, visual selection, search highlights, yank flash).
-    pub fn put(
-        &mut self,
-        buffer_id: u64,
-        line_idx: usize,
-        buffer_version: usize,
-        h_offset: usize,
-        text_width: usize,
-        wrap: bool,
-        tab_width: usize,
-        markdown_conceal: bool,
-        decoration_hash: u64,
-        line: Line<'static>,
-        is_stable: bool,
-    ) {
+    pub fn put(&mut self, key: LineCacheKey, line: Line<'static>, is_stable: bool) {
         // Evict if over capacity — keep entries near the current viewport
         // instead of clearing everything (which causes a full cache-miss storm
         // on the next frame).
         if self.entries.len() >= self.max_entries {
-            let center = line_idx;
+            let center = key.line_idx;
             let keep_radius = self.max_entries / 2;
             let lo = center.saturating_sub(keep_radius);
             let hi = center.saturating_add(keep_radius);
             self.entries.retain(|&idx, _| idx >= lo && idx <= hi);
         }
 
-        let key = LineCacheKey {
-            buffer_id,
-            line_idx,
-            buffer_version,
-            h_offset,
-            text_width,
-            wrap,
-            tab_width,
-            markdown_conceal,
-            decoration_hash,
-        };
         self.entries
-            .insert(line_idx, (key, CachedLine { line, is_stable }));
+            .insert(key.line_idx, (key, CachedLine { line, is_stable }));
     }
 }
 
@@ -403,15 +351,33 @@ mod tests {
         Line::from(vec![Span::raw(text.to_string())])
     }
 
+    fn test_frame(buffer_id: u64, buffer_version: usize) -> LineCacheFrame {
+        LineCacheFrame {
+            buffer_id,
+            buffer_version,
+            highlight_generation: 0,
+            h_offset: 0,
+            text_width: 80,
+            wrap: false,
+            tab_width: 4,
+            markdown_conceal: false,
+        }
+    }
+
+    /// A cache with one render pass begun under `frame(1, 1)`.
+    fn cache_in_frame() -> (LineRenderCache, LineCacheFrame) {
+        let mut cache = LineRenderCache::new();
+        let frame = test_frame(1, 1);
+        cache.begin_frame(frame);
+        (cache, frame)
+    }
+
     #[test]
     fn cache_hit() {
-        let mut cache = LineRenderCache::new();
-        cache.last_buffer_version = 1; // sync version
-        cache.last_buffer_id = 1;
-        cache.put(1, 0, 1, 0, 80, false, 4, false, 0, make_line("hello"), true);
+        let (mut cache, frame) = cache_in_frame();
+        cache.put(frame.key(0, 0), make_line("hello"), true);
 
-        let result = cache.get(1, 0, 1, 0, 80, false, 4, false, 0);
-        assert!(result.is_some());
+        assert!(cache.get(&frame.key(0, 0)).is_some());
         assert_eq!(cache.hits, 1);
         assert_eq!(cache.misses, 0);
     }
@@ -421,44 +387,31 @@ mod tests {
         // Highlights arriving without a text edit (background syntax, LSP
         // semantic tokens) leave buffer_version unchanged; the frame must
         // still re-render stable lines or the screen never repaints.
-        let mut cache = LineRenderCache::new();
-        cache.last_buffer_version = 1;
-        cache.last_buffer_id = 1;
-        cache.sync_highlight_generation(7);
-        cache.put(1, 0, 1, 0, 80, false, 4, false, 0, make_line("plain"), true);
-        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, 0).is_some());
+        let (mut cache, frame) = cache_in_frame();
+        cache.put(frame.key(0, 0), make_line("plain"), true);
+        assert!(cache.get(&frame.key(0, 0)).is_some());
 
-        cache.sync_highlight_generation(8);
-        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, 0).is_none());
+        let highlighted = LineCacheFrame {
+            highlight_generation: frame.highlight_generation + 1,
+            ..frame
+        };
+        cache.begin_frame(highlighted);
+        assert!(cache.get(&highlighted.key(0, 0)).is_none());
 
-        // Same generation again: no spurious invalidation.
-        cache.put(
-            1,
-            0,
-            1,
-            0,
-            80,
-            false,
-            4,
-            false,
-            0,
-            make_line("styled"),
-            true,
-        );
-        cache.sync_highlight_generation(8);
-        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, 0).is_some());
+        // Same frame again: no spurious invalidation.
+        cache.put(highlighted.key(0, 0), make_line("styled"), true);
+        cache.begin_frame(highlighted);
+        assert!(cache.get(&highlighted.key(0, 0)).is_some());
     }
 
     #[test]
     fn cache_miss_version_change() {
-        let mut cache = LineRenderCache::new();
-        cache.last_buffer_version = 1;
-        cache.last_buffer_id = 1;
-        cache.put(1, 0, 1, 0, 80, false, 4, false, 0, make_line("hello"), true);
+        let (mut cache, frame) = cache_in_frame();
+        cache.put(frame.key(0, 0), make_line("hello"), true);
 
-        // Buffer version changed
-        let result = cache.get(1, 0, 2, 0, 80, false, 4, false, 0);
-        assert!(result.is_none());
+        let edited = test_frame(1, 2);
+        cache.begin_frame(edited);
+        assert!(cache.get(&edited.key(0, 0)).is_none());
         assert_eq!(cache.misses, 1);
     }
 
@@ -467,66 +420,51 @@ mod tests {
         // Two fresh buffers swapped at the same index share version 0; the
         // stable buffer id must still invalidate the cache between them.
         let mut cache = LineRenderCache::new();
-        cache.last_buffer_version = 0;
-        cache.last_buffer_id = 1;
-        cache.put(1, 0, 0, 0, 80, false, 4, false, 0, make_line("stale"), true);
+        let first = test_frame(1, 0);
+        cache.begin_frame(first);
+        cache.put(first.key(0, 0), make_line("stale"), true);
 
-        let result = cache.get(2, 0, 0, 0, 80, false, 4, false, 0);
-        assert!(result.is_none());
-        assert!(cache.get(2, 0, 0, 0, 80, false, 4, false, 0).is_none());
+        let second = test_frame(2, 0);
+        cache.begin_frame(second);
+        assert!(cache.get(&second.key(0, 0)).is_none());
+        assert!(cache.get(&second.key(0, 0)).is_none());
     }
 
     #[test]
     fn cache_miss_viewport_change() {
-        let mut cache = LineRenderCache::new();
-        cache.last_buffer_version = 1;
-        cache.last_buffer_id = 1;
-        cache.put(1, 0, 1, 0, 80, false, 4, false, 0, make_line("hello"), true);
+        let (mut cache, frame) = cache_in_frame();
+        cache.put(frame.key(0, 0), make_line("hello"), true);
 
-        // h_offset changed
-        let result = cache.get(1, 0, 1, 5, 80, false, 4, false, 0);
-        assert!(result.is_none());
+        let scrolled = LineCacheFrame {
+            h_offset: 5,
+            ..frame
+        };
+        cache.begin_frame(scrolled);
+        assert!(cache.get(&scrolled.key(0, 0)).is_none());
     }
 
     #[test]
     fn unstable_lines_not_cached() {
-        let mut cache = LineRenderCache::new();
-        cache.last_buffer_version = 1;
-        cache.last_buffer_id = 1;
+        let (mut cache, frame) = cache_in_frame();
         // Store with is_stable=false (e.g., cursor line)
-        cache.put(
-            1,
-            0,
-            1,
-            0,
-            80,
-            false,
-            4,
-            false,
-            0,
-            make_line("cursor"),
-            false,
-        );
+        cache.put(frame.key(0, 0), make_line("cursor"), false);
 
-        let result = cache.get(1, 0, 1, 0, 80, false, 4, false, 0);
-        assert!(result.is_none()); // Should not hit
+        assert!(cache.get(&frame.key(0, 0)).is_none());
     }
 
     #[test]
     fn eviction_keeps_nearby_lines() {
-        let mut cache = LineRenderCache::new();
+        let (mut cache, frame) = cache_in_frame();
         cache.max_entries = 10; // small cap for test
-        cache.last_buffer_version = 1;
-        cache.last_buffer_id = 1;
 
         // Fill cache with lines 0..10
         for i in 0..10 {
-            cache.put(1, i, 1, 0, 80, false, 4, false, 0, make_line("x"), true);
+            cache.put(frame.key(i, 0), make_line("x"), true);
         }
         assert_eq!(cache.entries.len(), 10);
 
         // Insert line 8 — should evict lines far from 8 (keep 3..13)
-        cache.put(1, 8, 1, 0, 80, false, 4, false, 0, make_line("new"), true);
+        cache.put(frame.key(8, 0), make_line("new"), true);
 
         // Lines near 8 should survive, line 0 should be evicted
         assert!(cache.entries.contains_key(&8));
@@ -542,29 +480,25 @@ mod tests {
         // should still hit. Demonstrates that an LSP push touching one line
         // no longer invalidates the entire cache (the regression Fix #6
         // addressed).
-        let mut cache = LineRenderCache::new();
-        cache.last_buffer_version = 1;
-        cache.last_buffer_id = 1;
-        cache.put(1, 0, 1, 0, 80, false, 4, false, 100, make_line("a"), true);
-        cache.put(1, 1, 1, 0, 80, false, 4, false, 200, make_line("b"), true);
+        let (mut cache, frame) = cache_in_frame();
+        cache.put(frame.key(0, 100), make_line("a"), true);
+        cache.put(frame.key(1, 200), make_line("b"), true);
 
         // Line 0's hash changed (e.g. new diagnostic).
-        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, 101).is_none());
+        assert!(cache.get(&frame.key(0, 101)).is_none());
         // Line 1 is untouched — should still hit with its original hash.
-        assert!(cache.get(1, 1, 1, 0, 80, false, 4, false, 200).is_some());
+        assert!(cache.get(&frame.key(1, 200)).is_some());
     }
 
     #[test]
     fn cache_miss_decoration_hash_change() {
-        let mut cache = LineRenderCache::new();
-        cache.last_buffer_version = 1;
-        cache.last_buffer_id = 1;
-        cache.put(1, 0, 1, 0, 80, false, 4, false, 42, make_line("x"), true);
+        let (mut cache, frame) = cache_in_frame();
+        cache.put(frame.key(0, 42), make_line("x"), true);
 
         // Same line, different decoration hash — should miss.
-        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, 43).is_none());
+        assert!(cache.get(&frame.key(0, 43)).is_none());
         // Same line, same hash — should hit.
-        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, 42).is_some());
+        assert!(cache.get(&frame.key(0, 42)).is_some());
     }
 
     #[test]
