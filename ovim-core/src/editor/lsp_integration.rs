@@ -1729,8 +1729,11 @@ impl Editor {
         }
     }
 
-    /// Sends didSave notification to LSP if needed
+    /// Sends didSave notification to LSP if needed. A refused send (server
+    /// not draining stdin) is retried no sooner than `SAVE_RETRY_DELAY`.
     pub async fn send_lsp_save_if_needed(&mut self) {
+        const SAVE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
         let Some(file_path) = self.buffer().file_path().map(|p| p.to_string()) else {
             return;
         };
@@ -1780,7 +1783,16 @@ impl Editor {
                     self.on_lsp_save_sent(&state_key);
                 }
                 Err(e) => {
-                    crate::lsp_warn!("LSP", "didSave failed for {}: {}", file_path, e);
+                    crate::lsp_warn!(
+                        "LSP",
+                        "didSave failed for {}: {} (retrying in {:?})",
+                        file_path,
+                        e,
+                        SAVE_RETRY_DELAY
+                    );
+                    if let Some(state) = self.lsp.state.document_sync.get_mut(&state_key) {
+                        state.defer_save_retry(SAVE_RETRY_DELAY);
+                    }
                 }
             }
         }

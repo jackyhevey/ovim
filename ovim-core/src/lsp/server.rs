@@ -15,18 +15,45 @@ use lsp_types::{
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-/// How long `notify` waits for room in the outgoing queue once it is full.
-/// The queue only fills when the writer task is stuck on a server that has
-/// stopped reading stdin; callers run on the editor loop, so this bounds
-/// how long a wedged server can freeze the UI per notification.
-const OUTGOING_BACKPRESSURE_TIMEOUT: Duration = Duration::from_millis(100);
+/// How many messages may sit in the outgoing queue before `notify` refuses
+/// new notifications. The queue is drained by a single writer task that
+/// blocks on the server's stdin, so it only fills when the server has
+/// stopped reading (mid-index, wedged). Callers run on the editor loop and
+/// must never wait for that writer; over this limit they get
+/// `OutgoingQueueFull` immediately and retry later.
+const OUTGOING_QUEUE_LIMIT: usize = 100;
+
+/// Minimum gap between queue-full warnings for one server instance.
+const QUEUE_FULL_WARN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// `notify` refused a notification because the server is not draining its
+/// stdin. Transient: the same notification can be sent once the queue
+/// drains. Callers use `LanguageServer::is_queue_full_error` to tell this
+/// apart from a closed channel, which is terminal for the server instance.
+#[derive(Debug)]
+pub struct OutgoingQueueFull {
+    pub method: String,
+    pub depth: usize,
+}
+
+impl std::fmt::Display for OutgoingQueueFull {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LSP server outgoing queue full ({} messages queued, server not reading stdin?) (notification: {})",
+            self.depth, self.method
+        )
+    }
+}
+
+impl std::error::Error for OutgoingQueueFull {}
 
 /// Maximum LSP message size in bytes (50MB)
 /// Must match MAX_MESSAGE_SIZE in mod.rs
@@ -216,8 +243,22 @@ struct LanguageServerInner {
     /// Next request ID
     next_request_id: AtomicU64,
 
-    /// Channel to send outgoing messages
-    outgoing_tx: mpsc::Sender<JsonRpcMessage>,
+    /// Channel to send outgoing messages. Unbounded so that no caller on
+    /// the editor loop ever parks behind the writer task; `outgoing_depth`
+    /// plus `OUTGOING_QUEUE_LIMIT` bound it by policy instead.
+    outgoing_tx: mpsc::UnboundedSender<JsonRpcMessage>,
+
+    /// Messages queued for the writer task that it has not finished
+    /// writing yet (including the one it is currently blocked on).
+    outgoing_depth: AtomicUsize,
+
+    /// Millisecond timestamp (relative to `spawned_at`) of the last
+    /// queue-full warning, so a wedged server logs once per interval
+    /// instead of once per keystroke.
+    queue_full_warned_at_ms: AtomicU64,
+
+    /// Process-local epoch for `queue_full_warned_at_ms`.
+    spawned_at: Instant,
 
     /// Channel to receive incoming messages
     incoming_rx: Mutex<Option<mpsc::Receiver<JsonRpcMessage>>>,
@@ -310,7 +351,7 @@ impl LanguageServer {
             .take()
             .ok_or_else(|| anyhow!("Failed to open stderr"))?;
 
-        let (outgoing_tx, mut outgoing_rx) = mpsc::channel::<JsonRpcMessage>(100);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
         let (incoming_tx, incoming_rx) = mpsc::channel::<JsonRpcMessage>(100);
 
         // Wrap stdin in Arc so writer task can clone it
@@ -331,6 +372,9 @@ impl LanguageServer {
             pending_requests: Mutex::new(HashMap::new()),
             next_request_id: AtomicU64::new(1),
             outgoing_tx,
+            outgoing_depth: AtomicUsize::new(0),
+            queue_full_warned_at_ms: AtomicU64::new(0),
+            spawned_at: Instant::now(),
             incoming_rx: Mutex::new(Some(incoming_rx)),
             supervisor,
             cap_flags: AtomicU32::new(0),
@@ -349,10 +393,15 @@ impl LanguageServer {
         let stdin_clone = stdin.clone();
         let writer_state = inner.state.clone();
         let writer_lang = inner.language.clone();
+        let writer_inner = inner.clone();
         tokio::spawn(async move {
             while let Some(msg) = outgoing_rx.recv().await {
                 let mut stdin_guard = stdin_clone.lock().await;
-                if let Err(e) = write_message(&mut *stdin_guard, &msg).await {
+                let written = write_message(&mut *stdin_guard, &msg).await;
+                // Counted while queued and while blocked in the write above,
+                // so a server that stops reading shows up as depth growth.
+                writer_inner.outgoing_depth.fetch_sub(1, Ordering::AcqRel);
+                if let Err(e) = written {
                     crate::lsp_error!(
                         "Writer",
                         "[{}] Error writing to language server: {}",
@@ -1182,7 +1231,7 @@ impl LanguageServer {
         }
 
         // THEN send — if send fails, clean up the registration.
-        if self.inner.outgoing_tx.send(msg).await.is_err() {
+        if self.enqueue(msg).is_err() {
             let mut pending = self.inner.pending_requests.lock().await;
             pending.remove(&request_id);
             return Err(anyhow!(
@@ -1272,39 +1321,60 @@ impl LanguageServer {
             ));
         }
 
-        // The outgoing queue is drained by a single writer task that blocks
-        // on the server's stdin. A server that stops reading (mid-index,
-        // wedged) fills the queue, and awaiting `send` then parks the caller
-        // for as long as the server stays wedged. Notifications are sent
-        // inline from the editor loop (didChange flush before completion,
-        // didSave on tick), so that wait freezes the whole TUI. Bound it:
-        // a healthy server drains the queue in microseconds, and didChange
-        // callers already treat a timeout as retryable.
-        let closed = || {
+        // Never wait for the writer task here. Notifications are sent inline
+        // from the editor loop (didChange flush before completion, didSave
+        // on tick), and the writer blocks on the server's stdin: any await
+        // on it turns a slow or wedged server into a frozen TUI. Over the
+        // limit the caller gets `OutgoingQueueFull` and retries later.
+        let depth = self.inner.outgoing_depth.load(Ordering::Acquire);
+        if depth >= OUTGOING_QUEUE_LIMIT {
+            return Err(anyhow::Error::new(OutgoingQueueFull {
+                method: method.to_string(),
+                depth,
+            }));
+        }
+        self.enqueue(msg).map_err(|_| {
             anyhow!(
                 "LSP server not responding: channel closed (notification: {})",
                 method
             )
-        };
-        let msg = match self.inner.outgoing_tx.try_send(msg) {
-            Ok(()) => return Ok(()),
-            Err(mpsc::error::TrySendError::Closed(_)) => return Err(closed()),
-            Err(mpsc::error::TrySendError::Full(msg)) => msg,
-        };
-        match tokio::time::timeout(
-            OUTGOING_BACKPRESSURE_TIMEOUT,
-            self.inner.outgoing_tx.send(msg),
-        )
-        .await
-        {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(_)) => Err(closed()),
-            Err(_) => Err(anyhow!(
-                "LSP server outgoing queue full for {:?} (server not reading stdin?) (notification: {})",
-                OUTGOING_BACKPRESSURE_TIMEOUT,
-                method
-            )),
+        })
+    }
+
+    /// Hands a message to the writer task without waiting. Fails only when
+    /// the writer has exited (closed channel).
+    fn enqueue(&self, msg: JsonRpcMessage) -> std::result::Result<(), ()> {
+        self.inner.outgoing_depth.fetch_add(1, Ordering::AcqRel);
+        self.inner.outgoing_tx.send(msg).map_err(|_| {
+            self.inner.outgoing_depth.fetch_sub(1, Ordering::AcqRel);
+        })
+    }
+
+    /// Messages waiting for, or currently blocked in, the writer task.
+    pub fn outgoing_queue_depth(&self) -> usize {
+        self.inner.outgoing_depth.load(Ordering::Acquire)
+    }
+
+    /// True when `err` came from `notify` refusing a message because the
+    /// outgoing queue is over `OUTGOING_QUEUE_LIMIT`. Such failures are
+    /// transient: retry once the server drains its stdin.
+    pub fn is_queue_full_error(err: &anyhow::Error) -> bool {
+        err.downcast_ref::<OutgoingQueueFull>().is_some()
+    }
+
+    /// Returns true at most once per `QUEUE_FULL_WARN_INTERVAL` per server.
+    /// Callers that hit a full queue on every keystroke use this to keep
+    /// `lsp.log` readable while the server stays wedged.
+    pub fn should_warn_queue_full(&self) -> bool {
+        let now_ms = self.inner.spawned_at.elapsed().as_millis() as u64;
+        let last = self.inner.queue_full_warned_at_ms.load(Ordering::Relaxed);
+        if last != 0 && now_ms.saturating_sub(last) < QUEUE_FULL_WARN_INTERVAL.as_millis() as u64 {
+            return false;
         }
+        self.inner
+            .queue_full_warned_at_ms
+            .compare_exchange(last, now_ms.max(1), Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
     }
 
     /// Sends a response to a request from the server
@@ -1322,10 +1392,7 @@ impl LanguageServer {
             ));
         }
 
-        self.inner
-            .outgoing_tx
-            .send(response)
-            .await
+        self.enqueue(response)
             .map_err(|_| anyhow!("Failed to send response"))?;
         Ok(())
     }
@@ -1940,6 +2007,9 @@ impl LanguageServer {
             if let Err(e) = self.notify("$/cancelRequest", params).await {
                 // If we fail to send cancellation, log but continue
                 // The server might still respond, but we'll ignore it by removing from pending
+                if Self::is_queue_full_error(&e) && !self.should_warn_queue_full() {
+                    continue;
+                }
                 crate::lsp_warn!(
                     &self.log_prefix(),
                     "Failed to send $/cancelRequest for ID {:?}: {}",

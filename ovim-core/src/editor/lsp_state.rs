@@ -27,6 +27,10 @@ pub struct DocumentSyncState {
     pub target_lsp_version: Option<i32>,
     /// Track whether we've sent didOpen for this document
     pub did_open_sent: bool,
+    /// Earliest tick at which a failed didSave may be retried. A server that
+    /// is not draining stdin refuses the notification instantly, and without
+    /// this the tick would retry (and log) every 16 ms while it stays wedged.
+    pub save_retry_after: Option<std::time::Instant>,
     /// The buffer content changed without the server hearing about it (e.g.
     /// reload after an external write). The next sync MUST send a full
     /// document update: reconcile seeding and the content-equality no-op
@@ -50,6 +54,14 @@ impl DocumentSyncState {
 
     pub fn should_send_save(&self) -> bool {
         self.buffer_saved
+            && self
+                .save_retry_after
+                .is_none_or(|at| std::time::Instant::now() >= at)
+    }
+
+    /// Hold off on retrying didSave for `delay`.
+    pub fn defer_save_retry(&mut self, delay: std::time::Duration) {
+        self.save_retry_after = Some(std::time::Instant::now() + delay);
     }
 
     pub fn flushed_content(&self) -> Option<&str> {
@@ -91,6 +103,7 @@ impl DocumentSyncState {
 
     pub fn mark_save_sent(&mut self) {
         self.buffer_saved = false;
+        self.save_retry_after = None;
     }
 }
 

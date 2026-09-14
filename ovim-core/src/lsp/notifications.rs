@@ -21,25 +21,33 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
 /// Hard ceiling for lifecycle notifications (didOpen/didSave/didClose).
-/// A wedged-but-alive server (stdin backpressure with a full outgoing
-/// channel) must degrade LSP, not freeze the editor tick that awaits these
-/// broadcasts inline (OV-00333). didChange flushes already carry their own
-/// per-server timeout in `flush_pending_changes_broadcast`.
+/// `LanguageServer::notify` never waits for the writer task any more (a
+/// full outgoing queue fails fast with `OutgoingQueueFull`), so this is a
+/// last line of defence for the editor tick that awaits these broadcasts
+/// inline (OV-00333), not something a healthy or wedged server should hit.
 const NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A terminal didChange delivery failure for one server instance. Temporary
-/// backpressure is represented by the caller's timeout instead. A closed
-/// outgoing channel cannot recover; treating it as transient used to create a
-/// 150 ms retry loop that could grow `lsp.log` without bound.
+/// A didChange delivery failure for one server instance. `retryable` marks
+/// backpressure (the server is alive but not draining stdin): the pending
+/// change is re-armed with backoff. A closed outgoing channel or a dead
+/// server instance cannot recover; treating those as transient used to
+/// create a 150 ms retry loop that could grow `lsp.log` without bound.
 struct DidChangeFailure {
     error: anyhow::Error,
+    retryable: bool,
 }
 
 impl DidChangeFailure {
     fn terminal(error: impl Into<anyhow::Error>) -> Self {
         Self {
             error: error.into(),
+            retryable: false,
         }
+    }
+
+    fn from_notify(error: anyhow::Error) -> Self {
+        let retryable = super::server::LanguageServer::is_queue_full_error(&error);
+        Self { error, retryable }
     }
 }
 
@@ -229,7 +237,7 @@ impl LspManager {
         match server.state().await {
             // The outgoing queue preserves ordering while a process is being
             // initialized. A healthy queue can accept the notification now;
-            // backpressure is classified by the caller's timeout.
+            // a full one fails fast and is classified as retryable below.
             super::server::ServerState::Ready { .. }
             | super::server::ServerState::Spawning
             | super::server::ServerState::Initializing { .. } => {}
@@ -312,9 +320,10 @@ impl LspManager {
                 serde_json::to_value(params).map_err(DidChangeFailure::terminal)?,
             )
             .await
-            // `notify` only fails after construction when its receiver is
-            // closed. That server instance cannot consume a later retry.
-            .map_err(DidChangeFailure::terminal)?;
+            // A full outgoing queue is transient (retry with backoff); a
+            // closed receiver means this server instance cannot consume a
+            // later retry.
+            .map_err(DidChangeFailure::from_notify)?;
 
         // The notification is in the server's ordered outgoing queue: record
         // `text` as this server's content so the next diff builds on it.
@@ -675,6 +684,24 @@ impl LspManager {
                     any_sent = any_sent || actually_sent;
                     // Even no-diff (Ok(false)) means this server is in sync
                     // (OV-00211).
+                }
+                Ok(Err(failure)) if failure.retryable => {
+                    retryable_failure = true;
+                    // Every keystroke can land here while the server is
+                    // wedged; the server throttles this to one line per
+                    // interval.
+                    let warn = self
+                        .servers
+                        .get(sid.as_str())
+                        .is_none_or(|server| server.should_warn_queue_full());
+                    if warn {
+                        lsp_warn!(
+                            "LSP-BROADCAST",
+                            "Flush deferred for server {} (will retry with backoff): {}",
+                            sid,
+                            failure.error
+                        );
+                    }
                 }
                 Ok(Err(failure)) => {
                     lsp_warn!(
@@ -1993,12 +2020,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// OV-00333: a wedged-but-alive server (not reading stdin, outgoing
-    /// channel full) must make lifecycle notifications error out instead of
-    /// blocking the caller forever — before the fix, `:w`/open/close on a
-    /// stopped server froze the editor tick indefinitely.
+    /// OV-00333: a wedged-but-alive server (not reading stdin) must make
+    /// notifications fail fast instead of parking the caller. Before the
+    /// fix, `:w`/open/close on a stopped server froze the editor tick for
+    /// as long as the server stayed wedged; a later bounded wait still cost
+    /// the tick 100 ms per notification, which stacked up under typing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn notify_times_out_when_server_stops_reading() {
+    async fn notify_fails_fast_when_server_stops_reading() {
         // A server process that never reads stdin.
         let server = super::super::server::LanguageServer::spawn(
             "rust",
@@ -2008,36 +2036,70 @@ mod tests {
         .await
         .expect("spawn wedged server");
 
-        // Fill the OS pipe buffer and the bounded outgoing channel so the
-        // next notify would block forever without a deadline. A ~1MB params
-        // payload saturates the pipe on the first write; the rest queue up.
+        // Fill the OS pipe buffer so the writer task blocks, then keep
+        // queueing until the outgoing queue reaches its limit. Every call
+        // must return promptly, full queue or not.
         let big = serde_json::json!({ "pad": "x".repeat(1024 * 1024) });
-        for _ in 0..110 {
-            let send = server.notify("test/pad", big.clone());
-            if tokio::time::timeout(Duration::from_millis(200), send)
-                .await
-                .is_err()
-            {
-                // Channel is full — notify itself now blocks. That's the
-                // wedged state the deadline must break out of.
+        let mut refused = None;
+        for _ in 0..200 {
+            let started = std::time::Instant::now();
+            let result = tokio::time::timeout(
+                Duration::from_millis(500),
+                server.notify("test/pad", big.clone()),
+            )
+            .await
+            .expect("notify must never wait for the writer task");
+            assert!(
+                started.elapsed() < Duration::from_millis(500),
+                "notify took {:?}",
+                started.elapsed()
+            );
+            if let Err(e) = result {
+                refused = Some(e);
                 break;
             }
         }
+        let refused = refused.expect("queue limit must be reached");
+        assert!(
+            super::super::server::LanguageServer::is_queue_full_error(&refused),
+            "expected a queue-full error, got: {refused}"
+        );
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(3),
-            notify_with_deadline(
-                &server,
-                "textDocument/didSave",
-                serde_json::json!({}),
-                Duration::from_millis(100),
-            ),
+        // Lifecycle notifications go through the same fast path.
+        let started = std::time::Instant::now();
+        let result = notify_with_deadline(
+            &server,
+            "textDocument/didSave",
+            serde_json::json!({}),
+            Duration::from_millis(100),
         )
-        .await
-        .expect("notify_with_deadline must return promptly, not hang");
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "didSave took {:?}",
+            started.elapsed()
+        );
         assert!(
             result.is_err(),
             "wedged server must produce an error, not a silent success"
+        );
+
+        // didChange classifies the refusal as retryable so the pending
+        // change is re-armed instead of dropped.
+        let manager = LspManager::new();
+        let uri = Uri::from_str("file:///tmp/ovim-queue-full.rs").expect("uri");
+        manager.servers.insert("rust".to_string(), server);
+        manager
+            .server_texts
+            .insert(("rust".to_string(), uri.clone()), Arc::from("a\n"));
+        let failure = manager
+            .send_did_change_to_server(&uri, "rust", &Arc::from("ab\n"), 2)
+            .await
+            .expect_err("didChange must fail on a full queue");
+        assert!(
+            failure.retryable,
+            "queue-full didChange must be retryable: {}",
+            failure.error
         );
     }
 
