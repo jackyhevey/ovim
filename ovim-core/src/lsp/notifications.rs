@@ -147,7 +147,14 @@ impl LspManager {
             versions.insert(uri.clone(), version);
         }
 
-        let server = match self.servers.get(language_id) {
+        // Clone the server out of the DashMap: holding the shard read guard
+        // across the notify await blocks any concurrent server insert or
+        // removal on that shard for the whole notify timeout.
+        let server = match self
+            .servers
+            .get(language_id)
+            .map(|entry| entry.value().clone())
+        {
             Some(s) => s,
             None => {
                 // Roll back the claim so a future open with a registered server can succeed.
@@ -546,7 +553,11 @@ impl LspManager {
 
         let opened_text: Arc<str> = Arc::from(text.as_str());
         for sid in &server_ids {
-            if let Some(server) = self.servers.get(sid.as_str()) {
+            if let Some(server) = self
+                .servers
+                .get(sid.as_str())
+                .map(|entry| entry.value().clone())
+            {
                 let params = DidOpenTextDocumentParams {
                     text_document: TextDocumentItem {
                         uri: uri.clone(),
@@ -737,7 +748,11 @@ impl LspManager {
 
         let server_ids = self.servers_for_document_uri(language_id, &uri);
         for sid in &server_ids {
-            if let Some(server) = self.servers.get(sid.as_str()) {
+            if let Some(server) = self
+                .servers
+                .get(sid.as_str())
+                .map(|entry| entry.value().clone())
+            {
                 let params = DidSaveTextDocumentParams {
                     text_document: TextDocumentIdentifier { uri: uri.clone() },
                     text: text.clone(),
@@ -764,7 +779,11 @@ impl LspManager {
 
         let server_ids = self.servers_for_document_uri(language_id, &uri);
         for sid in &server_ids {
-            if let Some(server) = self.servers.get(sid.as_str()) {
+            if let Some(server) = self
+                .servers
+                .get(sid.as_str())
+                .map(|entry| entry.value().clone())
+            {
                 let params = DidCloseTextDocumentParams {
                     text_document: TextDocumentIdentifier { uri: uri.clone() },
                 };
@@ -846,7 +865,11 @@ impl LspManager {
                                     };
 
                                     if let Some(id) = request_id {
-                                        if let Some(server) = self.servers.get(server_id) {
+                                        if let Some(server) = self
+                                            .servers
+                                            .get(server_id)
+                                            .map(|entry| entry.value().clone())
+                                        {
                                             match serde_json::to_value(response) {
                                                 Ok(value) => {
                                                     let response_msg =
@@ -881,7 +904,11 @@ impl LspManager {
                                     );
 
                                     if let Some(id) = request_id {
-                                        if let Some(server) = self.servers.get(server_id) {
+                                        if let Some(server) = self
+                                            .servers
+                                            .get(server_id)
+                                            .map(|entry| entry.value().clone())
+                                        {
                                             let error_response = protocol::ResponseError {
                                                 code: -32603, // Internal error
                                                 message: format!("Failed to queue edit: {}", e),
@@ -913,7 +940,11 @@ impl LspManager {
 
                             // Send error response for parse failure
                             if let Some(id) = request_id {
-                                if let Some(server) = self.servers.get(server_id) {
+                                if let Some(server) = self
+                                    .servers
+                                    .get(server_id)
+                                    .map(|entry| entry.value().clone())
+                                {
                                     let error_response = protocol::ResponseError {
                                         code: -32700, // Parse error
                                         message: format!("Failed to parse parameters: {}", e),
@@ -942,7 +973,11 @@ impl LspManager {
                     match serde_json::from_value::<lsp_types::RegistrationParams>(params) {
                         Ok(reg_params) => {
                             // Update cached capability flags for each registration
-                            if let Some(server) = self.servers.get(server_id) {
+                            if let Some(server) = self
+                                .servers
+                                .get(server_id)
+                                .map(|entry| entry.value().clone())
+                            {
                                 for reg in &reg_params.registrations {
                                     lsp_info!(
                                         "LSP-SERVER-REQUEST",
@@ -966,7 +1001,11 @@ impl LspManager {
 
                 // Always acknowledge success
                 if let Some(id) = request_id {
-                    if let Some(server) = self.servers.get(server_id) {
+                    if let Some(server) = self
+                        .servers
+                        .get(server_id)
+                        .map(|entry| entry.value().clone())
+                    {
                         let response_msg = JsonRpcMessage::response(id, serde_json::Value::Null);
                         if let Err(e) = server.send_response(response_msg).await {
                             lsp_error!(
@@ -983,7 +1022,11 @@ impl LspManager {
                 if let Some(params) = request.params {
                     match serde_json::from_value::<lsp_types::UnregistrationParams>(params) {
                         Ok(unreg_params) => {
-                            if let Some(server) = self.servers.get(server_id) {
+                            if let Some(server) = self
+                                .servers
+                                .get(server_id)
+                                .map(|entry| entry.value().clone())
+                            {
                                 for unreg in &unreg_params.unregisterations {
                                     lsp_info!(
                                         "LSP-SERVER-REQUEST",
@@ -1007,7 +1050,11 @@ impl LspManager {
 
                 // Always acknowledge success
                 if let Some(id) = request_id {
-                    if let Some(server) = self.servers.get(server_id) {
+                    if let Some(server) = self
+                        .servers
+                        .get(server_id)
+                        .map(|entry| entry.value().clone())
+                    {
                         let response_msg = JsonRpcMessage::response(id, serde_json::Value::Null);
                         if let Err(e) = server.send_response(response_msg).await {
                             lsp_error!(
@@ -1021,7 +1068,11 @@ impl LspManager {
             }
             "workspace/configuration" => {
                 if let Some(id) = request_id {
-                    if let Some(server) = self.servers.get(server_id) {
+                    if let Some(server) = self
+                        .servers
+                        .get(server_id)
+                        .map(|entry| entry.value().clone())
+                    {
                         let root = self.server_roots.get(server_id).map(|root| root.clone());
                         let settings = root.and_then(|root| {
                             super::server::workspace_settings_for_root(server.language(), &root)
@@ -1046,7 +1097,11 @@ impl LspManager {
                 // Server wants to show a message with action buttons.
                 // Respond with null (no action selected) to unblock the server.
                 if let Some(id) = request_id {
-                    if let Some(server) = self.servers.get(server_id) {
+                    if let Some(server) = self
+                        .servers
+                        .get(server_id)
+                        .map(|entry| entry.value().clone())
+                    {
                         let response_msg = JsonRpcMessage::response(id, serde_json::Value::Null);
                         if let Err(e) = server.send_response(response_msg).await {
                             lsp_error!(
@@ -1062,7 +1117,11 @@ impl LspManager {
                 // Server wants to create a progress token — acknowledge with success
                 // Responding with an error crashes some LSP servers (e.g. typescript-language-server)
                 if let Some(id) = request_id {
-                    if let Some(server) = self.servers.get(server_id) {
+                    if let Some(server) = self
+                        .servers
+                        .get(server_id)
+                        .map(|entry| entry.value().clone())
+                    {
                         let response_msg = JsonRpcMessage::response(id, serde_json::Value::Null);
                         if let Err(e) = server.send_response(response_msg).await {
                             lsp_error!(
@@ -1083,7 +1142,11 @@ impl LspManager {
 
                 // Send "method not found" error response
                 if let Some(id) = request_id {
-                    if let Some(server) = self.servers.get(server_id) {
+                    if let Some(server) = self
+                        .servers
+                        .get(server_id)
+                        .map(|entry| entry.value().clone())
+                    {
                         let error_response = protocol::ResponseError {
                             code: -32601, // Method not found
                             message: format!("Method not supported: {}", method),

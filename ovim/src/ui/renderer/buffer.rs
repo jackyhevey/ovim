@@ -1686,6 +1686,7 @@ pub fn render_buffer(
     let mut visual_rows_used = 0;
     let buffer_version = buffer.version();
     let buffer_id = buffer.id();
+    line_cache.sync_highlight_generation(buffer.highlight_projection_generation());
 
     // Reset per-frame cache stats
     line_cache.reset_stats();

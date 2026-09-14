@@ -285,6 +285,15 @@ impl Buffer {
         self.highlight_version
     }
 
+    /// Bumped whenever highlights change without a text edit: background
+    /// syntax arriving, a debounced rehighlight, forced view highlights, or
+    /// LSP semantic tokens. Renderers that cache styled lines keyed on
+    /// `version()` must also key on this, or asynchronously arriving
+    /// highlights are silently served from stale cache.
+    pub fn highlight_projection_generation(&self) -> u64 {
+        self.highlight_projection_generation
+    }
+
     /// Applies pre-computed syntax highlights from a background task.
     /// Returns true if the highlights were applied (version matched).
     ///

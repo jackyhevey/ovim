@@ -17,6 +17,27 @@ use ovim::frontend::{
 use ovim::session::SessionInfo;
 use ovim::ui::UI;
 
+/// Longest the input branch may skip painting while draining queued input.
+/// Two frames at the 16ms tick keeps fast typing smooth while guaranteeing
+/// a repaint during a long backlog.
+const MAX_RENDER_SKIP: Duration = Duration::from_millis(33);
+
+/// Anything awaited inline on the editor task above this budget is a UI
+/// freeze: no input is read and no frame is painted until it returns.
+const SLOW_LOOP_STEP: Duration = Duration::from_millis(100);
+
+fn warn_if_slow(step: &str, started: Instant) {
+    let elapsed = started.elapsed();
+    if elapsed >= SLOW_LOOP_STEP {
+        ovim_core::log_warn!(
+            "event_loop",
+            "{} blocked the editor loop for {:?}",
+            step,
+            elapsed
+        );
+    }
+}
+
 fn emit_agent_attention_bell(output: &mut impl Write) -> io::Result<()> {
     output.write_all(b"\x07")?;
     output.flush()
@@ -348,6 +369,7 @@ pub async fn run_event_loop(
     let mut last_external_file_check = Instant::now();
     let mut observed_ai_attention_generation = editor.ai_chat_attention_generation();
     let mut last_terminal_mode_refresh = Instant::now();
+    let mut last_render = Instant::now();
 
     while !editor.should_quit() {
         // Wait for input, API request, or tick — input has priority via `biased`
@@ -389,10 +411,17 @@ pub async fn run_event_loop(
                     }
 
                     // Immediately process LSP actions triggered by input
+                    let dispatch_start = Instant::now();
                     editor.dispatch_pending_intents().await;
+                    warn_if_slow("dispatch_pending_intents", dispatch_start);
 
-                    // If more input queued, skip render to keep input flowing
-                    if crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
+                    // If more input queued, skip render to keep input flowing.
+                    // Bounded: after a stall the backlog can be long, and
+                    // `biased` keeps re-selecting this branch, so without a
+                    // cap nothing is painted until the backlog drains.
+                    if crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false)
+                        && last_render.elapsed() < MAX_RENDER_SKIP
+                    {
                         continue;
                     }
                 }
@@ -427,7 +456,9 @@ pub async fn run_event_loop(
 
             // Tick timer — background work (LSP, picker, animations)
             _ = tick_interval.tick() => {
+                let tick_start = Instant::now();
                 process_editor_tick(editor, &mut channels).await;
+                warn_if_slow("process_editor_tick", tick_start);
                 process_picker_results(editor, &mut channels);
                 if last_external_file_check.elapsed() >= Duration::from_millis(500) {
                     process_external_file_change(editor);
@@ -464,6 +495,7 @@ pub async fn run_event_loop(
         if editor.is_dirty() {
             let start = Instant::now();
             ui.renderer_mut().render(editor)?;
+            last_render = Instant::now();
             editor.record_render_duration(start.elapsed().as_micros() as u64);
             editor.increment_render_count();
             editor.mark_clean();

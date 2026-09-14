@@ -22,6 +22,12 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+/// How long `notify` waits for room in the outgoing queue once it is full.
+/// The queue only fills when the writer task is stuck on a server that has
+/// stopped reading stdin; callers run on the editor loop, so this bounds
+/// how long a wedged server can freeze the UI per notification.
+const OUTGOING_BACKPRESSURE_TIMEOUT: Duration = Duration::from_millis(100);
+
 /// Maximum LSP message size in bytes (50MB)
 /// Must match MAX_MESSAGE_SIZE in mod.rs
 const MAX_MESSAGE_SIZE: usize = 50 * 1024 * 1024;
@@ -1266,13 +1272,39 @@ impl LanguageServer {
             ));
         }
 
-        self.inner.outgoing_tx.send(msg).await.map_err(|_| {
+        // The outgoing queue is drained by a single writer task that blocks
+        // on the server's stdin. A server that stops reading (mid-index,
+        // wedged) fills the queue, and awaiting `send` then parks the caller
+        // for as long as the server stays wedged. Notifications are sent
+        // inline from the editor loop (didChange flush before completion,
+        // didSave on tick), so that wait freezes the whole TUI. Bound it:
+        // a healthy server drains the queue in microseconds, and didChange
+        // callers already treat a timeout as retryable.
+        let closed = || {
             anyhow!(
-                "LSP server not responding — channel closed (notification: {})",
+                "LSP server not responding: channel closed (notification: {})",
                 method
             )
-        })?;
-        Ok(())
+        };
+        let msg = match self.inner.outgoing_tx.try_send(msg) {
+            Ok(()) => return Ok(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => return Err(closed()),
+            Err(mpsc::error::TrySendError::Full(msg)) => msg,
+        };
+        match tokio::time::timeout(
+            OUTGOING_BACKPRESSURE_TIMEOUT,
+            self.inner.outgoing_tx.send(msg),
+        )
+        .await
+        {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(closed()),
+            Err(_) => Err(anyhow!(
+                "LSP server outgoing queue full for {:?} (server not reading stdin?) (notification: {})",
+                OUTGOING_BACKPRESSURE_TIMEOUT,
+                method
+            )),
+        }
     }
 
     /// Sends a response to a request from the server

@@ -117,6 +117,11 @@ pub struct LineRenderCache {
     chat_bubbles: HashMap<ChatBubbleCacheKey, CachedChatBubble>,
     /// Buffer version from the last render pass
     last_buffer_version: usize,
+    /// `Buffer::highlight_projection_generation` from the last render pass.
+    /// Highlights can change without a text edit (background syntax, LSP
+    /// semantic tokens, debounced rehighlight); those bump this generation
+    /// but not `buffer_version`, so it needs its own invalidation check.
+    last_highlight_generation: u64,
     /// Stable buffer identity from the last render pass. A buffer swap keeps
     /// the version at 0 (fresh buffers), so identity must be checked too.
     last_buffer_id: u64,
@@ -143,6 +148,7 @@ impl LineRenderCache {
             indexed: HashMap::new(),
             chat_bubbles: HashMap::with_capacity(128),
             last_buffer_version: usize::MAX, // force miss on first frame
+            last_highlight_generation: u64::MAX,
             last_buffer_id: u64::MAX,
             max_entries: 1024,
             hits: 0,
@@ -277,6 +283,20 @@ impl LineRenderCache {
         self.chat_bubbles.insert(key, bubble);
     }
 
+    /// Invalidate every cached line when the buffer's highlight generation
+    /// moved since the last frame. Call once per frame before line lookups.
+    ///
+    /// Without this, highlights that arrive asynchronously (background
+    /// syntax, semantic tokens) mark the editor dirty, the frame renders,
+    /// every stable line hits the cache unchanged, and the terminal diff
+    /// repaints nothing until the next text edit bumps `buffer_version`.
+    pub fn sync_highlight_generation(&mut self, highlight_generation: u64) {
+        if highlight_generation != self.last_highlight_generation {
+            self.last_highlight_generation = highlight_generation;
+            self.entries.clear();
+        }
+    }
+
     /// Check if a rendered line is cached and still valid.
     ///
     /// Returns `None` if:
@@ -394,6 +414,39 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(cache.hits, 1);
         assert_eq!(cache.misses, 0);
+    }
+
+    #[test]
+    fn cache_miss_highlight_generation_change() {
+        // Highlights arriving without a text edit (background syntax, LSP
+        // semantic tokens) leave buffer_version unchanged; the frame must
+        // still re-render stable lines or the screen never repaints.
+        let mut cache = LineRenderCache::new();
+        cache.last_buffer_version = 1;
+        cache.last_buffer_id = 1;
+        cache.sync_highlight_generation(7);
+        cache.put(1, 0, 1, 0, 80, false, 4, false, 0, make_line("plain"), true);
+        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, 0).is_some());
+
+        cache.sync_highlight_generation(8);
+        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, 0).is_none());
+
+        // Same generation again: no spurious invalidation.
+        cache.put(
+            1,
+            0,
+            1,
+            0,
+            80,
+            false,
+            4,
+            false,
+            0,
+            make_line("styled"),
+            true,
+        );
+        cache.sync_highlight_generation(8);
+        assert!(cache.get(1, 0, 1, 0, 80, false, 4, false, 0).is_some());
     }
 
     #[test]
