@@ -19,7 +19,13 @@ struct StartupSession {
 impl StartupSession {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let script = dir.path().join("server.py");
+        // The editor canonicalizes paths it opens. On macOS the temp dir
+        // sits behind the /var -> /private/var symlink, so every path the
+        // harness hands the editor must already be canonical or the second
+        // file lands in a "different" workspace root and starts a second
+        // server.
+        let root = dir.path().canonicalize().unwrap();
+        let script = root.join("server.py");
         std::fs::write(&script, include_str!("helpers/controlled_lsp.py")).unwrap();
         let mut test = EditorTest::new("original\n");
         test.editor.enable_lsp();
@@ -35,20 +41,20 @@ impl StartupSession {
                         command: vec![
                             "python3".into(),
                             script.display().to_string(),
-                            dir.path().display().to_string(),
+                            root.display().to_string(),
                         ],
                         language_id: "controlled".into(),
                         root_markers: vec!["project.marker".into()],
                     }),
                 },
                 RegistrationOwner::UserConfig {
-                    source: dir.path().join("init.lua"),
+                    source: root.join("init.lua"),
                 },
-                &[dir.path().to_path_buf()],
+                std::slice::from_ref(&root),
             )
             .unwrap();
-        std::fs::write(dir.path().join("project.marker"), "").unwrap();
-        test.set_file_path(dir.path().join("first.controlled").display().to_string());
+        std::fs::write(root.join("project.marker"), "").unwrap();
+        test.set_file_path(root.join("first.controlled").display().to_string());
         test.editor.request_lsp_init();
         let (_, rx) = mpsc::channel(1);
         Self {
@@ -143,7 +149,12 @@ async fn file_switch_during_startup_waits_for_the_shared_server_and_opens_curren
         .file_path()
         .unwrap()
         .to_string();
-    let second: PathBuf = session.dir.path().join("second.controlled");
+    let second: PathBuf = session
+        .dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("second.controlled");
 
     std::fs::write(&second, "second file\n").unwrap();
     session.test.editor.new_tab();
