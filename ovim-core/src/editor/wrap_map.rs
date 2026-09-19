@@ -509,7 +509,8 @@ impl RowIndex {
             } else {
                 self.tree[i] -= old - new;
             }
-            i += i.isolate_lowest_one();
+            // `usize::isolate_lowest_one` is still unstable; this is it.
+            i += i & i.wrapping_neg();
         }
     }
     fn line_at(&self, row: usize) -> usize {
