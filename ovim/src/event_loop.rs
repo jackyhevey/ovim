@@ -345,6 +345,29 @@ fn api_session_info(editor: &Editor) -> SessionInfo {
     info
 }
 
+/// The background work the TUI owes every frame: LSP polling, syntax and
+/// picker result delivery, and the throttled external-file check.
+///
+/// Factored out because the `select!` tick branch is not the only caller. The
+/// loop is `biased` with terminal input first, so a terminal that generates
+/// input faster than the loop consumes it would otherwise never let the tick
+/// branch run, and results would pile up undelivered. The input branch calls
+/// this too once a frame has elapsed, which makes the tick unstarvable.
+async fn run_tick_work(
+    editor: &mut Editor,
+    channels: &mut FrontendChannels,
+    last_external_file_check: &mut Instant,
+) {
+    let tick_start = Instant::now();
+    process_editor_tick(editor, channels).await;
+    warn_if_slow("process_editor_tick", tick_start);
+    process_picker_results(editor, channels);
+    if last_external_file_check.elapsed() >= Duration::from_millis(500) {
+        process_external_file_change(editor);
+        *last_external_file_check = Instant::now();
+    }
+}
+
 /// TUI event loop (optionally with API).
 pub async fn run_event_loop(
     ui: &mut UI,
@@ -370,6 +393,8 @@ pub async fn run_event_loop(
     let mut observed_ai_attention_generation = editor.ai_chat_attention_generation();
     let mut last_terminal_mode_refresh = Instant::now();
     let mut last_render = Instant::now();
+    let mut last_tick = Instant::now();
+    let tick_period = Duration::from_millis(16);
 
     while !editor.should_quit() {
         // Wait for input, API request, or tick — input has priority via `biased`
@@ -415,6 +440,19 @@ pub async fn run_event_loop(
                     editor.dispatch_pending_intents().await;
                     warn_if_slow("dispatch_pending_intents", dispatch_start);
 
+                    // A terminal that answers our writes with input events can
+                    // keep this branch permanently ready and the tick branch
+                    // permanently unreached. Carry the tick forward from here
+                    // whenever a frame's worth of time has passed, so
+                    // background results still land under sustained input.
+                    // `MAX_RENDER_SKIP` below bounds painting the same way,
+                    // but a bounded repaint of undelivered results still shows
+                    // nothing: the drain happens here.
+                    if last_tick.elapsed() >= tick_period {
+                        run_tick_work(editor, &mut channels, &mut last_external_file_check).await;
+                        last_tick = Instant::now();
+                    }
+
                     // If more input queued, skip render to keep input flowing.
                     // Bounded: after a stall the backlog can be long, and
                     // `biased` keeps re-selecting this branch, so without a
@@ -456,15 +494,8 @@ pub async fn run_event_loop(
 
             // Tick timer — background work (LSP, picker, animations)
             _ = tick_interval.tick() => {
-                let tick_start = Instant::now();
-                process_editor_tick(editor, &mut channels).await;
-                warn_if_slow("process_editor_tick", tick_start);
-                process_picker_results(editor, &mut channels);
-                if last_external_file_check.elapsed() >= Duration::from_millis(500) {
-                    process_external_file_change(editor);
-                    last_external_file_check = Instant::now();
-                }
-
+                run_tick_work(editor, &mut channels, &mut last_external_file_check).await;
+                last_tick = Instant::now();
             }
         }
 
