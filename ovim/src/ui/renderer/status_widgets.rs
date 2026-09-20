@@ -29,7 +29,7 @@ pub fn render_progress_line(frame: &mut Frame, progress_msg: &str, area: Rect) {
         ),
     ]);
 
-    let paragraph = Paragraph::new(progress_line).style(Style::default().bg(Color::Black));
+    let paragraph = Paragraph::new(progress_line).style(Style::default().bg(Color::Reset));
     frame.render_widget(paragraph, area);
 }
 
@@ -239,7 +239,6 @@ pub fn render_status_line(frame: &mut Frame, editor: &Editor, theme: &Theme, are
         .map(|b| format!(" {}", b))
         .unwrap_or_default();
 
-    let status_bg = ui_color(theme, UiGroup::StatusLineBackground);
     let status_fg = ui_color(theme, UiGroup::StatusLineForeground);
     let accent_bg = ui_color(theme, UiGroup::TabActiveBg);
     let accent_fg = ui_color(theme, UiGroup::TabActiveFg);
@@ -288,7 +287,6 @@ pub fn render_status_line(frame: &mut Frame, editor: &Editor, theme: &Theme, are
                 format!(" ↳ {followed} "),
                 Style::default()
                     .fg(Color::Rgb(130, 205, 235))
-                    .bg(status_bg)
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -317,10 +315,7 @@ pub fn render_status_line(frame: &mut Frame, editor: &Editor, theme: &Theme, are
                     }
                     None => format!(" \u{26A1}{} ", chat.tool_call_count),
                 };
-                right_spans.push(Span::styled(
-                    iter_text,
-                    Style::default().fg(Color::Yellow).bg(status_bg),
-                ));
+                right_spans.push(Span::styled(iter_text, Style::default().fg(Color::Yellow)));
             }
 
             if chat.waiting {
@@ -335,7 +330,6 @@ pub fn render_status_line(frame: &mut Frame, editor: &Editor, theme: &Theme, are
                     status_text,
                     Style::default()
                         .fg(Color::Rgb(120, 180, 255))
-                        .bg(status_bg)
                         .add_modifier(Modifier::ITALIC),
                 ));
             }
@@ -347,14 +341,13 @@ pub fn render_status_line(frame: &mut Frame, editor: &Editor, theme: &Theme, are
                 let save_text = format!(" save:{mode} ");
                 right_spans.push(Span::styled(
                     save_text,
-                    Style::default().fg(Color::Rgb(150, 165, 190)).bg(status_bg),
+                    Style::default().fg(Color::Rgb(150, 165, 190)),
                 ));
                 if policy != "only_if_clean_at_start" {
                     right_spans.push(Span::styled(
                         format!(" ({policy}) "),
                         Style::default()
                             .fg(Color::Rgb(126, 140, 165))
-                            .bg(status_bg)
                             .add_modifier(Modifier::DIM),
                     ));
                 }
@@ -444,7 +437,8 @@ pub fn render_status_line(frame: &mut Frame, editor: &Editor, theme: &Theme, are
 
     let status_line = Line::from(spans);
 
-    let paragraph = Paragraph::new(status_line).style(Style::default().bg(status_bg).fg(status_fg));
+    let paragraph =
+        Paragraph::new(status_line).style(Style::default().bg(Color::Reset).fg(status_fg));
     frame.render_widget(paragraph, area);
 }
 
@@ -454,10 +448,10 @@ pub fn render_command_line(frame: &mut Frame, editor: &Editor, area: Rect) {
 
     let command_line = Line::from(vec![Span::styled(
         command_text,
-        Style::default().fg(Color::White).bg(Color::Black),
+        Style::default().fg(Color::White).bg(Color::Reset),
     )]);
 
-    let paragraph = Paragraph::new(command_line).style(Style::default().bg(Color::Black));
+    let paragraph = Paragraph::new(command_line).style(Style::default().bg(Color::Reset));
     frame.render_widget(paragraph, area);
 }
 
@@ -556,13 +550,13 @@ pub fn render_message_line(frame: &mut Frame, editor: &Editor, area: Rect) {
     let line = if !message.is_empty() {
         Line::from(vec![Span::styled(
             message.to_string(),
-            Style::default().fg(Color::White).bg(Color::Black),
+            Style::default().fg(Color::White).bg(Color::Reset),
         )])
     } else {
         diagnostic_echo_line(editor, area.width as usize).unwrap_or_default()
     };
 
-    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::Black));
+    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::Reset));
     frame.render_widget(paragraph, area);
 }
 
@@ -600,12 +594,12 @@ fn diagnostic_echo_line(editor: &Editor, width: usize) -> Option<Line<'static>> 
             prefix,
             Style::default()
                 .fg(color)
-                .bg(Color::Black)
+                .bg(Color::Reset)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             truncate_with_ellipsis(&text, body_width),
-            Style::default().fg(Color::White).bg(Color::Black),
+            Style::default().fg(Color::White).bg(Color::Reset),
         ),
     ]))
 }
@@ -621,10 +615,10 @@ pub fn render_search_line(frame: &mut Frame, editor: &Editor, area: Rect) {
 
     let search_line = Line::from(vec![Span::styled(
         search_text,
-        Style::default().fg(Color::White).bg(Color::Black),
+        Style::default().fg(Color::White).bg(Color::Reset),
     )]);
 
-    let paragraph = Paragraph::new(search_line).style(Style::default().bg(Color::Black));
+    let paragraph = Paragraph::new(search_line).style(Style::default().bg(Color::Reset));
     frame.render_widget(paragraph, area);
 }
 
@@ -634,10 +628,10 @@ pub fn render_rename_input(frame: &mut Frame, editor: &Editor, area: Rect) {
 
     let line = Line::from(vec![Span::styled(
         text,
-        Style::default().fg(Color::White).bg(Color::Black),
+        Style::default().fg(Color::White).bg(Color::Reset),
     )]);
 
-    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::Black));
+    let paragraph = Paragraph::new(line).style(Style::default().bg(Color::Reset));
     frame.render_widget(paragraph, area);
 }
 
@@ -1153,7 +1147,6 @@ pub fn render_margin_widgets(
 fn render_review_mode_status(frame: &mut Frame, editor: &Editor, theme: &Theme, area: Rect) {
     let accent_bg = ui_color(theme, UiGroup::TabActiveBg);
     let accent_fg = ui_color(theme, UiGroup::TabActiveFg);
-    let status_bg = ui_color(theme, UiGroup::StatusLineBackground);
     let status_fg = ui_color(theme, UiGroup::StatusLineForeground);
 
     let edit_count = editor
@@ -1206,19 +1199,18 @@ fn render_review_mode_status(frame: &mut Frame, editor: &Editor, theme: &Theme, 
     let max_info_width = w.saturating_sub(mode_width + UnicodeWidthStr::width(hints.as_str()));
     let info = truncate_middle(&info, max_info_width);
 
-    let info_span = Span::styled(info, Style::default().fg(status_fg).bg(status_bg));
+    let info_span = Span::styled(info, Style::default().fg(status_fg));
     let hints_span = Span::styled(
         hints,
         Style::default()
             .fg(Color::DarkGray)
-            .bg(status_bg)
             .add_modifier(Modifier::DIM),
     );
     let used = mode_width
         + UnicodeWidthStr::width(info_span.content.as_ref())
         + UnicodeWidthStr::width(hints_span.content.as_ref());
     let gap = w.saturating_sub(used);
-    let gap_span = Span::styled(" ".repeat(gap), Style::default().bg(status_bg));
+    let gap_span = Span::styled(" ".repeat(gap), Style::default());
 
     let line = Line::from(vec![mode_span, info_span, gap_span, hints_span]);
     frame.render_widget(Paragraph::new(vec![line]), area);
