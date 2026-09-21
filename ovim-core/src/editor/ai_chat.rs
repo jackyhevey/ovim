@@ -12,13 +12,34 @@ impl Editor {
     // -----------------------------------------------------------------
 
     /// Open or resume an AI chat panel.
-    pub fn open_ai_chat(&mut self, opts: ChatOpts) -> Result<()> {
+    pub fn open_ai_chat(&mut self, mut opts: ChatOpts) -> Result<()> {
+        if let Some(profile) = opts.profile.as_deref() {
+            if self.ai_state.config.resolve_profile(profile).is_none() {
+                anyhow::bail!("Unknown AI profile: {profile}");
+            }
+        }
         if self
             .ai_state
             .chat
             .as_ref()
             .is_some_and(|chat| chat.opts.name == opts.name)
         {
+            if let Some(profile) = opts.profile.as_deref() {
+                let changes_selection = self.ai_chat_effective_profile() != profile
+                    || self
+                        .ai_state
+                        .chat
+                        .as_ref()
+                        .is_some_and(|chat| chat.model_override.is_some());
+                if changes_selection && !self.apply_ai_chat_selection(profile, None) {
+                    anyhow::bail!("{}", self.status_message());
+                }
+                if let Some(chat) = self.ai_state.chat.as_mut() {
+                    // Explicit options remain explicit even when their value
+                    // happens to equal the remembered/default selection.
+                    chat.follow_chat_default = false;
+                }
+            }
             let mode_before = self.mode();
             if let Some(chat) = self.ai_state.chat.as_mut() {
                 chat.mode_before_chat = mode_before;
@@ -26,6 +47,7 @@ impl Editor {
             self.set_mode(Mode::AiChat);
             self.maybe_prompt_codex_auth_on_chat_open();
             self.maybe_prompt_exa_on_chat_open();
+            self.mark_dirty();
             return Ok(());
         }
 
@@ -56,7 +78,26 @@ impl Editor {
             .get(&key)
             .map(ConversationTree::branch_generation)
             .unwrap_or_default();
+        let follow_chat_default = opts.profile.is_none() && opts.name != "query";
+        let model_override = if opts.profile.is_none() {
+            let context = if opts.name == "query" {
+                "query"
+            } else {
+                "chat"
+            };
+            opts.profile = self.ai_chat_context_profile(context);
+            if context == "chat" {
+                self.ai_chat_remembered_selection()
+                    .and_then(|selection| selection.model.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         let mut chat = AiChatState::new(opts, buffer_id, mode_before);
+        chat.model_override = model_override;
+        chat.follow_chat_default = follow_chat_default;
         let runtime_locator = self
             .ai_state
             .durable_chat_bindings
@@ -95,6 +136,7 @@ impl Editor {
             }
         }
 
+        self.mark_dirty();
         Ok(())
     }
 
@@ -515,6 +557,11 @@ impl Editor {
     // -----------------------------------------------------------------
 
     pub fn ai_chat_context_profile(&self, context: &str) -> Option<String> {
+        if context == "chat" {
+            if let Some(selection) = self.ai_chat_remembered_selection() {
+                return Some(selection.profile.clone());
+            }
+        }
         // Look up in contexts table first
         if let Some(profile) = self.ai_state.config.contexts.get(context) {
             if self.ai_state.config.profiles.contains_key(profile) {
@@ -531,7 +578,10 @@ impl Editor {
             .chat
             .as_ref()
             .and_then(|chat| chat.opts.profile.clone())
-            .unwrap_or_else(|| self.ai_state.active_profile.clone())
+            .unwrap_or_else(|| {
+                self.ai_chat_context_profile("chat")
+                    .unwrap_or_else(|| self.ai_state.active_profile.clone())
+            })
     }
 
     // -----------------------------------------------------------------
