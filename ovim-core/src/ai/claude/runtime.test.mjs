@@ -57,6 +57,7 @@ async function run(
                 cwd: "/project",
                 executable: "/bin/claude",
                 model: "default",
+                permissionMode: "auto",
                 allowEdits: true,
                 content: [text("hello")],
                 ...request,
@@ -136,7 +137,7 @@ test("uses Claude defaults, own executable and settings without Ovim tools or cr
     assert.match(options.systemPrompt.append, /mcp__ovim__explain_with_codebase/);
     assert.deepEqual(options.settingSources, ["user", "project", "local"]);
     assert.equal(options.pathToClaudeCodeExecutable, "/bin/claude");
-    assert.equal(options.permissionMode, "default");
+    assert.equal(options.permissionMode, "auto");
     for (const name of [
         "env",
         "model",
@@ -147,11 +148,50 @@ test("uses Claude defaults, own executable and settings without Ovim tools or cr
         assert.equal(options[name], undefined);
 });
 
-test("read-only chats expose read built-ins and ignore configured MCP servers", async () => {
-    const { options } = await run([result], { request: { allowEdits: false } });
+test("passes each permission mode and only enables the dangerous bypass flag for bypass", async () => {
+    for (const permissionMode of [
+        "default",
+        "acceptEdits",
+        "plan",
+        "auto",
+        "dontAsk",
+        "bypassPermissions",
+    ]) {
+        const { options } = await run([result], { request: { permissionMode } });
+        assert.equal(options.permissionMode, permissionMode);
+        assert.equal(
+            options.allowDangerouslySkipPermissions,
+            permissionMode === "bypassPermissions" ? true : undefined,
+        );
+    }
+});
+
+test("requires an explicit resolved permission mode before starting the SDK", async () => {
+    for (const permissionMode of [undefined, null, "", " ", 42]) {
+        await assert.rejects(
+            runTurn(
+                { permissionMode },
+                () => assert.fail("Invalid requests must not start Claude"),
+                () => {},
+                () => {},
+                new AbortController().signal,
+            ),
+            /Missing Claude permission mode/,
+        );
+    }
+});
+
+test("read-only chats stay restricted even when permission checks are bypassed", async () => {
+    const { options } = await run([result], {
+        request: {
+            allowEdits: false,
+            permissionMode: "bypassPermissions",
+        },
+    });
     assert.deepEqual(options.tools, ["Read", "Glob", "Grep"]);
     assert.equal(options.strictMcpConfig, true);
     assert.equal(options.disallowedTools, undefined);
+    assert.equal(options.allowDangerouslySkipPermissions, true);
 });
 
 test("passes explicit model, effort, and native resume", async () => {

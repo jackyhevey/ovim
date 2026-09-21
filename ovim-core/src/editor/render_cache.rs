@@ -13,8 +13,10 @@ pub struct ChatInteractionGeometry {
     pub comprehension_toggle: Option<crate::Rect>,
     pub model_picker_trigger: Option<crate::Rect>,
     pub effort_picker_trigger: Option<crate::Rect>,
+    pub permission_picker_trigger: Option<crate::Rect>,
     pub model_picker_options: Vec<(crate::Rect, crate::ai::AiChatModelOption)>,
     pub effort_picker_options: Vec<(crate::Rect, String)>,
+    pub permission_picker_options: Vec<(crate::Rect, String)>,
     pub history: Option<crate::Rect>,
     pub slash_completions: Vec<(crate::Rect, usize)>,
     pub branches: Vec<(crate::Rect, crate::ai::chat_types::NodeId)>,
@@ -149,6 +151,7 @@ mod tests {
             comprehension_toggle: Some(rect()),
             model_picker_trigger: Some(rect()),
             effort_picker_trigger: Some(rect()),
+            permission_picker_trigger: Some(rect()),
             model_picker_options: vec![(
                 rect(),
                 crate::ai::AiChatModelOption {
@@ -159,6 +162,7 @@ mod tests {
                 },
             )],
             effort_picker_options: vec![(rect(), "medium".into())],
+            permission_picker_options: vec![(rect(), "auto".into())],
             history: Some(rect()),
             slash_completions: vec![(rect(), 1)],
             branches: vec![(rect(), 2)],
@@ -171,8 +175,10 @@ mod tests {
         assert!(interactions.comprehension_toggle.is_none());
         assert!(interactions.model_picker_trigger.is_none());
         assert!(interactions.effort_picker_trigger.is_none());
+        assert!(interactions.permission_picker_trigger.is_none());
         assert!(interactions.model_picker_options.is_empty());
         assert!(interactions.effort_picker_options.is_empty());
+        assert!(interactions.permission_picker_options.is_empty());
         assert!(interactions.history.is_none());
         assert!(interactions.slash_completions.is_empty());
         assert!(interactions.branches.is_empty());

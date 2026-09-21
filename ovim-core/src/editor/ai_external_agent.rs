@@ -89,12 +89,7 @@ impl ExternalPermission {
             text.push_str("\n\nType your answer in the composer and press Enter.");
             text
         } else {
-            format!(
-                "Claude Code: {}\n{}\n{}\n\nApproval applies to this invocation only.",
-                self.name,
-                self.reason,
-                serde_json::to_string_pretty(&self.input).unwrap_or_default()
-            )
+            claude_code::permission_summary(&self.name, &self.input, &self.reason)
         }
     }
 }
@@ -325,6 +320,7 @@ impl Editor {
             cwd,
             executable,
             chat.allow_edits,
+            self.ai_chat_permission_mode(),
             chat.context_generation,
             std::env::var_os("CLAUDE_CONFIG_DIR").map(|path| path.to_string_lossy().into_owned())
         ]))?;
@@ -374,6 +370,10 @@ impl Editor {
             model: profile.model.clone(),
             effort,
             allow_edits: chat.allow_edits,
+            permission_mode: self
+                .ai_chat_permission_mode()
+                .context("Claude Code permission mode is unavailable")?
+                .to_string(),
             resume,
             content,
         };
@@ -715,17 +715,17 @@ pub(super) mod tests {
         let (response, answer) = tokio::sync::oneshot::channel();
         tx.send(StreamChunk::ExternalPermission {
             name: "Bash".into(),
-            input: json!({"command":"example"}),
+            input: json!({"command":"example", "description":"Inspect the example"}),
             reason: "Claude asks".into(),
             response,
         })
         .unwrap();
         editor.poll_pending_ai_chat_job();
         assert!(editor.ai_chat_has_pending_tool_approval());
-        assert!(editor
-            .ai_chat_pending_tool_approval_summary()
-            .unwrap()
-            .contains("example"));
+        let summary = editor.ai_chat_pending_tool_approval_summary().unwrap();
+        assert!(summary.contains("Command:\nexample"));
+        assert!(summary.contains("Inspect the example"));
+        assert!(!summary.contains("\"command\":"));
         assert!(editor.ai_chat_resolve_pending_tool_approval(true, true));
         assert!(answer.await.unwrap().allow);
         assert!(editor

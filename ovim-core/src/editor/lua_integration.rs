@@ -146,6 +146,9 @@ impl Editor {
             let model = self
                 .ai_chat_remembered_selection()
                 .and_then(|selection| selection.model.clone());
+            let permission_mode = self
+                .ai_chat_remembered_selection()
+                .and_then(|selection| selection.permission_mode.clone());
             if let Some(chat) = self
                 .ai_state
                 .chat
@@ -154,6 +157,7 @@ impl Editor {
             {
                 chat.opts.profile = profile;
                 chat.model_override = model;
+                chat.permission_mode_override = permission_mode;
             }
         }
         Ok("Configuration reloaded".to_string())
@@ -394,6 +398,7 @@ mod chat_preference_tests {
                 profile: "claude_code".into(),
                 provider: AiProviderKind::ClaudeCode,
                 model: Some("opus[1m]".into()),
+                permission_mode: Some("auto".into()),
             })
             .unwrap();
         let context = LuaContext::new().unwrap();

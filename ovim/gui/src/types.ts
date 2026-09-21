@@ -89,6 +89,12 @@ export interface GuiAiChat {
     reasoningEffortSelection: string;
     reasoningEffortDefault?: string;
     reasoningEfforts: string[];
+    permissionMode?: string;
+    permissionModes?: Array<{
+        id: string;
+        label: string;
+        description: string;
+    }>;
     yoloMode: boolean;
     comprehensionPolicy: "off" | "publish" | "commit";
     comprehensionCheckpoint?: string;

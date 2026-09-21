@@ -114,6 +114,91 @@ impl Editor {
         self.set_ai_chat_reasoning_effort(efforts[next])
     }
 
+    pub fn ai_chat_permission_modes(&self) -> &'static [crate::ai::AiPermissionModeOption] {
+        self.ai_chat_resolved_profile()
+            .map(|profile| profile.permission_modes())
+            .unwrap_or_default()
+    }
+
+    pub fn ai_chat_permission_mode(&self) -> Option<&str> {
+        let profile = self.ai_chat_resolved_profile()?;
+        let selected = self
+            .ai_state
+            .chat
+            .as_ref()
+            .and_then(|chat| chat.permission_mode_override.as_deref())
+            .or_else(|| {
+                self.ai_state
+                    .chat
+                    .is_none()
+                    .then(|| self.ai_chat_remembered_selection())
+                    .flatten()
+                    .and_then(|selection| selection.permission_mode.as_deref())
+            });
+        selected
+            .filter(|mode| profile.validate_permission_mode(mode).is_ok())
+            .or_else(|| profile.default_permission_mode())
+    }
+
+    pub fn set_ai_chat_permission_mode(&mut self, mode: &str) -> bool {
+        if self.ai_chat_has_pending_work() {
+            self.set_status_message(
+                "Wait for or stop the active turn before changing permission mode",
+            );
+            return false;
+        }
+        let Some(profile) = self.ai_chat_resolved_profile() else {
+            return false;
+        };
+        if let Err(error) = profile.validate_permission_mode(mode) {
+            self.set_status_message(error.to_string());
+            return false;
+        }
+        let Some(chat) = self.ai_state.chat.as_mut() else {
+            return false;
+        };
+        chat.permission_mode_override = Some(mode.to_string());
+        chat.follow_chat_default = chat.opts.name != "query";
+        self.ai_state.chat_config_override = false;
+        let selection = crate::ai::chat_preference::ChatSelection {
+            profile: profile.name.clone(),
+            provider: profile.provider,
+            model: (profile.provider == crate::ai::AiProviderKind::ClaudeCode)
+                .then(|| profile.model.clone()),
+            permission_mode: Some(mode.to_string()),
+        };
+        match self.ai_state.chat_preference.remember(selection) {
+            Ok(()) => self.set_status_message(format!("AI permission mode: {mode}")),
+            Err(error) => {
+                crate::log_warn!("ai", "Could not save chat preference: {error:#}");
+                self.set_status_message(format!(
+                    "AI permission mode: {mode} (could not remember selection: {error})"
+                ));
+            }
+        }
+        self.mark_dirty();
+        true
+    }
+
+    pub fn cycle_ai_chat_permission_mode(&mut self, forward: bool) -> bool {
+        let Some(current) = self.ai_chat_permission_mode().map(str::to_owned) else {
+            return false;
+        };
+        let modes = self.ai_chat_permission_modes();
+        let current = modes
+            .iter()
+            .position(|option| option.id == current)
+            .unwrap_or(0);
+        let next = if forward {
+            (current + 1) % modes.len()
+        } else if current == 0 {
+            modes.len() - 1
+        } else {
+            current - 1
+        };
+        self.set_ai_chat_permission_mode(modes[next].id)
+    }
+
     /// Get the messages for the current chat conversation.
     pub fn ai_chat_messages(&self) -> &[ChatMessage] {
         self.conversation().map(|c| c.messages()).unwrap_or(&[])

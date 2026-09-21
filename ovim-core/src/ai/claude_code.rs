@@ -10,8 +10,53 @@ use std::process::Stdio;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
 
+#[path = "claude/approval.rs"]
+mod approval;
+pub(crate) use approval::permission_summary;
+
 const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 pub(crate) const SDK_VERSION: &str = "0.3.278";
+
+/// Claude Agent SDK permission modes. Keep the stable SDK values separate
+/// from their presentation so every frontend sends the same runtime contract.
+pub(crate) const PERMISSION_MODES: &[super::AiPermissionModeOption] = &[
+    super::AiPermissionModeOption {
+        id: "auto",
+        label: "Auto",
+        description: "Let Claude classify permission prompts and approve or deny them.",
+    },
+    super::AiPermissionModeOption {
+        id: "default",
+        label: "Manual",
+        description: "Ask before operations that require permission.",
+    },
+    super::AiPermissionModeOption {
+        id: "acceptEdits",
+        label: "Accept edits",
+        description: "Approve file edits automatically and ask for other protected operations.",
+    },
+    super::AiPermissionModeOption {
+        id: "plan",
+        label: "Plan",
+        description: "Explore and plan; ask before changing project files.",
+    },
+    super::AiPermissionModeOption {
+        id: "dontAsk",
+        label: "Don't ask",
+        description: "Deny calls that would require approval instead of prompting.",
+    },
+    super::AiPermissionModeOption {
+        id: "bypassPermissions",
+        label: "Bypass permissions",
+        description:
+            "Skip ordinary approval prompts; Claude policy and hook restrictions still apply.",
+    },
+];
+
+pub(crate) const PERMISSION_CAPABILITY: super::AiPermissionModes = super::AiPermissionModes {
+    default: "auto",
+    options: PERMISSION_MODES,
+};
 
 // Curated defaults verified against Anthropic's model reference on 2026-09-21:
 // https://platform.claude.com/docs/en/models/overview
@@ -82,6 +127,7 @@ pub(crate) struct Request {
     pub model: String,
     pub effort: Option<String>,
     pub allow_edits: bool,
+    pub permission_mode: String,
     pub resume: Option<String>,
     pub content: Vec<Value>,
 }

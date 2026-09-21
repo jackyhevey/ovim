@@ -16,7 +16,7 @@ Object.assign(mockSnapshot.aiChat, {
     reasoningEffort: "default", reasoningEfforts: ["default", "low", "medium", "high", "xhigh", "max"],
     activity: "waiting_tool_approval", waiting: true,
     input: "", inputCursor: 0, queuedInputs: [], pendingImages: [],
-    approval: ${state === "approval" ? JSON.stringify("Claude Code: Bash\nRun npm test in the project folder?\nApproval applies to this invocation only.") : "undefined"},
+    approval: ${state === "approval" ? JSON.stringify("Claude Code: Bash\n\nRun project tests\n\nCommand:\ncd 'norsk 🦦' && npm test\n\nReason: Shell access needs approval\n\nApproval applies to this invocation only.") : "undefined"},
     messages: [{id:"claude-message", role:"assistant", content:${JSON.stringify(state === "question" ? "Which language should the examples use?\n1. Norsk\n2. English\n\nType your answer below." : "I will verify the change with the project tests.")}, model:"Claude Agent", index:0, images:[], tools:[], selected:false}],
     streaming: undefined, streamingThinking: undefined, thinkingLive: false,
     codeExplanation: undefined, setup: undefined
@@ -28,7 +28,9 @@ Object.assign(mockSnapshot.aiChat, {
         if (state === "approval") {
             await expect(page.getByRole("button", { name: "Allow once" })).toBeVisible();
             await expect(page.getByRole("button", { name: "Deny", exact: true })).toBeVisible();
-            await expect(page.getByText(/Run npm test/)).toBeVisible();
+            await expect(page.locator(".approval-card")).toContainText("Run project tests");
+            await expect(page.locator(".approval-card")).toContainText("Command:\ncd 'norsk 🦦' && npm test");
+            await expect(page.locator(".approval-card")).not.toContainText('"command":');
         } else {
             await expect(page.getByPlaceholder("Answer Claude’s question…")).toBeVisible();
             await expect(page.getByRole("button", { name: "Send message" })).toBeVisible();

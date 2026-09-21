@@ -19,8 +19,15 @@ type Props = {
     reasoningEffortSelection: string;
     reasoningEffortDefault?: string;
     reasoningEfforts: string[];
+    permissionMode?: string;
+    permissionModes: Array<{
+        id: string;
+        label: string;
+        description: string;
+    }>;
     onProfile?: (profile: string, model?: string) => void;
     onReasoningEffort?: (effort: string) => void;
+    onPermissionMode?: (mode: string) => void;
     focusInput: () => void;
 };
 
@@ -28,9 +35,15 @@ export default function ChatModelPicker(props: Props) {
     const [open, setOpen] = createSignal(false);
     const [query, setQuery] = createSignal("");
     const [activeOption, setActiveOption] = createSignal(0);
+    const [popoverHeight, setPopoverHeight] = createSignal(620);
     let root!: HTMLDivElement;
     let trigger!: HTMLButtonElement;
     let search!: HTMLInputElement;
+
+    const measurePopover = () => {
+        const bottom = trigger?.getBoundingClientRect().bottom ?? 0;
+        setPopoverHeight(Math.max(120, window.innerHeight - bottom - 8));
+    };
 
     const selected = createMemo(() =>
         props.profiles.find(
@@ -48,6 +61,12 @@ export default function ChatModelPicker(props: Props) {
                 .includes(needle),
         );
     });
+    const permissionLabel = createMemo(
+        () =>
+            props.permissionModes.find(
+                (option) => option.id === props.permissionMode,
+            )?.label,
+    );
 
     createEffect(() => {
         const last = Math.max(0, filtered().length - 1);
@@ -87,7 +106,11 @@ export default function ChatModelPicker(props: Props) {
             setQuery("");
         };
         document.addEventListener("pointerdown", dismiss);
-        onCleanup(() => document.removeEventListener("pointerdown", dismiss));
+        window.addEventListener("resize", measurePopover);
+        onCleanup(() => {
+            document.removeEventListener("pointerdown", dismiss);
+            window.removeEventListener("resize", measurePopover);
+        });
     });
     return (
         <div class="chat-run-settings" ref={root!}>
@@ -101,13 +124,21 @@ export default function ChatModelPicker(props: Props) {
                 onClick={() => {
                     setOpen((value) => !value);
                     if (!open()) return;
+                    measurePopover();
                     const current = filtered().findIndex(
                         (profile) =>
                             profile.id === props.profile &&
                             (!props.model || profile.model === props.model),
                     );
                     setActiveOption(Math.max(0, current));
-                    queueMicrotask(() => search.focus());
+                    queueMicrotask(() => {
+                        document
+                            .getElementById(
+                                `chat-permission-option-${props.permissionMode}`,
+                            )
+                            ?.scrollIntoView?.({ block: "nearest" });
+                        search.focus();
+                    });
                 }}
             >
                 <span>
@@ -121,12 +152,16 @@ export default function ChatModelPicker(props: Props) {
                     props.reasoningEffort !== "default"
                         ? `default · ${props.reasoningEffort}`
                         : props.reasoningEffort}
+                    <Show when={permissionLabel()}>
+                        {(label) => ` · ${label()}`}
+                    </Show>
                 </em>
                 <Icon name="chevron-down" size={16} />
             </button>
             <Show when={open()}>
                 <section
                     class="chat-run-popover"
+                    style={{ "max-height": `${popoverHeight()}px` }}
                     role="dialog"
                     aria-label="AI run settings"
                     onKeyDown={(event) => {
@@ -232,6 +267,35 @@ export default function ChatModelPicker(props: Props) {
                             </For>
                         </div>
                     </fieldset>
+                    <Show when={props.permissionModes.length > 0}>
+                        <fieldset class="chat-permission-options">
+                            <legend>Permissions</legend>
+                            <div>
+                                <For each={props.permissionModes}>
+                                    {(option) => (
+                                        <button
+                                            id={`chat-permission-option-${option.id}`}
+                                            type="button"
+                                            aria-pressed={
+                                                option.id ===
+                                                props.permissionMode
+                                            }
+                                            title={option.description}
+                                            onClick={() => {
+                                                props.onPermissionMode?.(
+                                                    option.id,
+                                                );
+                                                close(true);
+                                            }}
+                                        >
+                                            <b>{option.label}</b>
+                                            <small>{option.description}</small>
+                                        </button>
+                                    )}
+                                </For>
+                            </div>
+                        </fieldset>
+                    </Show>
                 </section>
             </Show>
         </div>

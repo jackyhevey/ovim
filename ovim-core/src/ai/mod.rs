@@ -29,7 +29,8 @@ pub use chat_types::{
 pub(crate) use codex_app_server::DurableCodexSession;
 pub use config::{default_api_key_env, infer_provider, parse_edit_format_str, parse_provider_str};
 pub use config::{
-    AiChatModelOption, AiConfig, AiProfileConfig, ChatContextConfig, ProjectContextConfig,
+    AiChatModelOption, AiConfig, AiPermissionModeOption, AiPermissionModes, AiProfileConfig,
+    ChatContextConfig, ProjectContextConfig,
 };
 pub use extract::{extract_response, AiExtractedResponse};
 pub(crate) use provider::append_project_context;

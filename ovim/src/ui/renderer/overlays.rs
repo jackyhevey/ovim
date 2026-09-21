@@ -679,7 +679,11 @@ pub fn render_ai_chat_permission_dialog(frame: &mut Frame, editor: &Editor, _the
                 .ai_chat_pending_tool_approval_summary()
                 .unwrap_or_else(|| "Allow requested tool action?".to_string()),
             "This request blocks agent progress until resolved.",
-            "Enter/Ctrl-Y allow once   Ctrl-A allow for chat   Esc/Ctrl-N deny",
+            if editor.ai_chat_uses_external_agent() {
+                "Enter/Ctrl-Y allow once   Esc/Ctrl-N deny"
+            } else {
+                "Enter/Ctrl-Y allow once   Ctrl-A allow for chat   Esc/Ctrl-N deny"
+            },
         )
     } else {
         (
@@ -1550,6 +1554,41 @@ mod tests {
                 })
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn permission_details_keep_command_and_description_on_separate_lines() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_modal_dialog(
+                    frame,
+                    " Tool Permission ",
+                    &[
+                        ("Claude Code: Bash\n\nRun project tests\n\nCommand:\ncd 'norsk' && npm test\n\nApproval applies to this invocation only.", 't'),
+                        ("Enter/Ctrl-Y allow once   Esc/Ctrl-N deny", 'a'),
+                    ],
+                );
+            })
+            .unwrap();
+        let rows: Vec<String> = terminal
+            .backend()
+            .buffer()
+            .content()
+            .chunks(100)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect();
+        let description = rows
+            .iter()
+            .position(|row| row.contains("Run project tests"))
+            .unwrap();
+        let command = rows
+            .iter()
+            .position(|row| row.contains("cd 'norsk' && npm test"))
+            .unwrap();
+        assert!(command > description);
+        assert!(rows.iter().any(|row| row.contains("Esc/Ctrl-N deny")));
     }
 
     #[test]

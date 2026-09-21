@@ -17,6 +17,21 @@ pub struct AiChatModelOption {
     pub model: String,
 }
 
+/// A provider-defined permission mode exposed by the shared chat controls.
+/// The ID is the exact value passed to the provider runtime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct AiPermissionModeOption {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiPermissionModes {
+    pub default: &'static str,
+    pub options: &'static [AiPermissionModeOption],
+}
+
 #[derive(Debug, Clone)]
 pub struct AiProfileConfig {
     pub name: String,
@@ -44,6 +59,38 @@ pub struct AiProfileConfig {
 }
 
 impl AiProfileConfig {
+    fn permission_capability(&self) -> Option<&'static AiPermissionModes> {
+        match self.provider {
+            AiProviderKind::ClaudeCode => Some(&super::claude_code::PERMISSION_CAPABILITY),
+            _ => None,
+        }
+    }
+
+    pub fn permission_modes(&self) -> &'static [AiPermissionModeOption] {
+        self.permission_capability()
+            .map(|capability| capability.options)
+            .unwrap_or_default()
+    }
+
+    pub fn default_permission_mode(&self) -> Option<&'static str> {
+        self.permission_capability()
+            .map(|capability| capability.default)
+    }
+
+    pub fn validate_permission_mode(&self, mode: &str) -> Result<()> {
+        if self
+            .permission_modes()
+            .iter()
+            .any(|option| option.id == mode)
+        {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "Permission mode {mode:?} is not supported by {}",
+            self.provider
+        )
+    }
+
     /// Shared boundary for interactive and restored chat model selections.
     /// Most providers select models through profiles; Claude also accepts aliases.
     pub(crate) fn validate_chat_model(&self, model: &str) -> Result<()> {

@@ -79,7 +79,7 @@ impl Editor {
             .map(ConversationTree::branch_generation)
             .unwrap_or_default();
         let follow_chat_default = opts.profile.is_none() && opts.name != "query";
-        let model_override = if opts.profile.is_none() {
+        let (model_override, permission_mode_override) = if opts.profile.is_none() {
             let context = if opts.name == "query" {
                 "query"
             } else {
@@ -87,16 +87,20 @@ impl Editor {
             };
             opts.profile = self.ai_chat_context_profile(context);
             if context == "chat" {
-                self.ai_chat_remembered_selection()
-                    .and_then(|selection| selection.model.clone())
+                let selection = self.ai_chat_remembered_selection();
+                (
+                    selection.and_then(|selection| selection.model.clone()),
+                    selection.and_then(|selection| selection.permission_mode.clone()),
+                )
             } else {
-                None
+                (None, None)
             }
         } else {
-            None
+            (None, None)
         };
         let mut chat = AiChatState::new(opts, buffer_id, mode_before);
         chat.model_override = model_override;
+        chat.permission_mode_override = permission_mode_override;
         chat.follow_chat_default = follow_chat_default;
         let runtime_locator = self
             .ai_state

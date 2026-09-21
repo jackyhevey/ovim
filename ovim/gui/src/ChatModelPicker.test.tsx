@@ -8,6 +8,7 @@ afterEach(cleanup);
 
 it("selects a Claude model independently of its profile and displays the returned selection", async () => {
     const onProfile = vi.fn();
+    const onPermissionMode = vi.fn();
     const focusInput = vi.fn();
     const [model, setModel] = createSignal("default");
     render(() => (
@@ -30,10 +31,24 @@ it("selects a Claude model independently of its profile and displays the returne
             reasoningEffort="default"
             reasoningEffortSelection="default"
             reasoningEfforts={["default", "high"]}
+            permissionMode="auto"
+            permissionModes={[
+                {
+                    id: "auto",
+                    label: "Auto",
+                    description: "Classify permission prompts",
+                },
+                {
+                    id: "dontAsk",
+                    label: "Don't ask",
+                    description: "Deny calls that require approval",
+                },
+            ]}
             onProfile={(profile, selectedModel) => {
                 onProfile(profile, selectedModel);
                 setModel(selectedModel!);
             }}
+            onPermissionMode={onPermissionMode}
             focusInput={focusInput}
         />
     ));
@@ -65,4 +80,11 @@ it("selects a Claude model independently of its profile and displays the returne
         "claude_code",
         "claude-custom-version[1m]",
     );
+    fireEvent.click(
+        screen.getByRole("button", {
+            name: /Claude Agent.*claude_code\/claude-custom-version/,
+        }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Don't ask/ }));
+    expect(onPermissionMode).toHaveBeenCalledWith("dontAsk");
 });

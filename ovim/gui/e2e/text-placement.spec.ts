@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 // Identical source with different cursor and syntax boundaries. Browser Range
-// measurements check actual glyph origins against an unsegmented reference.
+// measurements check actual glyph centers against an unsegmented reference.
 for (const mode of ["NORMAL", "INSERT"]) {
     test(`text stays on the same grid across ${mode} cursor and highlight boundaries`, async ({
         page,
@@ -57,9 +57,11 @@ mockSnapshot.lines.splice(0, mockSnapshot.lines.length, ...[0, 6, 20, -1].map((c
                             const range = document.createRange();
                             range.setStart(node, i);
                             range.setEnd(node, i + 1);
-                            xs.push(
-                                range.getBoundingClientRect().left - origin,
-                            );
+                            const bounds = range.getBoundingClientRect();
+                            // WebKit quantizes each text run's Range edges.
+                            // The center avoids a whole-pixel edge-rounding
+                            // difference for otherwise aligned fractional cells.
+                            xs.push(bounds.left + bounds.width / 2 - origin);
                         }
                     }
                     return xs;
@@ -108,6 +110,18 @@ mockSnapshot.lines.splice(0, mockSnapshot.lines.length, ...[0, 6, 20, -1].map((c
         });
         await page.evaluate(() =>
             document.fonts.dispatchEvent(new Event("loadingdone")),
+        );
+        for (const error of await measure()) expect(error).toBeLessThan(1);
+        // A proportional font substitution must not break the fixed-cell grid.
+        await page.addStyleTag({
+            content: ".code-viewport { font-family: sans-serif; }",
+        });
+        await page.evaluate(() =>
+            document.fonts.dispatchEvent(new Event("loadingdone")),
+        );
+        await expect(page.locator(".code-viewport")).toHaveCSS(
+            "font-family",
+            "monospace",
         );
         for (const error of await measure()) expect(error).toBeLessThan(1);
         await page.screenshot({

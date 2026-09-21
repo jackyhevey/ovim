@@ -474,11 +474,30 @@ fn render_chat_header(frame: &mut Frame, editor: &mut Editor, area: Rect) -> Opt
         .unwrap_or(&profile_key);
     let model_label = format!(" M:{profile_label} ▾ ");
     let effort_label = format!(" E:{} ▾ ", editor.ai_chat_reasoning_effort());
+    let permission_label = editor
+        .ai_chat_permission_mode()
+        .and_then(|mode| {
+            editor
+                .ai_chat_permission_modes()
+                .iter()
+                .find(|option| option.id == mode)
+        })
+        .map(|option| format!(" P:{} ▾ ", option.label));
     let model_width = text_display_width(&model_label) as u16;
     let effort_width = text_display_width(&effort_label) as u16;
+    let permission_width = permission_label
+        .as_deref()
+        .map(text_display_width)
+        .unwrap_or_default() as u16;
     let controls_available = comprehension_x.saturating_sub(area.x);
     let show_model = model_width <= controls_available;
     let show_effort = show_model && model_width.saturating_add(effort_width) <= controls_available;
+    let show_permission = show_effort
+        && permission_label.is_some()
+        && model_width
+            .saturating_add(effort_width)
+            .saturating_add(permission_width)
+            <= controls_available;
 
     let mut spans = Vec::new();
     let mut controls_width = 0;
@@ -500,6 +519,15 @@ fn render_chat_header(frame: &mut Frame, editor: &mut Editor, area: Rect) -> Opt
                 .bg(Color::Rgb(55, 45, 78)),
         ));
         controls_width += effort_width;
+    }
+    if show_permission {
+        spans.push(Span::styled(
+            permission_label.expect("permission label checked"),
+            Style::default()
+                .fg(Color::Rgb(180, 226, 210))
+                .bg(Color::Rgb(38, 66, 59)),
+        ));
+        controls_width += permission_width;
     }
     spans.push(Span::styled(comprehension_label, comprehension_style));
     spans.push(Span::styled(yolo_label, yolo_style));
@@ -541,6 +569,17 @@ fn render_chat_header(frame: &mut Frame, editor: &mut Editor, area: Rect) -> Opt
             controls_x + model_width,
             area.y,
             effort_width,
+            1,
+        )));
+    }
+    if show_permission {
+        editor
+            .render_cache
+            .ai_chat_interactions
+            .permission_picker_trigger = Some(crate::key_convert::convert_ratatui_rect(Rect::new(
+            controls_x + model_width + effort_width,
+            area.y,
+            permission_width,
             1,
         )));
     }
@@ -2391,8 +2430,14 @@ fn render_model_picker(frame: &mut Frame, editor: &mut Editor, anchor: Option<Re
     let active_model = editor.ai_chat_selected_model().to_string();
     let active_profile = editor.ai_chat_effective_profile();
     let active_effort = editor.ai_chat_reasoning_effort_selection();
+    let permission_modes = editor.ai_chat_permission_modes();
+    let active_permission = editor.ai_chat_permission_mode().map(str::to_owned);
     let section = editor.ai_chat_model_picker_section();
-    let content_rows = model_options.len() + editor.ai_chat_reasoning_efforts().len() + 2;
+    let content_rows = model_options.len()
+        + editor.ai_chat_reasoning_efforts().len()
+        + permission_modes.len()
+        + 2
+        + usize::from(!permission_modes.is_empty());
     let height = (content_rows as u16 + 2).min(area.height);
     let width = area.width.clamp(24, 52);
     let anchor = anchor.unwrap_or(Rect::new(area.x, area.y.saturating_sub(1), width, 1));
@@ -2458,25 +2503,62 @@ fn render_model_picker(frame: &mut Frame, editor: &mut Editor, anchor: Option<Re
             Style::default().fg(TEXT_NORMAL)
         }));
     }
-    let selected_row = if section == ovim_core::editor::ChatModelPickerSection::Model {
-        1 + model_options
-            .iter()
-            .position(|option| option.id == active_profile && option.model == active_model)
-            .unwrap_or(0)
-    } else {
-        2 + model_options.len()
-            + editor
-                .ai_chat_reasoning_efforts()
+    if !permission_modes.is_empty() {
+        items.push(
+            ListItem::new(" PERMISSIONS").style(
+                Style::default()
+                    .fg(
+                        if section == ovim_core::editor::ChatModelPickerSection::Permission {
+                            ACCENT_SELECTED
+                        } else {
+                            TEXT_DIM
+                        },
+                    )
+                    .add_modifier(Modifier::BOLD),
+            ),
+        );
+        for option in permission_modes {
+            let selected = Some(option.id) == active_permission.as_deref();
+            let marker = if selected { "●" } else { "○" };
+            items.push(
+                ListItem::new(format!("{marker} {}", option.label)).style(if selected {
+                    Style::default().fg(Color::White).bg(BG_SELECTED_ROW)
+                } else {
+                    Style::default().fg(TEXT_NORMAL)
+                }),
+            );
+        }
+    }
+    let selected_row = match section {
+        ovim_core::editor::ChatModelPickerSection::Model => {
+            1 + model_options
                 .iter()
-                .position(|effort| *effort == active_effort)
+                .position(|option| option.id == active_profile && option.model == active_model)
                 .unwrap_or(0)
+        }
+        ovim_core::editor::ChatModelPickerSection::Effort => {
+            2 + model_options.len()
+                + editor
+                    .ai_chat_reasoning_efforts()
+                    .iter()
+                    .position(|effort| *effort == active_effort)
+                    .unwrap_or(0)
+        }
+        ovim_core::editor::ChatModelPickerSection::Permission => {
+            3 + model_options.len()
+                + editor.ai_chat_reasoning_efforts().len()
+                + permission_modes
+                    .iter()
+                    .position(|option| Some(option.id) == active_permission.as_deref())
+                    .unwrap_or(0)
+        }
     };
     let mut state = ratatui::widgets::ListState::default().with_selected(Some(selected_row));
     frame.render_widget(Clear, popup);
     frame.render_stateful_widget(
         List::new(items).block(
             Block::default()
-                .title(" Model & effort · Tab section · ↑/↓ choose ")
+                .title(" Run settings · Tab section · ↑/↓ choose ")
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Rgb(82, 139, 255))),
         ),
@@ -2528,6 +2610,29 @@ fn render_model_picker(frame: &mut Frame, editor: &mut Editor, anchor: Option<Re
                         1,
                     )),
                     (*effort).to_string(),
+                )
+            })
+        })
+        .collect();
+    editor
+        .render_cache
+        .ai_chat_interactions
+        .permission_picker_options = permission_modes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, option)| {
+            let row = (model_options.len() + editor.ai_chat_reasoning_efforts().len() + 3 + index)
+                .checked_sub(offset)?;
+            let y = first_row + row as u16;
+            (y < visible_bottom).then(|| {
+                (
+                    crate::key_convert::convert_ratatui_rect(Rect::new(
+                        popup.x + 1,
+                        y,
+                        popup.width.saturating_sub(2),
+                        1,
+                    )),
+                    option.id.to_string(),
                 )
             })
         })
@@ -2742,6 +2847,49 @@ mod tests {
         let area = Rect::new(0, 0, 100, 24);
         assert_eq!(compute_chat_split(area, true, None).1.width, 40);
         assert_eq!(compute_chat_split(area, false, None).1.width, 35);
+    }
+
+    #[test]
+    fn permission_picker_keeps_selected_mode_and_mouse_target_visible_in_short_panel() {
+        let mut editor = Editor::default();
+        let mut profile = editor.ai_state.config.profiles["local"].clone();
+        profile.name = "claude_code".into();
+        profile.provider = ovim_core::ai::AiProviderKind::ClaudeCode;
+        profile.model = "default".into();
+        editor
+            .ai_state
+            .config
+            .profiles
+            .insert(profile.name.clone(), profile);
+        editor
+            .open_ai_chat(ovim_core::ai::ChatOpts::default())
+            .unwrap();
+        assert!(editor.ai_select_chat_profile("claude_code"));
+        assert!(editor.set_ai_chat_permission_mode("bypassPermissions"));
+        editor.open_ai_chat_model_picker(ovim_core::editor::ChatModelPickerSection::Permission);
+        let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_model_picker(frame, &mut editor, None, Rect::new(0, 0, 40, 10))
+            })
+            .unwrap();
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(rendered.contains("● Bypass permissions"));
+        let (area, _) = editor
+            .render_cache
+            .ai_chat_interactions
+            .permission_picker_options
+            .iter()
+            .find(|(_, mode)| mode == "bypassPermissions")
+            .unwrap();
+        assert!(area.y > 0 && area.y < 9);
+        assert_eq!(terminal.backend().buffer()[(area.x, area.y)].symbol(), "●");
     }
 
     #[test]

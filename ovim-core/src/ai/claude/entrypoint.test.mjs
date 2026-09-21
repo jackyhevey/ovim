@@ -36,7 +36,7 @@ for (const aliased of [false, true]) {
                 child.on("error", reject);
                 child.on("close", code => resolve(code));
             });
-            child.stdin.write(JSON.stringify({cwd:root, executable:"unused", model:"opus", allowEdits:true, content:[{type:"text",text:"fixture"}]}) + "\n");
+            child.stdin.write(JSON.stringify({cwd:root, executable:"unused", model:"opus", permissionMode:"auto", allowEdits:true, content:[{type:"text",text:"fixture"}]}) + "\n");
             const code = await exited.finally(() => clearTimeout(timeout));
             assert.equal(code, 0, stderr);
             const events = stdout.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));

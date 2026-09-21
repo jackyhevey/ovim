@@ -194,10 +194,11 @@ broken into smaller steps, but required mastery is not relaxed. Questions focus
 on behavior, invariants, realistic failure modes, and verification rather than
 line-number or syntax trivia.
 
-When the panel is wide enough, the selected model profile and reasoning effort
-appear immediately to the left of `COMPREHENSION`. Click either control to open
-the combined picker downward. Up/Down changes the active value, Tab switches
-between model and effort, and Enter closes the picker. An effort selected here
+When the panel is wide enough, the selected model profile, reasoning effort,
+and any provider permission mode appear immediately to the left of
+`COMPREHENSION`. Click a control to open the combined run-settings picker.
+Up/Down changes the active value, Tab switches sections, and Enter closes the
+picker. An effort selected here
 overrides the profile for this chat only; `default` returns to the profile's
 configured effort.
 
@@ -478,6 +479,24 @@ vim.ai.setup({
 })
 ```
 
+Claude profiles add a **Permissions** section to the GUI and terminal run
+settings. The default is **Auto**. The six modes are Auto, Manual (`default`),
+Accept edits, Plan, Don't ask, and Bypass permissions. Auto asks Claude's
+permission classifier to decide prompts and depends on support from the active
+Claude account/runtime. Manual asks for protected operations. Accept edits
+approves file edits while retaining other prompts. Plan explores and plans but
+can still ask before a file change. Don't ask denies calls that would need a
+prompt. Bypass permissions skips ordinary approval prompts; Claude policy and
+hook restrictions still apply. The exact stable IDs are available with
+`/permissions auto|default|acceptEdits|plan|dontAsk|bypassPermissions`.
+
+Changing the permission mode is blocked during an active turn. The choice is
+stored beside the selected provider/model in `chat-preference.json`; older
+preference files use Auto. Switching to a provider without permission modes
+removes the control and cannot carry a Claude mode into that provider. The
+selected mode is part of Claude's native-session fingerprint, so a mode change
+does not resume a checkpoint created under another mode.
+
 Permission prompts offer **Allow once** and **Deny** in the GUI; terminal users
 press Enter or Escape. Claude's questions appear in the conversation: type an
 answer, an option number, or comma-separated numbers for a multiple-selection
@@ -513,7 +532,7 @@ open buffers and preserves unsaved edits. Native sessions resume only when the
 branch, configuration, and visible conversation match the saved checkpoint.
 After interrupted work, a branch change, or a provider switch, Ovim can start a
 new native session using the visible conversation as context. `/clear` starts
-a fresh conversation. Profile and effort changes wait until the current turn
+a fresh conversation. Profile, effort, and permission changes wait until the current turn
 has finished or been stopped.
 
 For current subscription conditions, see Anthropic's
@@ -597,6 +616,8 @@ supported. Enter again executes a completed command.
 - `/effort` opens the combined picker on reasoning effort.
 - `/effort default|none|low|medium|high|xhigh|max` sets the per-chat effort.
   Provider support remains model-specific; current Codex models accept `max`.
+- `/permissions` opens the provider permission section. Supplying a stable mode
+  ID selects it directly when the active provider supports it.
 - `/clear` clears the current conversation and starts a fresh provider context.
 - `/compact` creates a structured checkpoint for older model context and keeps
   an approximately 8k-token recent complete-turn tail. `/compact aggressive`

@@ -455,6 +455,17 @@ fn handle_left_click(editor: &mut Editor, col: u16, row: u16) -> Result<Option<S
             editor.set_ai_chat_reasoning_effort(&effort);
             return Ok(None);
         }
+        if let Some(mode) = editor
+            .render_cache
+            .ai_chat_interactions
+            .permission_picker_options
+            .iter()
+            .find(|(area, _)| area.contains(col, row))
+            .map(|(_, mode)| mode.clone())
+        {
+            editor.set_ai_chat_permission_mode(&mode);
+            return Ok(None);
+        }
         if editor
             .render_cache
             .ai_chat_interactions
@@ -462,6 +473,15 @@ fn handle_left_click(editor: &mut Editor, col: u16, row: u16) -> Result<Option<S
             .is_some_and(|area| area.contains(col, row))
         {
             editor.open_ai_chat_model_picker(crate::editor::ChatModelPickerSection::Model);
+            return Ok(None);
+        }
+        if editor
+            .render_cache
+            .ai_chat_interactions
+            .permission_picker_trigger
+            .is_some_and(|area| area.contains(col, row))
+        {
+            editor.open_ai_chat_model_picker(crate::editor::ChatModelPickerSection::Permission);
             return Ok(None);
         }
         if editor

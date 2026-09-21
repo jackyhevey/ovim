@@ -651,26 +651,48 @@ fn handle_model_selector(editor: &mut Editor, key_event: KeyEvent) -> Result<()>
 
     match key_event.code {
         KeyCode::Tab | KeyCode::BackTab => {
-            let section = if editor.ai_chat_model_picker_section() == ChatModelPickerSection::Model
-            {
-                ChatModelPickerSection::Effort
+            let sections = [
+                ChatModelPickerSection::Model,
+                ChatModelPickerSection::Effort,
+                ChatModelPickerSection::Permission,
+            ];
+            let count = if editor.ai_chat_permission_modes().is_empty() {
+                2
             } else {
-                ChatModelPickerSection::Model
+                3
             };
+            let current = sections[..count]
+                .iter()
+                .position(|section| *section == editor.ai_chat_model_picker_section())
+                .unwrap_or(0);
+            let next = if key_event.code == KeyCode::BackTab {
+                (current + count - 1) % count
+            } else {
+                (current + 1) % count
+            };
+            let section = sections[next];
             editor.open_ai_chat_model_picker(section);
         }
         KeyCode::Up | KeyCode::Left | KeyCode::Char('k') | KeyCode::Char('h') => {
-            if editor.ai_chat_model_picker_section() == ChatModelPickerSection::Model {
-                editor.ai_cycle_chat_model(false);
-            } else {
-                editor.cycle_ai_chat_reasoning_effort(false);
+            match editor.ai_chat_model_picker_section() {
+                ChatModelPickerSection::Model => editor.ai_cycle_chat_model(false),
+                ChatModelPickerSection::Effort => {
+                    editor.cycle_ai_chat_reasoning_effort(false);
+                }
+                ChatModelPickerSection::Permission => {
+                    editor.cycle_ai_chat_permission_mode(false);
+                }
             }
         }
         KeyCode::Down | KeyCode::Right | KeyCode::Char('j') | KeyCode::Char('l') => {
-            if editor.ai_chat_model_picker_section() == ChatModelPickerSection::Model {
-                editor.ai_cycle_chat_model(true);
-            } else {
-                editor.cycle_ai_chat_reasoning_effort(true);
+            match editor.ai_chat_model_picker_section() {
+                ChatModelPickerSection::Model => editor.ai_cycle_chat_model(true),
+                ChatModelPickerSection::Effort => {
+                    editor.cycle_ai_chat_reasoning_effort(true);
+                }
+                ChatModelPickerSection::Permission => {
+                    editor.cycle_ai_chat_permission_mode(true);
+                }
             }
         }
         KeyCode::Enter => {
@@ -988,6 +1010,47 @@ mod tests {
         editor.record_ai_chat_node(assistant_node, assistant_event);
         editor.ai_runtime_complete_turn();
         (user_node, assistant_node)
+    }
+
+    #[test]
+    fn permission_picker_opens_from_command_and_cycles_sections_in_both_directions() {
+        use crate::editor::ChatModelPickerSection;
+        let mut editor = crate::editor::ai_external_agent::tests::editor();
+        let chat = editor.ai_state.chat.as_mut().unwrap();
+        chat.input = "/permissions".into();
+        chat.input_cursor = chat.input.len();
+        handle_ai_chat_mode(&mut editor, KeyEvent::new(KeyCode::Enter, Modifiers::NONE)).unwrap();
+        assert_eq!(editor.ai_chat_focus(), ChatFocus::ModelSelector);
+        assert_eq!(
+            editor.ai_chat_model_picker_section(),
+            ChatModelPickerSection::Permission
+        );
+        handle_ai_chat_mode(
+            &mut editor,
+            KeyEvent::new(KeyCode::BackTab, Modifiers::SHIFT),
+        )
+        .unwrap();
+        assert_eq!(
+            editor.ai_chat_model_picker_section(),
+            ChatModelPickerSection::Effort
+        );
+        handle_ai_chat_mode(&mut editor, KeyEvent::new(KeyCode::Tab, Modifiers::NONE)).unwrap();
+        assert_eq!(
+            editor.ai_chat_model_picker_section(),
+            ChatModelPickerSection::Permission
+        );
+        handle_ai_chat_mode(&mut editor, KeyEvent::new(KeyCode::Down, Modifiers::NONE)).unwrap();
+        assert_eq!(editor.ai_chat_permission_mode(), Some("default"));
+        handle_ai_chat_mode(&mut editor, KeyEvent::new(KeyCode::Enter, Modifiers::NONE)).unwrap();
+        assert_eq!(editor.ai_chat_focus(), ChatFocus::TextInput);
+        assert!(editor.ai_select_chat_profile("local"));
+        let chat = editor.ai_state.chat.as_mut().unwrap();
+        chat.input = "/".into();
+        chat.input_cursor = 1;
+        assert!(!editor
+            .ai_chat_slash_completions()
+            .iter()
+            .any(|item| item.command == "/permissions"));
     }
 
     #[test]

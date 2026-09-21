@@ -1376,6 +1376,7 @@ button:focus-visible {
     border-radius: var(--radius-2);
     background: var(--surface-2);
     box-shadow: var(--shadow-popover);
+    overflow-y: auto;
 }
 .chat-model-search {
     display: grid;
@@ -1493,6 +1494,52 @@ button:focus-visible {
     color: var(--accent-foreground);
     border-color: var(--accent);
     background: var(--accent);
+}
+.chat-permission-options {
+    margin: 8px 0 0;
+    padding: 8px 0 0;
+    border: 0;
+    border-top: 1px solid var(--border);
+}
+.chat-permission-options legend {
+    padding: 0;
+    color: var(--text-secondary);
+    font: var(--text-micro)/1 var(--editor-font);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+.chat-permission-options > div {
+    max-height: 190px;
+    margin-top: 7px;
+    display: grid;
+    gap: 3px;
+    overflow-y: auto;
+}
+.chat-permission-options button {
+    padding: 6px 7px;
+    display: grid;
+    gap: 3px;
+    color: var(--text-primary);
+    border: 1px solid transparent;
+    border-radius: var(--radius-1);
+    background: transparent;
+    text-align: left;
+    cursor: pointer;
+}
+.chat-permission-options button:hover {
+    border-color: var(--border);
+    background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+.chat-permission-options button[aria-pressed="true"] {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.chat-permission-options b {
+    font: 10px/1 var(--editor-font);
+}
+.chat-permission-options small {
+    color: var(--text-secondary);
+    font: var(--text-micro)/1.3 var(--editor-font);
 }
 .ai-panel {
     grid-template-rows: auto minmax(0, 1fr) auto;

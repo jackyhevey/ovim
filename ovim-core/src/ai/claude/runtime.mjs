@@ -8,6 +8,12 @@ export async function runTurn(request, query, emit, ask, signal) {
     // Claude can ask for permissions for parallel tools. Present one question
     // at a time while preserving all callbacks and their cancellation signals.
     let permissionTail = Promise.resolve();
+    // Core resolves and validates the provider's mode before starting this
+    // transport. Require that explicit selection instead of choosing a second
+    // default here; Claude's SDK owns validation of its runtime options.
+    if (typeof request.permissionMode !== "string" || !request.permissionMode.trim())
+        throw new Error("Missing Claude permission mode");
+    const permissionMode = request.permissionMode;
     const options = {
         cwd: request.cwd,
         pathToClaudeCodeExecutable: request.executable,
@@ -16,7 +22,10 @@ export async function runTurn(request, query, emit, ask, signal) {
         },
         ...(request.editorMcp ? { mcpServers: { ovim: request.editorMcp } } : {}),
         settingSources: ["user", "project", "local"],
-        permissionMode: "default",
+        permissionMode,
+        ...(permissionMode === "bypassPermissions"
+            ? { allowDangerouslySkipPermissions: true }
+            : {}),
         includePartialMessages: true,
         abortController: request.abortController,
         ...(request.model !== "default" ? { model: request.model } : {}),

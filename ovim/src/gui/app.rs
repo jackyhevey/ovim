@@ -321,6 +321,14 @@ async fn gui_select_reasoning_effort(
 }
 
 #[tauri::command]
+async fn gui_select_permission_mode(
+    bridge: State<'_, GuiBridge>,
+    mode: String,
+) -> Result<(), String> {
+    bridge.select_permission_mode(mode).await
+}
+
+#[tauri::command]
 async fn gui_ai_policy(bridge: State<'_, GuiBridge>, action: String) -> Result<(), String> {
     bridge.ai_policy(action).await
 }
@@ -494,6 +502,7 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
             gui_remove_chat_image,
             gui_select_ai_profile,
             gui_select_reasoning_effort,
+            gui_select_permission_mode,
             gui_ai_policy,
             gui_editor_command,
             gui_select_chat_message,

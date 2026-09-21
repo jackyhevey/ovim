@@ -11,6 +11,10 @@ pub(crate) struct ChatSelection {
     pub provider: AiProviderKind,
     /// Only providers with an interactive model picker need an override.
     pub model: Option<String>,
+    /// Provider-owned permission mode. Missing in older documents and for
+    /// providers without this capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
 }
 
 impl ChatSelection {
@@ -21,6 +25,11 @@ impl ChatSelection {
         }
         if let Some(model) = &self.model {
             if profile.validate_chat_model(model).is_err() {
+                return None;
+            }
+        }
+        if let Some(mode) = &self.permission_mode {
+            if profile.validate_permission_mode(mode).is_err() {
                 return None;
             }
         }
@@ -120,6 +129,7 @@ mod tests {
             profile: "local".into(),
             provider: AiProviderKind::Ollama,
             model: None,
+            permission_mode: None,
         }
     }
 
@@ -139,6 +149,7 @@ mod tests {
             profile: "claude_code".into(),
             provider: AiProviderKind::ClaudeCode,
             model: Some("opus[1m]".into()),
+            permission_mode: Some("auto".into()),
         };
         second.remember(next.clone()).unwrap();
         assert_eq!(ChatPreference::load(path).selection, Some(next));
@@ -162,6 +173,21 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
             assert!(ChatPreference::load(path.clone()).selection.is_none());
         }
+    }
+
+    #[test]
+    fn older_documents_without_permission_mode_remain_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("preference.json");
+        std::fs::write(
+            &path,
+            r#"{"version":1,"selection":{"profile":"local","provider":"ollama","model":null}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            ChatPreference::load(path).selection,
+            Some(local_selection())
+        );
     }
 
     #[test]

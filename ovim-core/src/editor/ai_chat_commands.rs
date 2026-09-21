@@ -11,6 +11,7 @@ enum AiChatSlashCommandKind {
     Exa,
     Model,
     Effort,
+    Permissions,
     Comprehension,
     Yolo,
 }
@@ -58,6 +59,12 @@ const AI_CHAT_SLASH_COMMANDS: &[AiChatSlashCompletion] = &[
         kind: AiChatSlashCommandKind::Effort,
     },
     AiChatSlashCompletion {
+        command: "/permissions",
+        usage: "/permissions [mode]",
+        description: "Choose the provider permission mode",
+        kind: AiChatSlashCommandKind::Permissions,
+    },
+    AiChatSlashCompletion {
         command: "/comprehension",
         usage: "/comprehension [off|publish|commit]",
         description: "Require demonstrated understanding at a boundary",
@@ -78,6 +85,7 @@ enum AiChatSlashCommand {
     Exa,
     Model { profile: Option<String> },
     Effort { effort: Option<String> },
+    Permissions { mode: Option<String> },
     Comprehension { policy: super::ComprehensionPolicy },
     Yolo { enabled: Option<bool> },
 }
@@ -132,6 +140,10 @@ impl AiChatSlashCommand {
                 })
             }
             AiChatSlashCommandKind::Effort => Err(format!("Usage: {}", spec.usage)),
+            AiChatSlashCommandKind::Permissions if arguments.len() <= 1 => Ok(Self::Permissions {
+                mode: arguments.first().map(|value| (*value).to_string()),
+            }),
+            AiChatSlashCommandKind::Permissions => Err(format!("Usage: {}", spec.usage)),
             AiChatSlashCommandKind::Comprehension if arguments.len() <= 1 => {
                 let policy = match arguments.first().copied() {
                     None | Some("publish") => super::ComprehensionPolicy::Publish,
@@ -183,6 +195,10 @@ impl Editor {
         }
         AI_CHAT_SLASH_COMMANDS
             .iter()
+            .filter(|spec| {
+                spec.kind != AiChatSlashCommandKind::Permissions
+                    || !self.ai_chat_permission_modes().is_empty()
+            })
             .filter(|spec| {
                 !self.ai_chat_uses_external_agent()
                     || !matches!(
@@ -333,6 +349,19 @@ impl Editor {
                 effort: Some(effort),
             }) => {
                 if self.set_ai_chat_reasoning_effort(&effort) {
+                    self.clear_ai_chat_input();
+                }
+            }
+            Ok(AiChatSlashCommand::Permissions { mode: None }) => {
+                if self.ai_chat_permission_modes().is_empty() {
+                    self.set_status_message("The selected AI provider has no permission modes");
+                } else {
+                    self.clear_ai_chat_input();
+                    self.open_ai_chat_model_picker(super::ChatModelPickerSection::Permission);
+                }
+            }
+            Ok(AiChatSlashCommand::Permissions { mode: Some(mode) }) => {
+                if self.set_ai_chat_permission_mode(&mode) {
                     self.clear_ai_chat_input();
                 }
             }

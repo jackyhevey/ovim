@@ -583,6 +583,8 @@ pub struct GuiAiChat {
     pub reasoning_effort_selection: String,
     pub reasoning_effort_default: String,
     pub reasoning_efforts: Vec<String>,
+    pub permission_mode: Option<String>,
+    pub permission_modes: Vec<ovim_core::ai::AiPermissionModeOption>,
     pub yolo_mode: bool,
     pub comprehension_policy: String,
     pub comprehension_checkpoint: Option<String>,
@@ -854,6 +856,10 @@ enum GuiRequest {
     },
     SelectReasoningEffort {
         effort: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SelectPermissionMode {
+        mode: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
     SelectChatMessage {
@@ -1193,6 +1199,11 @@ impl GuiBridge {
 
     pub async fn select_reasoning_effort(&self, effort: String) -> Result<(), String> {
         self.request(|reply| GuiRequest::SelectReasoningEffort { effort, reply })
+            .await
+    }
+
+    pub async fn select_permission_mode(&self, mode: String) -> Result<(), String> {
+        self.request(|reply| GuiRequest::SelectPermissionMode { mode, reply })
             .await
     }
 
@@ -1793,6 +1804,20 @@ async fn handle_request(
                 Ok(())
             } else {
                 Err(anyhow::anyhow!("Unknown reasoning effort: {effort}"))
+            };
+            (reply, result)
+        }
+        GuiRequest::SelectPermissionMode { mode, reply } => {
+            let result = if editor.mode() != Mode::AiChat {
+                Err(anyhow::anyhow!("AI chat is not active"))
+            } else if editor.set_ai_chat_permission_mode(&mode) {
+                if let Some(chat) = editor.ai_state.chat.as_mut() {
+                    chat.focus = ovim_core::ai::chat_types::ChatFocus::TextInput;
+                }
+                refresh_after_input(editor);
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!(editor.status_message().to_string()))
             };
             (reply, result)
         }
@@ -3128,6 +3153,8 @@ fn ai_chat(editor: &Editor) -> Option<GuiAiChat> {
                 .iter()
                 .map(|effort| (*effort).to_string())
                 .collect(),
+            permission_mode: editor.ai_chat_permission_mode().map(str::to_owned),
+            permission_modes: editor.ai_chat_permission_modes().to_vec(),
             yolo_mode: editor.ai_chat_yolo_mode(),
             comprehension_policy: editor.ai_chat_comprehension_policy().as_str().to_string(),
             comprehension_checkpoint: editor

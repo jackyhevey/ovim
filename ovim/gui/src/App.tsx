@@ -861,6 +861,7 @@ export const ChatPanel = (props: {
     onRemoveImage?: (index: number) => void;
     onProfile?: (profile: string, model?: string) => void;
     onReasoningEffort?: (effort: string) => void;
+    onPermissionMode?: (mode: string) => void;
     onApproval?: (allow: boolean) => void;
     onYolo?: () => void;
     onComprehension?: () => void;
@@ -959,6 +960,9 @@ export const ChatPanel = (props: {
                         }
                         onProfile={props.onProfile}
                         onReasoningEffort={props.onReasoningEffort}
+                        permissionMode={props.chat.permissionMode}
+                        permissionModes={props.chat.permissionModes ?? []}
+                        onPermissionMode={props.onPermissionMode}
                         focusInput={props.focusInput}
                     />
                 </div>
@@ -2488,6 +2492,9 @@ function App() {
                     onReasoningEffort={(effort) =>
                         void mutate("gui_select_reasoning_effort", { effort })
                     }
+                    onPermissionMode={(mode) =>
+                        void mutate("gui_select_permission_mode", { mode })
+                    }
                     onApproval={(allow) =>
                         void mutate("gui_ai_policy", {
                             action: allow ? "approve-tool" : "deny-tool",
@@ -3121,11 +3128,22 @@ function App() {
             // Measure DOM text in the same font/shaping context as the code.
             // WebKit's DOM advances can differ from canvas at fractional sizes.
             const probe = document.createElement("span");
-            probe.textContent = "M".repeat(100);
             probe.style.cssText =
                 "position:absolute;visibility:hidden;pointer-events:none;white-space:pre";
+            // Reconsider the configured font after every font-load event.
+            // Some WebKit/fontconfig combinations substitute a proportional
+            // font for an unavailable named family before reaching monospace.
+            viewport.style.removeProperty("font-family");
             viewport.append(probe);
-            const width = probe.getBoundingClientRect().width / 100;
+            const advance = (character: string) => {
+                probe.textContent = character.repeat(100);
+                return probe.getBoundingClientRect().width / 100;
+            };
+            let width = advance("M");
+            if (Math.abs(width - advance("i")) > 0.01) {
+                viewport.style.fontFamily = "monospace";
+                width = advance("M");
+            }
             probe.remove();
             setCellWidth(width || FALLBACK_CELL_WIDTH);
             syncDimensions();
