@@ -64,12 +64,15 @@ export interface GuiPane {
 }
 
 export interface GuiAiProfileOption {
+    label?: string;
     id: string;
     provider: string;
     model: string;
 }
 
 export interface GuiAiChat {
+    externalAgent?: boolean;
+    externalQuestion?: boolean;
     profile: string;
     pendingCodeAttachment?: {
         bufferId: number;

@@ -402,6 +402,87 @@ Use `vim.ai.setup(...)` in Lua to customize these defaults.
 
 `ai.toml` still works, but it is legacy compatibility.
 
+## Claude Agent
+
+Select **Claude Agent** (the built-in `claude_code` profile) from the model picker, or enter
+`/model claude_code`. Both GUI Ovim and terminal Ovim keep their normal chat
+interface. The official Claude Agent SDK runs your installed, unmodified
+Claude Code executable. Claude owns its tools, permissions, settings, skills,
+context management, and authentication.
+
+Install Node.js 18.18 or newer and Claude Code on your PATH, then sign in using
+Claude's own terminal flow:
+
+```sh
+claude auth login
+```
+
+Ovim includes a pinned, unmodified SDK module. It does not install npm packages
+on startup, read Claude credential files, or implement its own Claude login.
+Your usual Claude environment and user/project settings apply. Account or
+organization restrictions reported by Claude also apply in Ovim.
+
+Codex remains the shipped default. Choosing a profile changes the default for
+new chats and queries in the current Ovim session. To start with Claude Code
+after restarting, put this in your `init.lua`:
+
+```lua
+vim.ai.default_profile = "claude_code"
+```
+
+The built-in profile uses Claude Code's configured model. To choose one explicitly:
+
+```lua
+vim.ai.setup({
+  default_profile = "claude_code",
+  profiles = {
+    claude_code = { provider = "claude_code", model = "sonnet" },
+  },
+})
+```
+
+Permission prompts offer **Allow once** and **Deny** in the GUI; terminal users
+press Enter or Escape. Claude's questions appear in the conversation: type an
+answer, an option number, or comma-separated numbers for a multiple-selection
+question. Escape stops the active turn. Closing the panel keeps it running;
+closing Ovim stops its runtime process tree.
+
+Read-only queries expose Claude's Read, Glob, and Grep tools plus Ovim's
+context and navigation MCP tools. Other configured MCP servers are excluded. Editable chats use Claude's normal permission rules. Ovim's YOLO,
+Terra approval classifier, comprehension gates, and delegated-agent tools do
+not govern Claude tools. They are not exposed as Claude controls. `/compact`
+goes to Claude Code once a native session exists. Ovim appends brief editor
+integration guidance to Claude's standard prompt. Use Claude's settings for
+further customization, rather than Ovim inference-profile prompt or tool overrides.
+
+Ovim supplies the current editor snapshot and attached context as user input.
+The private MCP connection also exposes three tools:
+
+- `workspace_context` refreshes the active/open files, cursor, selection,
+  diagnostics and bounded editor snapshot, including unsaved visible content.
+- `open_file` shows an existing file in the current workspace, optionally at a
+  line/column, preserving unsaved buffers. File creation and paths escaping the
+  workspace (including symlink escapes) are rejected.
+- `explain_with_codebase` presents the normal interactive concept/code
+  walkthrough. Claude waits until you finish, dismiss it, or ask a question.
+  Questions return to the running Claude turn. Completed walkthroughs support replay.
+
+The connection is bound to the originating editor turn and cannot discover or
+control other Ovim sessions. It closes when that turn ends. Claude's normal
+permission flow applies; the server also enforces its limited tool and path scope.
+
+Claude edits files on disk; Ovim's usual external-change handling reconciles
+open buffers and preserves unsaved edits. Native sessions resume only when the
+branch, configuration, and visible conversation match the saved checkpoint.
+After interrupted work, a branch change, or a provider switch, Ovim can start a
+new native session using the visible conversation as context. `/clear` starts
+a fresh conversation. Profile and effort changes wait until the current turn
+has finished or been stopped.
+
+For current subscription conditions, see Anthropic's
+[Agent SDK usage guidance](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+and [authentication rules](https://code.claude.com/docs/en/legal-and-compliance#authentication-and-credential-use).
+
 ## Codex configuration
 
 ```lua

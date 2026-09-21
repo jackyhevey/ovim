@@ -23,6 +23,7 @@ mod ai_codex_auth;
 mod ai_compaction;
 mod ai_comprehension;
 mod ai_durable_chat;
+mod ai_external_agent;
 pub(crate) mod ai_integration;
 mod ai_run_events;
 mod ai_session_temp;
@@ -2958,3 +2959,5 @@ mod incremental_wrap_tests {
         assert_eq!(editor.scroll_subrow(), 1);
     }
 }
+
+mod ai_editor_mcp;

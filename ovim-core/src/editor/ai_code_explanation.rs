@@ -575,6 +575,12 @@ impl Editor {
         ));
 
         match continuation {
+            Some(continuation @ CodeExplanationContinuation::EditorMcp { .. }) => {
+                // The question travels in the MCP result to the running Claude
+                // turn. Queueing another turn as well would ask it twice.
+                self.clear_ai_chat_input();
+                self.resolve_code_explanation_continuation(&tool_call, continuation, outcome);
+            }
             Some(CodeExplanationContinuation::Replay) | None => {
                 if let Some(chat) = self.ai_state.chat.as_mut() {
                     chat.input = prompt;
@@ -790,6 +796,20 @@ impl Editor {
         result: ToolResult,
     ) {
         match continuation {
+            CodeExplanationContinuation::EditorMcp {
+                request_id,
+                rpc_id,
+                response,
+            } => {
+                let _ = response.send(super::ai_editor_mcp::walkthrough_reply(
+                    rpc_id,
+                    &request_id,
+                    result,
+                ));
+                if let Some(chat) = self.ai_state.chat.as_mut() {
+                    chat.waiting = true;
+                }
+            }
             CodeExplanationContinuation::Dynamic {
                 runtime_tool,
                 runtime_turn,
@@ -850,8 +870,16 @@ impl Editor {
             )));
         }
 
+        // Provider-owned turns already bind a canonical workspace, including
+        // ordinary folders without Git metadata. Keep walkthrough navigation
+        // on that same authority even if the visible file changes.
         let root = self
-            .ai_effective_project_root()
+            .ai_state
+            .chat
+            .as_ref()
+            .and_then(|chat| chat.external_agent.as_ref())
+            .map(|state| state.root.clone())
+            .or_else(|| self.ai_effective_project_root())
             .map(|root| root.canonicalize().unwrap_or(root));
         let safe_range = self.ai_code_explanation_safe_range_lines();
         let presentation_width = self.ai_code_explanation_presentation_width();
@@ -1722,9 +1750,9 @@ mod tests {
             chat.pending_job = Some(super::super::ai_chat_state::PendingAiChatJob {
                 receiver: rx,
                 task,
-                profile_name: previous.profile_name,
-                model_name: previous.model_name,
-                turn: previous.turn,
+                profile_name: previous.profile_name.clone(),
+                model_name: previous.model_name.clone(),
+                turn: previous.turn.clone(),
                 branch_generation: previous.branch_generation,
                 steer_tx: None,
             });
