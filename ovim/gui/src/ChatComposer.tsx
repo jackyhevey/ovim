@@ -69,8 +69,31 @@ export default function ChatComposer(props: {
 
     const resize = () => {
         if (!input) return;
-        input.style.height = "auto";
-        input.style.height = `${Math.min(input.scrollHeight, 220)}px`;
+        // Measuring the live input at its default height temporarily expands the
+        // transcript. WebKit clamps its scrollTop during that layout, moving the
+        // conversation on every keystroke even when the final height is unchanged.
+        const probe = input.cloneNode(false) as HTMLTextAreaElement;
+        probe.removeAttribute("id");
+        probe.removeAttribute("aria-label");
+        probe.tabIndex = -1;
+        probe.setAttribute("aria-hidden", "true");
+        probe.value = input.value;
+        Object.assign(probe.style, {
+            position: "absolute",
+            visibility: "hidden",
+            pointerEvents: "none",
+            width: `${input.getBoundingClientRect().width}px`,
+            height: "0",
+            minHeight: "0",
+            maxHeight: "none",
+            overflow: "hidden",
+            top: "0",
+            left: "0",
+        });
+        input.parentElement!.append(probe);
+        const height = Math.min(probe.scrollHeight, 220);
+        probe.remove();
+        input.style.height = `${height}px`;
     };
 
     const applyRemote = () => {
