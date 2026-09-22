@@ -2194,7 +2194,7 @@ fn project_lines(
 ) -> Vec<GuiLine> {
     let attached_selection = editor
         .ai_chat_pending_code_attachment()
-        .filter(|attachment| attachment.buffer_id == buffer.id())
+        .filter(|attachment| editor.mode() == Mode::AiChat && attachment.buffer_id == buffer.id())
         .map(|attachment| {
             (
                 (attachment.start_line, 0),
@@ -3932,6 +3932,28 @@ mod tests {
         let projected = view.ai_chat.unwrap().pending_code_attachment.unwrap();
         assert_eq!(projected.label, "src/main.rs:5–6");
         assert!(view.lines[4..=5]
+            .iter()
+            .flat_map(|line| &line.segments)
+            .all(|segment| segment.selected));
+
+        editor.close_ai_chat();
+        let closed = snapshot(&editor, 2);
+        assert_eq!(editor.mode(), Mode::Normal);
+        assert!(closed
+            .lines
+            .iter()
+            .flat_map(|line| &line.segments)
+            .all(|segment| !segment.selected));
+        assert!(editor.ai_chat_pending_code_attachment().is_some());
+
+        editor
+            .open_ai_chat(ovim_core::ai::ChatOpts {
+                name: "chat".into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let reopened = snapshot(&editor, 3);
+        assert!(reopened.lines[4..=5]
             .iter()
             .flat_map(|line| &line.segments)
             .all(|segment| segment.selected));

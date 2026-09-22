@@ -40,7 +40,7 @@ impl Editor {
                     chat.follow_chat_default = false;
                 }
             }
-            let mode_before = self.mode();
+            let mode_before = self.ai_chat_return_mode();
             if let Some(chat) = self.ai_state.chat.as_mut() {
                 chat.mode_before_chat = mode_before;
             }
@@ -51,13 +51,14 @@ impl Editor {
             return Ok(());
         }
 
+        let mode_before = self.ai_chat_return_mode();
+
         // Switching to another named conversation replaces the live panel.
         // Its projected message history remains stored under its own key.
         if self.ai_state.chat.is_some() {
             self.discard_active_ai_chat("chat replaced");
         }
         let buffer_id = self.buffer().id();
-        let mode_before = self.mode();
 
         if let Err(error) = self.prepare_durable_ai_chat(buffer_id, &opts.name) {
             self.set_status_message(format!(
@@ -142,6 +143,24 @@ impl Editor {
 
         self.mark_dirty();
         Ok(())
+    }
+
+    /// Chat consumes visual selections; its return mode must not resurrect a
+    /// visual mode whose anchor `set_mode` clears. Keep the selection for `gv`.
+    /// Reopening or replacing a visible chat retains its original return mode.
+    fn ai_chat_return_mode(&mut self) -> Mode {
+        match self.mode() {
+            Mode::Visual | Mode::VisualLine | Mode::VisualBlock => {
+                self.save_last_visual_selection();
+                Mode::Normal
+            }
+            Mode::AiChat => self
+                .ai_state
+                .chat
+                .as_ref()
+                .map_or(Mode::Normal, |chat| chat.mode_before_chat),
+            mode => mode,
+        }
     }
 
     /// Hide the AI chat panel without clearing or interrupting it.
