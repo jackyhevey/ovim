@@ -194,13 +194,13 @@ broken into smaller steps, but required mastery is not relaxed. Questions focus
 on behavior, invariants, realistic failure modes, and verification rather than
 line-number or syntax trivia.
 
-When the panel is wide enough, the selected model profile, reasoning effort,
+When the panel is wide enough, the selected provider, model, reasoning effort,
 and any provider permission mode appear immediately to the left of
-`COMPREHENSION`. Click a control to open the combined run-settings picker.
-Up/Down changes the active value, Tab switches sections, and Enter closes the
-picker. An effort selected here
-overrides the profile for this chat only; `default` returns to the profile's
-configured effort.
+`COMPREHENSION`. Click the control to open the run-settings picker. Provider,
+model, effort, and permissions use separate controls; the model choices are
+limited to the selected provider. An effort selected here overrides the
+profile for this chat only; `default` returns to the profile's configured
+effort.
 
 After the user demonstrates the critical concepts, Ovim binds a checkpoint to
 the repository's current index and worktree content. Meaningful subsequent

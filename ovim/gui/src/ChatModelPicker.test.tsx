@@ -6,31 +6,49 @@ import ChatModelPicker from "./ChatModelPicker";
 
 afterEach(cleanup);
 
-it("selects a Claude model independently of its profile and displays the returned selection", async () => {
+const profiles = [
+    {
+        id: "codex_sol",
+        label: "Sol",
+        provider: "codex",
+        model: "gpt-5.6-sol",
+    },
+    {
+        id: "codex_terra",
+        label: "Terra",
+        provider: "codex",
+        model: "gpt-5.6-terra",
+    },
+    ...[
+        "default",
+        "claude-sonnet-5",
+        "claude-opus-5",
+        "claude-haiku-4-5-20251001",
+    ].map((model) => ({
+        id: "claude_code",
+        label: "Claude Agent",
+        provider: "claude_code",
+        model,
+    })),
+];
+
+it("selects provider, model, effort, and permissions through separate controls", async () => {
     const onProfile = vi.fn();
+    const onReasoningEffort = vi.fn();
     const onPermissionMode = vi.fn();
     const focusInput = vi.fn();
+    const [profile, setProfile] = createSignal("claude_code");
     const [model, setModel] = createSignal("default");
+
     render(() => (
         <ChatModelPicker
-            profile="claude_code"
+            profile={profile()}
             model={model()}
-            profiles={[
-                "default",
-                "claude-sonnet-5",
-                "claude-opus-5",
-                "claude-fable-5-1",
-                "claude-haiku-4-5-20251001",
-                "claude-custom-version[1m]",
-            ].map((model) => ({
-                id: "claude_code",
-                label: "Claude Agent",
-                provider: "claude_code",
-                model,
-            }))}
-            reasoningEffort="default"
+            profiles={profiles}
+            reasoningEffort="high"
             reasoningEffortSelection="default"
-            reasoningEfforts={["default", "high"]}
+            reasoningEffortDefault="high"
+            reasoningEfforts={["default", "low", "high"]}
             permissionMode="auto"
             permissionModes={[
                 {
@@ -44,47 +62,69 @@ it("selects a Claude model independently of its profile and displays the returne
                     description: "Deny calls that require approval",
                 },
             ]}
-            onProfile={(profile, selectedModel) => {
-                onProfile(profile, selectedModel);
-                setModel(selectedModel!);
+            onProfile={(nextProfile, nextModel) => {
+                onProfile(nextProfile, nextModel);
+                setProfile(nextProfile);
+                setModel(nextModel!);
             }}
+            onReasoningEffort={onReasoningEffort}
             onPermissionMode={onPermissionMode}
             focusInput={focusInput}
         />
     ));
+
     fireEvent.click(
-        screen.getByRole("button", {
-            name: /Claude Agent.*claude_code\/default/,
-        }),
-    );
-    expect(screen.getAllByRole("option", { selected: true })).toHaveLength(1);
-    fireEvent.click(screen.getByRole("option", { name: /claude-fable-5-1/ }));
-    expect(onProfile).toHaveBeenCalledWith("claude_code", "claude-fable-5-1");
-    await Promise.resolve();
-    expect(focusInput).toHaveBeenCalledOnce();
-    fireEvent.click(
-        screen.getByRole("button", {
-            name: /Claude Agent.*claude_code\/claude-fable-5-1/,
-        }),
+        screen.getByTitle("Configure AI provider, model, and run settings"),
     );
     expect(
-        screen.getByRole("option", { selected: true }).textContent,
-    ).toContain("claude-fable-5-1");
-    fireEvent.input(screen.getByLabelText("Model profile"), {
-        target: { value: "custom-version" },
+        (screen.getByLabelText("AI provider") as HTMLSelectElement).value,
+    ).toBe("claude_code");
+    expect((screen.getByLabelText("AI model") as HTMLSelectElement).value).toBe(
+        JSON.stringify(["claude_code", "default"]),
+    );
+
+    fireEvent.change(screen.getByLabelText("AI provider"), {
+        target: { value: "codex" },
     });
-    fireEvent.click(
-        screen.getByRole("option", { name: /claude-custom-version/ }),
+    expect(onProfile).toHaveBeenCalledWith("codex_sol", "gpt-5.6-sol");
+    expect((screen.getByLabelText("AI model") as HTMLSelectElement).value).toBe(
+        JSON.stringify(["codex_sol", "gpt-5.6-sol"]),
     );
-    expect(onProfile).toHaveBeenLastCalledWith(
-        "claude_code",
-        "claude-custom-version[1m]",
-    );
-    fireEvent.click(
-        screen.getByRole("button", {
-            name: /Claude Agent.*claude_code\/claude-custom-version/,
-        }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: /Don't ask/ }));
+
+    fireEvent.change(screen.getByLabelText("AI model"), {
+        target: { value: JSON.stringify(["codex_terra", "gpt-5.6-terra"]) },
+    });
+    expect(onProfile).toHaveBeenLastCalledWith("codex_terra", "gpt-5.6-terra");
+    fireEvent.change(screen.getByLabelText("Reasoning effort"), {
+        target: { value: "low" },
+    });
+    expect(onReasoningEffort).toHaveBeenCalledWith("low");
+    fireEvent.change(screen.getByLabelText("Permission mode"), {
+        target: { value: "dontAsk" },
+    });
     expect(onPermissionMode).toHaveBeenCalledWith("dontAsk");
+
+    fireEvent.click(screen.getByRole("button", { name: "Done" }));
+    await Promise.resolve();
+    expect(focusInput).toHaveBeenCalledOnce();
+});
+
+it("omits effort and permissions when the selected model does not support them", () => {
+    render(() => (
+        <ChatModelPicker
+            profile="claude_code"
+            model="claude-haiku-4-5-20251001"
+            profiles={profiles}
+            reasoningEffort="default"
+            reasoningEffortSelection="default"
+            reasoningEfforts={["default"]}
+            permissionModes={[]}
+            focusInput={() => {}}
+        />
+    ));
+    fireEvent.click(
+        screen.getByTitle("Configure AI provider, model, and run settings"),
+    );
+    expect(screen.queryByLabelText("Reasoning effort")).toBeNull();
+    expect(screen.queryByLabelText("Permission mode")).toBeNull();
 });

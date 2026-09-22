@@ -67,23 +67,18 @@ export const invoke = async (command, args) => {
                 }),
         );
         await page.goto("/");
-        const trigger = page.getByRole("button", {
-            name: /Claude Agent.*claude_code\/opus/,
-        });
+        const trigger = page.getByTitle(
+            "Configure AI provider, model, and run settings",
+        );
         await trigger.click();
         const dialog = page.getByRole("dialog", { name: "AI run settings" });
         const bounds = await dialog.boundingBox();
         expect(bounds).not.toBeNull();
         expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height);
-        const permissions = page.getByRole("group", {
-            name: "Permissions",
-            exact: true,
-        });
+        const permissions = page.getByLabel("Permission mode");
         await expect(permissions).toBeVisible();
-        await expect(permissions.getByRole("button")).toHaveCount(6);
-        await expect(
-            permissions.getByRole("button", { name: /^Auto / }),
-        ).toHaveAttribute("aria-pressed", "true");
+        await expect(permissions.getByRole("option")).toHaveCount(6);
+        await expect(permissions).toHaveValue("auto");
         for (const name of [
             "Auto",
             "Manual",
@@ -92,20 +87,19 @@ export const invoke = async (command, args) => {
             "Don't ask",
             "Bypass permissions",
         ]) {
-            const option = permissions.getByRole("button", {
-                name: new RegExp(`^${name} `),
+            const option = permissions.getByRole("option", {
+                name,
             });
-            await option.focus();
-            await expect(option).toBeInViewport();
+            await expect(option).toBeAttached();
         }
-        await permissions.getByRole("button", { name: /^Auto / }).focus();
+        await permissions.focus();
         await page.screenshot({
             path: testInfo.outputPath("permissions-auto.png"),
             fullPage: true,
         });
 
-        await permissions.getByRole("button", { name: /^Plan / }).focus();
-        await page.keyboard.press("Enter");
+        await permissions.selectOption("plan");
+        await page.getByRole("button", { name: "Done" }).click();
         await expect(
             page.getByRole("dialog", { name: "AI run settings" }),
         ).toHaveCount(0);
@@ -125,12 +119,8 @@ export const invoke = async (command, args) => {
             )
             .toBe("plan");
         await trigger.click();
-        await expect(
-            permissions.getByRole("button", { name: /^Plan / }),
-        ).toHaveAttribute("aria-pressed", "true");
-        await permissions
-            .getByRole("button", { name: /^Bypass permissions / })
-            .click();
+        await expect(permissions).toHaveValue("plan");
+        await permissions.selectOption("bypassPermissions");
         await expect
             .poll(() =>
                 page.evaluate(
@@ -145,23 +135,12 @@ export const invoke = async (command, args) => {
                 ),
             )
             .toBe("bypassPermissions");
-        await trigger.click();
-        await expect(
-            permissions.getByRole("button", {
-                name: /^Bypass permissions /,
-            }),
-        ).toHaveAttribute("aria-pressed", "true");
-        await expect(
-            permissions.getByRole("button", { name: /^Bypass permissions / }),
-        ).toBeInViewport();
+        await expect(permissions).toHaveValue("bypassPermissions");
         await page.screenshot({
             path: testInfo.outputPath("permissions-bypass.png"),
             fullPage: true,
         });
-        await page.getByRole("option", { name: /Codex/ }).click();
-        await page
-            .getByRole("button", { name: /Codex.*codex\/gpt-5.6-sol/ })
-            .click();
+        await page.getByLabel("AI provider").selectOption("codex");
         await expect(permissions).toHaveCount(0);
     });
 }

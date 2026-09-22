@@ -915,27 +915,26 @@ describe("Ovim Solid workbench", () => {
             name: /codex.*default.*medium/i,
         });
         fireEvent.click(trigger);
-        const search = screen.getByLabelText("Model profile");
-        const focus = vi.mocked(HTMLElement.prototype.focus);
-        focus.mockClear();
-        fireEvent.keyDown(search, { key: "ArrowDown" });
-        await Promise.resolve();
-        expect(focus.mock.instances).toContain(
-            screen.getByRole("option", { name: /codex.*gpt-test/i }),
-        );
-        fireEvent.input(search, { target: { value: "qwen" } });
-        expect(screen.queryByRole("option", { name: /codex/i })).toBeNull();
-        fireEvent.click(
-            screen.getByRole("option", { name: /local.*ollama.*qwen-test/i }),
-        );
-        await Promise.resolve();
+        expect(
+            (screen.getByLabelText("AI provider") as HTMLSelectElement).value,
+        ).toBe("codex");
+        expect(
+            (screen.getByLabelText("AI model") as HTMLSelectElement).value,
+        ).toBe(JSON.stringify(["codex", "gpt-test"]));
+        fireEvent.change(screen.getByLabelText("AI provider"), {
+            target: { value: "ollama" },
+        });
         expect(onProfile).toHaveBeenCalledWith("local", "qwen-test");
-        expect(focusInput).toHaveBeenCalledOnce();
-
-        fireEvent.click(trigger);
-        fireEvent.click(screen.getByRole("button", { name: "high" }));
-        await Promise.resolve();
+        expect(
+            (screen.getByLabelText("AI model") as HTMLSelectElement).value,
+        ).toBe(JSON.stringify(["local", "qwen-test"]));
+        fireEvent.change(screen.getByLabelText("Reasoning effort"), {
+            target: { value: "high" },
+        });
         expect(onReasoningEffort).toHaveBeenCalledWith("high");
+        fireEvent.click(screen.getByRole("button", { name: "Done" }));
+        await Promise.resolve();
+        expect(focusInput).toHaveBeenCalledOnce();
         fireEvent.click(screen.getByRole("button", { name: "YOLO OFF" }));
         fireEvent.click(
             screen.getByRole("button", { name: "COMPREHENSION OFF" }),
