@@ -491,6 +491,47 @@ async fn split_rows_align_after_expanding_tabs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn split_separator_tracks_the_rendered_viewport_center() {
+    let fixture = RustFixture::new();
+    let mut test = fixture.open();
+    test.editor.options.textwidth = None;
+    test.keys(" gds");
+
+    let render_at = |test: &mut EditorTest, columns| {
+        ovim::ui::render_editor_to_ansi(&mut test.editor, columns, 40).unwrap();
+        assert!(
+            test.editor.relayout_diff_review(),
+            "split review did not relayout at {columns} columns; cached area: {:?}, text width: {}",
+            test.editor.render_cache.last_buffer_area,
+            test.editor.render_cache.last_text_width,
+        );
+    };
+    render_at(&mut test, 180);
+
+    let separator = |test: &EditorTest| {
+        let row = line_containing(test, "let x = 1;");
+        test.editor
+            .buffer()
+            .line_text(row)
+            .unwrap()
+            .chars()
+            .position(|character| character == '│')
+            .unwrap()
+    };
+    let first = separator(&test);
+    let first_center = (test.editor.render_cache.last_text_width - 1) / 2;
+    assert!(first.abs_diff(first_center) <= 1, "separator at {first}");
+
+    render_at(&mut test, 240);
+    let resized = separator(&test);
+    let resized_center = (test.editor.render_cache.last_text_width - 1) / 2;
+    assert!(
+        resized.abs_diff(resized_center) <= 1,
+        "separator at {resized}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn enter_in_the_split_layout_opens_the_column_under_the_cursor() {
     let fixture = RustFixture::new();
     let mut test = fixture.open();

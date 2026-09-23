@@ -17,7 +17,7 @@ use crate::cli::FileArg;
 use crate::color::Color;
 use crate::editor::{Editor, EditorServices, InputHandler};
 use crate::frontend::{
-    handle_viewport_resize, process_editor_tick, process_external_file_change,
+    compute_text_width, handle_viewport_resize, process_editor_tick, process_external_file_change,
     process_picker_results, refresh_after_input, FrontendChannels,
 };
 use crate::git::LineStatus;
@@ -1277,6 +1277,31 @@ async fn open_startup_file(editor: &mut Editor, file: Option<FileArg>) {
     }
 }
 
+/// The GUI does not run the terminal renderer, which normally records the
+/// buffer width used by the shared diff review layout. Keep that width in
+/// sync with the focused GUI pane so split reviews reach its actual center.
+fn update_diff_review_geometry(editor: &mut Editor) {
+    let Some(window) = editor
+        .window_manager()
+        .and_then(|manager| manager.focused_window())
+    else {
+        return;
+    };
+    let width = window.width();
+    let text_width = compute_text_width(editor, width);
+    editor.set_last_layout(
+        ovim_core::Rect {
+            width,
+            height: window.height(),
+            ..Default::default()
+        },
+        width as usize - text_width,
+        text_width,
+        0,
+    );
+    editor.relayout_diff_review();
+}
+
 async fn run_editor(
     file: Option<FileArg>,
     resume: bool,
@@ -1307,6 +1332,7 @@ async fn run_editor(
     let mut projection_cache = GuiProjectionCache::default();
 
     handle_viewport_resize(&mut editor, dimensions.0, dimensions.1);
+    update_diff_review_geometry(&mut editor);
     let mut last_snapshot = snapshot_with_cache(&editor, revision, &mut projection_cache);
     let mut last_render_version = editor.render_input_version();
     updates.send_replace(Some(last_snapshot.clone()));
@@ -1322,6 +1348,7 @@ async fn run_editor(
                     process_external_file_change(&mut editor);
                     last_external_check = Instant::now();
                 }
+                update_diff_review_geometry(&mut editor);
                 publish_if_changed(
                     &editor,
                     &mut revision,
@@ -1348,6 +1375,7 @@ async fn run_editor(
                 if rejected_terminal || rejected_shell {
                     editor.set_status_message("External shell sessions require the TUI frontend".to_string());
                 }
+                update_diff_review_geometry(&mut editor);
                 publish_if_changed(
                     &editor,
                     &mut revision,
@@ -1511,6 +1539,7 @@ async fn handle_request(
                 *dimensions = next;
                 handle_viewport_resize(editor, next.0, next.1);
             }
+            update_diff_review_geometry(editor);
             let _ = reply.send(Ok(snapshot_with_cache(editor, *revision, projection_cache)));
             return;
         }
@@ -1789,7 +1818,9 @@ async fn handle_request(
                 refresh_after_input(editor);
                 Ok(())
             } else {
-                Err(anyhow::anyhow!("Could not select AI profile/model; stop any active turn and check the selection"))
+                Err(anyhow::anyhow!(
+                    "Could not select AI profile/model; stop any active turn and check the selection"
+                ))
             };
             (reply, result)
         }
@@ -3675,6 +3706,24 @@ fn indexed_rgb(index: u8) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gui_diff_geometry_tracks_the_focused_pane_width() {
+        let mut editor = Editor::default();
+        for columns in [210, 90] {
+            handle_viewport_resize(&mut editor, columns, 40);
+            update_diff_review_geometry(&mut editor);
+            let pane = editor.window_manager().unwrap().focused_window().unwrap();
+            assert_eq!(
+                editor.render_cache.last_buffer_area.unwrap().width,
+                pane.width()
+            );
+            assert_eq!(
+                editor.render_cache.last_text_width,
+                compute_text_width(&editor, pane.width())
+            );
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn file_tree_projects_all_loaded_rows_and_repeated_reveals() {
