@@ -532,6 +532,33 @@ async fn split_separator_tracks_the_rendered_viewport_center() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn split_review_uses_its_source_numbers_instead_of_an_outer_gutter() {
+    let fixture = RustFixture::new();
+    let mut test = fixture.open();
+    test.editor.options.number = true;
+    test.editor.options.textwidth = None;
+    test.keys(" gds");
+
+    ovim::ui::render_editor_to_ansi(&mut test.editor, 120, 30).unwrap();
+    assert_eq!(test.editor.render_cache.last_gutter_width, 0);
+    assert_eq!(
+        test.editor.render_cache.last_text_width,
+        test.editor.render_cache.last_buffer_area.unwrap().width as usize,
+        "the text occupies the buffer area after the diff scrollbar",
+    );
+    let changed = line_containing(&test, "let x = 1;");
+    let row = test.editor.buffer().line_text(changed).unwrap();
+    assert!(row.contains('│'), "source line numbers remain in the split row");
+
+    test.keys("s");
+    ovim::ui::render_editor_to_ansi(&mut test.editor, 120, 30).unwrap();
+    assert!(
+        test.editor.render_cache.last_gutter_width > 0,
+        "unified review keeps ordinary buffer line numbers"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn enter_in_the_split_layout_opens_the_column_under_the_cursor() {
     let fixture = RustFixture::new();
     let mut test = fixture.open();

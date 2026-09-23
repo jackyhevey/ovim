@@ -431,15 +431,14 @@ impl Editor {
             return false;
         };
         let (area_width, width) = self.diff_review_widths();
-        // Re-flow on a real resize, and once more if the review's own line
-        // number gutter turned out wider than the buffer it replaced. Only
-        // shrinking is allowed without a resize, so the two cannot chase each
-        // other.
+        // Re-flow when the pane or its text width changes. Split reviews have
+        // no outer gutter, so opening one can widen the text area even when
+        // the pane itself did not change size.
         let visible = index == self.current_buffer_index;
         let stale = self.ui_panels.diff_review.as_ref().is_some_and(|state| {
             state.layout == DiffLayout::Split
                 && (state.layout_area_width != area_width
-                    || (visible && width < state.layout_width))
+                    || (visible && width != state.layout_width))
         });
         if !stale {
             return false;

@@ -1,3 +1,4 @@
+use crate::editor::DiffLayout;
 use crate::editor::Editor;
 use ratatui::layout::Rect;
 
@@ -58,7 +59,12 @@ impl BufferLayout {
             area.width -= 1;
             render_area.width = area.right().saturating_sub(render_area.x);
         }
-        let show_numbers = editor.options.number || editor.options.relative_number;
+        let split_review = editor.is_diff_review_buffer()
+            && editor
+                .diff_review()
+                .is_some_and(|review| review.layout == DiffLayout::Split);
+        let show_numbers =
+            !split_review && (editor.options.number || editor.options.relative_number);
         let line_count = editor.buffer().line_count();
         let line_num_width = if show_numbers {
             line_count.to_string().len().max(3)
@@ -67,7 +73,7 @@ impl BufferLayout {
         };
 
         // Blame column width: bracket(1) + space(1) + hash(5) + space(1) + author(truncated) + space(1)
-        let blame_width = if editor.options.blame {
+        let blame_width = if editor.options.blame && !split_review {
             if let Some(blame) = editor.buffer().git_blame() {
                 // 1 bracket + 1 space + 5 hash + 1 space + author + 1 trailing space
                 let author_len = blame.max_author_len().min(15);
@@ -80,7 +86,11 @@ impl BufferLayout {
         };
 
         // Sign column is always present (git signs, diagnostics).
-        let gutter_width = blame_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING;
+        let gutter_width = if split_review {
+            0
+        } else {
+            blame_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING
+        };
         let text_width = (area.width as usize).saturating_sub(gutter_width);
 
         Self {

@@ -1,4 +1,4 @@
-use crate::editor::Editor;
+use crate::editor::{DiffLayout, Editor};
 
 /// Recomputes viewport geometry from raw grid cells: `width`/`height` are the
 /// full window in character cells (not the content area — this function
@@ -88,7 +88,11 @@ pub fn compute_text_width(editor: &Editor, content_width: u16) -> usize {
     const SIGN_WIDTH: usize = 2;
     const GUTTER_SPACING: usize = 1;
 
-    let show_numbers = editor.options.number || editor.options.relative_number;
+    let split_review = editor.is_diff_review_buffer()
+        && editor
+            .diff_review()
+            .is_some_and(|review| review.layout == DiffLayout::Split);
+    let show_numbers = !split_review && (editor.options.number || editor.options.relative_number);
     let line_count = editor.buffer().line_count();
     let line_num_width = if show_numbers {
         line_count.to_string().len().max(3)
@@ -96,7 +100,7 @@ pub fn compute_text_width(editor: &Editor, content_width: u16) -> usize {
         0
     };
 
-    let blame_width = if editor.options.blame {
+    let blame_width = if editor.options.blame && !split_review {
         if let Some(blame) = editor.buffer().git_blame() {
             let author_len = blame.max_author_len().min(15);
             1 + 1 + 5 + 1 + author_len.max(3) + 1
@@ -107,7 +111,11 @@ pub fn compute_text_width(editor: &Editor, content_width: u16) -> usize {
         0
     };
 
-    let gutter_width = blame_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING;
+    let gutter_width = if split_review {
+        0
+    } else {
+        blame_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING
+    };
 
     // Apply textwidth narrowing (OV-00019: must match renderer's BufferLayout
     // which narrows buffer_area to textwidth before computing text_width).
