@@ -52,6 +52,7 @@ tar = "0.4"
 zip = "2"
 tauri = { version = "2", optional = true, features = ["unstable"] }
 portable-pty = { version = "0.9", optional = true }
+rfd = { version = "0.17.2", optional = true, default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process"] }
@@ -63,7 +64,7 @@ sysinfo = "0.32"
 [features]
 default = ["lua", "gui"]
 lua = ["mlua", "ovim-core/lua"]
-gui = ["dep:tauri", "dep:portable-pty"]
+gui = ["dep:tauri", "dep:portable-pty", "dep:rfd"]
 key-debug = []
 metrics = ["prometheus", "ovim-core/metrics"]
 # Statically link OpenSSL for portable release binaries

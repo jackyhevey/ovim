@@ -441,6 +441,18 @@
     box-shadow: 0 2px 10px color-mix(in srgb, var(--canvas) 65%, transparent);
 }
 
+.flow-export-status {
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-secondary);
+    font: 11px var(--ui-font);
+    overflow-wrap: anywhere;
+}
+
+.flow-export-status[role="alert"] {
+    color: var(--error);
+}
+
 .flow-move-heading {
     display: flex;
     align-items: baseline;

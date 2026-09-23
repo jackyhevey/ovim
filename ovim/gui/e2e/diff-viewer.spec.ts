@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { unzipSync } from "fflate";
 import { expect, test, type Page } from "@playwright/test";
 import type { GuiDiffDocument, GuiDiffLine } from "../src/types";
 
@@ -736,4 +738,70 @@ test("native diff controls carry the pane and buffer identity", async ({
     await expect(
         page.getByRole("textbox", { name: "Ovim editor input" }),
     ).toBeFocused();
+});
+
+for (const view of ["Files", "Guided"]) {
+    test(`exports a complete ${view} review as a PNG`, async ({
+        page,
+    }, testInfo) => {
+        await setup(page, movedReview);
+        await page.getByRole("button", { name: view, exact: true }).click();
+        const pending = page.waitForEvent("download");
+        await page
+            .getByRole("button", { name: "Export image", exact: true })
+            .click();
+        const download = await pending;
+        expect(download.suggestedFilename()).toMatch(/\.png$/);
+        const destination = testInfo.outputPath("review.png");
+        await download.saveAs(destination);
+        const bytes = await readFile(destination);
+        expect([...bytes.subarray(0, 8)]).toEqual([
+            137, 80, 78, 71, 13, 10, 26, 10,
+        ]);
+        expect(bytes.readUInt32BE(16)).toBe(1600);
+        expect(bytes.readUInt32BE(20)).toBeGreaterThan(420);
+        await expect(page.locator(".flow-export-status")).toContainText(
+            "Download started",
+        );
+    });
+}
+
+test("exports long reviews as one ZIP containing every numbered PNG page", async ({
+    page,
+}, testInfo) => {
+    const longReview = structuredClone(review);
+    const file = longReview.files[0];
+    file.additions = 300;
+    file.deletions = 0;
+    file.hunks = [
+        {
+            oldStart: 0,
+            oldCount: 0,
+            newStart: 1,
+            newCount: 300,
+            header: "@@ -0,0 +1,300 @@",
+            lines: Array.from({ length: 300 }, (_, i) => ({
+                kind: "added",
+                text: `export const value${i} = ${i};`,
+                newLine: i + 1,
+            })),
+        },
+    ];
+    await setup(page, longReview);
+    const pending = page.waitForEvent("download");
+    await page
+        .getByRole("button", { name: "Export image", exact: true })
+        .click();
+    const download = await pending;
+    expect(download.suggestedFilename()).toMatch(/\.zip$/);
+    const destination = testInfo.outputPath("review.zip");
+    await download.saveAs(destination);
+    const entries = Object.entries(unzipSync(await readFile(destination)));
+    expect(entries.length).toBeGreaterThan(4);
+    for (const [name, bytes] of entries) {
+        expect(name).toMatch(/-\d+-of-\d+\.png$/);
+        expect([...bytes.subarray(0, 8)]).toEqual([
+            137, 80, 78, 71, 13, 10, 26, 10,
+        ]);
+    }
 });
