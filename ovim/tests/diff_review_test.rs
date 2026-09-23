@@ -6,7 +6,8 @@ mod helpers;
 use git2::{IndexAddOption, Oid, Repository, Signature};
 use helpers::EditorTest;
 use ovim_core::native_diff::{
-    review_patch, ChangeRef, DiffPairing, PatchLineKind, ReviewBase, ReviewSnapshot,
+    review_patch, review_snapshot, ChangeRef, DiffPairing, PatchLineKind, ReviewBase,
+    ReviewSnapshot,
 };
 use ovim_core::{KeyCode, Mode};
 use std::fs;
@@ -183,6 +184,42 @@ async fn custom_review_keeps_cross_file_sources_and_a_frozen_layout() {
         .rope()
         .to_string()
         .contains("1 │ new file"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn saved_review_opens_context_outside_the_patch_after_source_deletion() {
+    let fixture = Fixture::new();
+    let repo = Repository::open(&fixture.root).unwrap();
+    let original = (1..=80)
+        .map(|line| format!("source line {line}\n"))
+        .collect::<String>();
+    fs::write(fixture.root.join("context.txt"), &original).unwrap();
+    commit_all(&repo, "add context source");
+    fs::write(
+        fixture.root.join("context.txt"),
+        original.replace("source line 40\n", "changed line 40\n"),
+    )
+    .unwrap();
+    let snapshot = review_snapshot(&fixture.root, &ReviewBase::explicit("HEAD")).unwrap();
+    assert!(!snapshot.patch.text.contains("source line 10\n"));
+    let custom = snapshot.reassign(&[]).unwrap();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    fs::remove_file(fixture.root.join("context.txt")).unwrap();
+    for side in ["old", "new"] {
+        test.editor
+            .open_custom_diff_review("Saved context", custom.clone())
+            .unwrap();
+        test.editor
+            .diff_review_open_source("context.txt", 10, side)
+            .unwrap();
+        assert!(current_line(&test).contains("10 │ source line 10"));
+        assert!(test
+            .editor
+            .buffer()
+            .rope()
+            .to_string()
+            .contains("80 │ source line 80"));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

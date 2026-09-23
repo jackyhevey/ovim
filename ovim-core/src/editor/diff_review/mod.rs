@@ -735,19 +735,7 @@ impl Editor {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No branch review is open"))?;
         if let Some(custom) = &state.custom {
-            let valid = custom
-                .sections
-                .iter()
-                .flat_map(|section| section.lines.iter().map(move |entry| (section, entry)))
-                .any(|(section, entry)| match side {
-                    "old" => {
-                        section.old_path.as_deref() == Some(path) && entry.old_line == Some(line)
-                    }
-                    "new" => {
-                        section.new_path.as_deref() == Some(path) && entry.new_line == Some(line)
-                    }
-                    _ => false,
-                });
+            let valid = custom_saved_line(custom, path, line, side).is_some();
             anyhow::ensure!(valid, "Source is not in this review: {path}:{line}");
             return self.open_custom_review_source(path, line, side);
         }
@@ -824,28 +812,7 @@ impl Editor {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No custom review is open"))?;
         anyhow::ensure!(side == "old" || side == "new", "Unknown diff side: {side}");
-        let saved_line = custom.sections.iter().find_map(|section| {
-            let matches = if side == "old" {
-                section.old_path.as_deref() == Some(path)
-            } else {
-                section.new_path.as_deref() == Some(path)
-            };
-            matches
-                .then(|| {
-                    section.lines.iter().find_map(|entry| {
-                        let number = if side == "old" && entry.kind != PatchLineKind::Added {
-                            entry.old_line
-                        } else if side == "new" && entry.kind != PatchLineKind::Removed {
-                            entry.new_line
-                        } else {
-                            None
-                        };
-                        (number == Some(line)).then_some(entry.text.as_str())
-                    })
-                })
-                .flatten()
-        });
-        let saved_line = saved_line
+        let saved_line = custom_saved_line(&custom, path, line, side)
             .ok_or_else(|| anyhow::anyhow!("Source is not in this review: {path}:{line}"))?;
         let current_matches = side == "new"
             && std::fs::read_to_string(root.join(path))
@@ -1284,9 +1251,51 @@ fn patch_line_ranges(patch: &ReviewPatch) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Builds a numbered excerpt from the persisted patch. The old side always
-/// uses this path: a moved or deleted file's current contents are not its
-/// contents in the saved comparison.
+/// Finds saved source text without consulting files that may have changed since capture.
+fn custom_saved_line<'a>(
+    custom: &'a CustomReview,
+    path: &str,
+    line: usize,
+    side: &str,
+) -> Option<&'a str> {
+    custom
+        .snapshot
+        .source_for(path, side)
+        .and_then(|source| source.line(line))
+        .or_else(|| {
+            let patch = &custom.snapshot.patch;
+            patch
+                .text
+                .lines()
+                .zip(&patch.lines)
+                .find_map(|(text, entry)| {
+                    let file = patch.files.get(entry.file?)?;
+                    let matches = match side {
+                        "old" => {
+                            file.old_path.as_deref().unwrap_or(&file.path) == path
+                                && entry.old_line == Some(line)
+                                && matches!(
+                                    entry.kind,
+                                    PatchLineKind::Context | PatchLineKind::Removed
+                                )
+                        }
+                        "new" => {
+                            file.path == path
+                                && entry.new_line == Some(line)
+                                && matches!(
+                                    entry.kind,
+                                    PatchLineKind::Context | PatchLineKind::Added
+                                )
+                        }
+                        _ => false,
+                    };
+                    matches.then(|| text.get(1..)).flatten()
+                })
+        })
+}
+
+/// Builds a numbered excerpt from saved source, falling back to the canonical
+/// patch for reviews captured before surrounding source was retained.
 fn custom_source_excerpt(
     custom: &CustomReview,
     path: &str,
@@ -1294,26 +1303,35 @@ fn custom_source_excerpt(
     side: &str,
 ) -> anyhow::Result<(String, usize)> {
     let mut source = BTreeMap::new();
-    for section in &custom.sections {
-        let matches = if side == "old" {
-            section.old_path.as_deref() == Some(path)
-        } else {
-            section.new_path.as_deref() == Some(path)
-        };
-        if !matches {
-            continue;
-        }
-        for entry in &section.lines {
-            let number = if side == "old" && entry.kind != PatchLineKind::Added {
-                entry.old_line
-            } else if side == "new" && entry.kind != PatchLineKind::Removed {
-                entry.new_line
-            } else {
-                None
-            };
-            if let Some(number) = number {
-                source.entry(number).or_insert_with(|| entry.text.clone());
+    if let Some(saved) = custom.snapshot.source_for(path, side) {
+        for window in &saved.windows {
+            for (offset, text) in window.lines.iter().enumerate() {
+                source.insert(window.start_line + offset, text.as_str());
             }
+        }
+    }
+    let patch = &custom.snapshot.patch;
+    for (text, entry) in patch.text.lines().zip(&patch.lines) {
+        let Some(file) = entry.file.and_then(|index| patch.files.get(index)) else {
+            continue;
+        };
+        let number = match side {
+            "old"
+                if file.old_path.as_deref().unwrap_or(&file.path) == path
+                    && matches!(entry.kind, PatchLineKind::Context | PatchLineKind::Removed) =>
+            {
+                entry.old_line
+            }
+            "new"
+                if file.path == path
+                    && matches!(entry.kind, PatchLineKind::Context | PatchLineKind::Added) =>
+            {
+                entry.new_line
+            }
+            _ => None,
+        };
+        if let Some(number) = number {
+            source.entry(number).or_insert(text.get(1..).unwrap_or(""));
         }
     }
     anyhow::ensure!(!source.is_empty(), "No saved {side} source for {path}");
