@@ -4,6 +4,11 @@ test("the activity bar and shortcut toggle the terminal", async ({
     page,
 }, testInfo) => {
     await page.goto("/");
+    const shortcut = await page.evaluate(() =>
+        /Mac|iPhone|iPad/.test(navigator.platform)
+            ? "Meta+Shift+T"
+            : "Control+Shift+T",
+    );
     const button = page.getByRole("button", { name: "Terminal", exact: true });
 
     await button.click();
@@ -14,9 +19,9 @@ test("the activity bar and shortcut toggle the terminal", async ({
         path: testInfo.outputPath("terminal-preview.png"),
     });
 
-    await page.keyboard.press("Control+Backquote");
+    await page.keyboard.press(shortcut);
     await expect(page.locator(".workbench")).toHaveClass(/terminal-collapsed/);
-    await page.keyboard.press("Control+Backquote");
+    await page.keyboard.press(shortcut);
     await expect(
         page.getByText("Terminal is available in the desktop app."),
     ).toBeVisible();

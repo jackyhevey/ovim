@@ -26,25 +26,17 @@ enum GuiMenuPlatform {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GuiMenuPolicy {
     new_tab_accelerator: Option<&'static str>,
-    restore_tab_accelerator: Option<&'static str>,
     close_accelerator: Option<&'static str>,
     browser_navigation_enabled: bool,
 }
 
 impl GuiMenuPolicy {
-    fn for_surface(
-        surface: GuiMenuSurface,
-        platform: GuiMenuPlatform,
-        can_restore_browser: bool,
-    ) -> Self {
+    fn for_surface(surface: GuiMenuSurface, platform: GuiMenuPlatform) -> Self {
         let browser_active = surface == GuiMenuSurface::Browser;
         let conventional_macos_shortcuts = platform == GuiMenuPlatform::Macos;
         Self {
             new_tab_accelerator: (browser_active || conventional_macos_shortcuts)
                 .then_some("CmdOrCtrl+T"),
-            restore_tab_accelerator: (can_restore_browser
-                && (browser_active || conventional_macos_shortcuts))
-                .then_some("CmdOrCtrl+Shift+T"),
             close_accelerator: (browser_active || conventional_macos_shortcuts)
                 .then_some("CmdOrCtrl+W"),
             browser_navigation_enabled: browser_active,
@@ -67,12 +59,10 @@ impl GuiMenuState {
         } else {
             GuiMenuPlatform::Other
         };
-        let policy = GuiMenuPolicy::for_surface(surface, platform, can_restore_browser);
+        let policy = GuiMenuPolicy::for_surface(surface, platform);
         self.new_browser_tab
             .set_accelerator(policy.new_tab_accelerator)?;
         self.restore_browser_tab.set_enabled(can_restore_browser)?;
-        self.restore_browser_tab
-            .set_accelerator(policy.restore_tab_accelerator)?;
         self.close.set_accelerator(policy.close_accelerator)?;
         for (item, accelerator) in &self.browser_navigation {
             item.set_enabled(policy.browser_navigation_enabled)?;
@@ -180,7 +170,7 @@ pub fn install(app: &App) -> Result<GuiMenuState> {
         "terminal.toggle",
         "Terminal",
         true,
-        Some("Ctrl+Backquote"),
+        Some("CmdOrCtrl+Shift+T"),
     )?;
     let view_menu = SubmenuBuilder::new(app, "View")
         .item(&terminal)
@@ -238,10 +228,8 @@ mod tests {
 
     #[test]
     fn non_macos_source_surface_releases_vim_control_keys() {
-        let policy =
-            GuiMenuPolicy::for_surface(GuiMenuSurface::Source, GuiMenuPlatform::Other, true);
+        let policy = GuiMenuPolicy::for_surface(GuiMenuSurface::Source, GuiMenuPlatform::Other);
         assert_eq!(policy.new_tab_accelerator, None);
-        assert_eq!(policy.restore_tab_accelerator, None);
         assert_eq!(policy.close_accelerator, None);
         assert!(!policy.browser_navigation_enabled);
     }
@@ -249,9 +237,8 @@ mod tests {
     #[test]
     fn browser_surface_owns_its_native_shortcuts() {
         for platform in [GuiMenuPlatform::Macos, GuiMenuPlatform::Other] {
-            let policy = GuiMenuPolicy::for_surface(GuiMenuSurface::Browser, platform, true);
+            let policy = GuiMenuPolicy::for_surface(GuiMenuSurface::Browser, platform);
             assert_eq!(policy.new_tab_accelerator, Some("CmdOrCtrl+T"));
-            assert_eq!(policy.restore_tab_accelerator, Some("CmdOrCtrl+Shift+T"));
             assert_eq!(policy.close_accelerator, Some("CmdOrCtrl+W"));
             assert!(policy.browser_navigation_enabled);
         }
@@ -259,10 +246,8 @@ mod tests {
 
     #[test]
     fn macos_keeps_conventional_tab_and_window_shortcuts() {
-        let policy =
-            GuiMenuPolicy::for_surface(GuiMenuSurface::Source, GuiMenuPlatform::Macos, true);
+        let policy = GuiMenuPolicy::for_surface(GuiMenuSurface::Source, GuiMenuPlatform::Macos);
         assert_eq!(policy.new_tab_accelerator, Some("CmdOrCtrl+T"));
-        assert_eq!(policy.restore_tab_accelerator, Some("CmdOrCtrl+Shift+T"));
         assert_eq!(policy.close_accelerator, Some("CmdOrCtrl+W"));
         assert!(!policy.browser_navigation_enabled);
     }

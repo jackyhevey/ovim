@@ -25,7 +25,6 @@ export interface BrowserKeyEvent {
 export type BrowserShortcutAction =
     | "file.close"
     | "browser.new-tab"
-    | "browser.restore-tab"
     | "browser.focus-address"
     | "browser.reload"
     | "browser.back"
@@ -40,8 +39,8 @@ export const browserShortcutAction = (
 ): BrowserShortcutAction | undefined => {
     const key = event.key.toLowerCase();
     if (key === "w" && (browserActive || macos)) return "file.close";
-    if (key === "t" && (browserActive || macos))
-        return event.shiftKey ? "browser.restore-tab" : "browser.new-tab";
+    if (key === "t" && !event.shiftKey && (browserActive || macos))
+        return "browser.new-tab";
     if (!browserActive) return undefined;
     if (key === "l") return "browser.focus-address";
     if (key === "r") return "browser.reload";

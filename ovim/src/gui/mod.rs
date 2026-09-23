@@ -1446,7 +1446,7 @@ async fn run_editor(
                 let rejected_terminal = editor.take_pending_terminal_session().is_some();
                 let rejected_shell = editor.take_pending_shell_command().is_some();
                 if rejected_terminal || rejected_shell {
-                    editor.set_status_message("Use the Terminal icon or Ctrl+` to run shell commands in the GUI".to_string());
+                    editor.set_status_message("Use the Terminal icon or Cmd/Ctrl+Shift+T to run shell commands in the GUI".to_string());
                 }
                 update_diff_review_geometry(&mut editor);
                 publish_if_changed(
