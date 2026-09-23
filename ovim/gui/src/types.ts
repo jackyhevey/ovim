@@ -67,11 +67,36 @@ export interface GuiDiffHunk {
     lines: GuiDiffLine[];
 }
 
+export interface GuiDiffMoveEndpoint {
+    path: string;
+    startLine: number;
+    lineCount: number;
+    reviewLine?: number;
+    contextWindows: Array<{
+        startLine: number;
+        lines: GuiDiffLine[];
+    }>;
+    contextComplete: boolean;
+}
+
+export interface GuiDiffMove {
+    id: string;
+    label?: string;
+    old: GuiDiffMoveEndpoint;
+    new: GuiDiffMoveEndpoint;
+}
+
 export interface GuiDiffDocument {
     title: string;
     layout: "split" | "unified";
     managed: boolean;
     custom: boolean;
+    moves?: GuiDiffMove[];
+    guidedFiles?: GuiDiffDocument["files"];
+    overlay?: {
+        mode: "active" | "available" | "stale" | "saved";
+        title?: string;
+    };
     files: Array<{
         id: string;
         label?: string;

@@ -383,8 +383,8 @@ impl ReviewPatch {
 
 mod custom;
 pub use custom::{
-    review_snapshot, ChangeBlock, ChangeRef, CustomReview, DiffPairing, ReviewSection,
-    ReviewSectionLine, ReviewSnapshot,
+    review_snapshot, ChangeBlock, ChangeRef, CustomReview, DiffPairing, FrozenSource,
+    ReviewSection, ReviewSectionLine, ReviewSnapshot, SourceFileSnapshot, SourceWindow,
 };
 
 /// Builds the full review patch for `base`.

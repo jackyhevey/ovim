@@ -89,6 +89,100 @@ fn line_index_of(test: &EditorTest, needle: &str) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn saved_moves_follow_exact_live_diff_and_recover_after_undo() {
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    let snapshot = ReviewSnapshot::from_patch(
+        review_patch(&fixture.root, &ReviewBase::explicit("main")).unwrap(),
+    )
+    .unwrap();
+    let removed = snapshot
+        .blocks
+        .iter()
+        .find(|block| block.kind == PatchLineKind::Removed)
+        .unwrap();
+    let added = snapshot
+        .blocks
+        .iter()
+        .find(|block| {
+            block.kind == PatchLineKind::Added && snapshot.patch.files[block.file].path == "b.txt"
+        })
+        .unwrap();
+    let custom = snapshot
+        .reassign(&[DiffPairing {
+            label: Some("Move line".into()),
+            old: ChangeRef {
+                block_id: removed.id.clone(),
+                offset: None,
+                count: None,
+            },
+            new: ChangeRef {
+                block_id: added.id.clone(),
+                offset: None,
+                count: None,
+            },
+        }])
+        .unwrap();
+
+    test.editor
+        .open_custom_diff_review("Move line", custom)
+        .unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "saved"
+    );
+    test.editor.return_to_live_diff_review().unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+    assert!(test.editor.diff_review().unwrap().custom().is_some());
+
+    fs::write(fixture.root.join("a.txt"), "one\nchanged\nthree\nfour\n").unwrap();
+    test.editor.refresh_diff_review();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "stale"
+    );
+    assert!(test.editor.diff_review().unwrap().custom().is_none());
+    test.editor.open_saved_diff_overlay().unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "saved"
+    );
+    test.editor.return_to_live_diff_review().unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "stale"
+    );
+
+    fs::write(fixture.root.join("a.txt"), "one\n2\nthree\nfour\n").unwrap();
+    test.editor.refresh_diff_review();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+    test.editor.toggle_diff_review_overlay().unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "available"
+    );
+    assert!(test.editor.diff_review().unwrap().custom().is_none());
+    test.editor.toggle_diff_review_overlay().unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+
+    test.editor.close_diff_review();
+    test.keys(" gd");
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn custom_review_keeps_cross_file_sources_and_a_frozen_layout() {
     let fixture = Fixture::new();
     let mut test = open_editor_on(&fixture, "a.txt");

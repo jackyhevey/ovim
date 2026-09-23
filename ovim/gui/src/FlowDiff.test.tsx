@@ -6,6 +6,7 @@ import {
     mappedScrollTop,
     replacementParts,
     sectionsForFile,
+    sectionsWithMoves,
     type FlowDiffReview,
 } from "./FlowDiffModel";
 
@@ -137,66 +138,201 @@ describe("flow diff model", () => {
             { text: "an added line", changed: false },
         ]);
     });
+
+    it("splits neighboring moved ranges while retaining unrelated canonical lines", () => {
+        const file = {
+            ...review.files[0],
+            hunks: [
+                {
+                    header: "@@ -1,3 +1,4 @@",
+                    oldStart: 1,
+                    oldCount: 3,
+                    newStart: 1,
+                    newCount: 4,
+                    lines: [
+                        { kind: "removed" as const, text: "old 1", oldLine: 1 },
+                        { kind: "removed" as const, text: "old 2", oldLine: 2 },
+                        { kind: "removed" as const, text: "old 3", oldLine: 3 },
+                        { kind: "added" as const, text: "new 1", newLine: 1 },
+                        { kind: "added" as const, text: "new 2", newLine: 2 },
+                        { kind: "added" as const, text: "new 3", newLine: 3 },
+                        { kind: "added" as const, text: "new 4", newLine: 4 },
+                    ],
+                },
+            ],
+        };
+        const endpoint = (path: string, startLine: number) => ({
+            path,
+            startLine,
+            lineCount: 1,
+            contextWindows: [],
+            contextComplete: false,
+        });
+        const moves = [
+            {
+                id: "a",
+                old: endpoint("other-a.ts", 10),
+                new: endpoint(file.path, 2),
+            },
+            {
+                id: "b",
+                old: endpoint("other-b.ts", 20),
+                new: endpoint(file.path, 4),
+            },
+        ];
+        const sections = sectionsWithMoves(file, moves, "old");
+        expect(
+            sections
+                .filter((section) => section.kind === "change")
+                .map((section) => section.move?.id),
+        ).toEqual([undefined, "a", undefined, "b"]);
+        expect(
+            sections.flatMap((section) =>
+                section.left.map((line) => line.text),
+            ),
+        ).toEqual(["old 1", "old 2", "old 3"]);
+        expect(
+            sections.flatMap((section) =>
+                section.right.map((line) => line.text),
+            ),
+        ).toEqual(["new 1", "new 2", "new 3", "new 4"]);
+    });
 });
 
 describe("FlowDiff", () => {
-    it("keeps cross-file sections distinct and opens each side at its own path", () => {
+    it("shows canonical files and follows a moved segment across reconstruction sides", () => {
         const open = vi.fn();
         const moved: FlowDiffReview = {
             ...review,
             custom: true,
             files: [
                 {
-                    id: "pair_0",
-                    label: "Extract parser",
-                    path: "src/parser.ts",
-                    oldPath: "src/main.ts",
-                    status: "reassigned",
-                    additions: 1,
+                    id: "src/main.ts",
+                    path: "src/main.ts",
+                    status: "modified",
+                    additions: 0,
                     deletions: 1,
                     binary: false,
-                    metadata: ["new mode 100644"],
+                    metadata: [],
                     hunks: [
                         {
-                            header: "Extract parser",
+                            header: "@@ -20 +20,0 @@",
                             oldStart: 20,
                             oldCount: 1,
-                            newStart: 3,
-                            newCount: 1,
+                            newStart: 20,
+                            newCount: 0,
                             lines: [
                                 {
                                     kind: "removed",
                                     text: "parse()",
                                     oldLine: 20,
                                 },
-                                { kind: "added", text: "parse()", newLine: 3 },
                             ],
                         },
                     ],
                 },
                 {
-                    id: "residual_0",
+                    id: "src/parser.ts",
                     path: "src/parser.ts",
-                    status: "modified",
-                    additions: 0,
+                    status: "added",
+                    additions: 1,
                     deletions: 0,
                     binary: false,
-                    metadata: [],
-                    hunks: [],
+                    metadata: ["new mode 100644"],
+                    hunks: [
+                        {
+                            header: "@@ -0,0 +3 @@",
+                            oldStart: 0,
+                            oldCount: 0,
+                            newStart: 3,
+                            newCount: 1,
+                            lines: [
+                                { kind: "added", text: "parse()", newLine: 3 },
+                            ],
+                        },
+                    ],
+                },
+            ],
+            moves: [
+                {
+                    id: "move-1",
+                    label: "Extract parser",
+                    old: {
+                        path: "src/main.ts",
+                        startLine: 20,
+                        lineCount: 1,
+                        contextComplete: true,
+                        contextWindows: [
+                            {
+                                startLine: 19,
+                                lines: [
+                                    {
+                                        kind: "context",
+                                        text: "before",
+                                        oldLine: 19,
+                                    },
+                                    {
+                                        kind: "context",
+                                        text: "parse()",
+                                        oldLine: 20,
+                                    },
+                                    {
+                                        kind: "context",
+                                        text: "after",
+                                        oldLine: 21,
+                                    },
+                                ],
+                            },
+                        ],
+                    },
+                    new: {
+                        path: "src/parser.ts",
+                        startLine: 3,
+                        lineCount: 1,
+                        contextComplete: true,
+                        contextWindows: [
+                            {
+                                startLine: 2,
+                                lines: [
+                                    {
+                                        kind: "context",
+                                        text: "before",
+                                        newLine: 2,
+                                    },
+                                    {
+                                        kind: "context",
+                                        text: "parse()",
+                                        newLine: 3,
+                                    },
+                                    {
+                                        kind: "context",
+                                        text: "after",
+                                        newLine: 4,
+                                    },
+                                ],
+                            },
+                        ],
+                    },
                 },
             ],
         };
         const result = render(() => (
             <FlowDiff review={moved} onOpenSource={open} />
         ));
-        expect(
-            result.getByRole("combobox", { name: "Diff section" }),
-        ).toBeTruthy();
-        expect(result.getByText("2 sections")).toBeTruthy();
+        const picker = result.getByRole("combobox", { name: "Changed file" });
+        expect(result.getByText("2 files")).toBeTruthy();
+        fireEvent.change(picker, { target: { value: "src/parser.ts" } });
         expect(result.getByText("new mode 100644")).toBeTruthy();
+        expect(result.getByText("Moved from")).toBeTruthy();
+        expect(
+            result.getByRole("region", { name: "src/main.ts context" }),
+        ).toBeTruthy();
         fireEvent.click(
             result.getByRole("button", { name: "Before line 20, open source" }),
         );
+        fireEvent.click(result.getByRole("button", { name: "After" }));
+        expect((picker as HTMLSelectElement).value).toBe("src/main.ts");
+        expect(result.getByText("Moved to")).toBeTruthy();
         fireEvent.click(
             result.getByRole("button", { name: "After line 3, open source" }),
         );
@@ -204,13 +340,6 @@ describe("FlowDiff", () => {
             ["src/main.ts", 20, "old"],
             ["src/parser.ts", 3, "new"],
         ]);
-        fireEvent.change(
-            result.getByRole("combobox", { name: "Diff section" }),
-            {
-                target: { value: "residual_0" },
-            },
-        );
-        expect(result.getByText("No text changes in this file.")).toBeTruthy();
     });
 
     it("shows independent compact streams and navigates source and hunks", () => {
@@ -391,5 +520,147 @@ describe("FlowDiff", () => {
         expect(openSource).toHaveBeenCalledTimes(2);
         fireEvent.keyDown(surface, { key: "r", metaKey: true });
         expect(refresh).not.toHaveBeenCalled();
+    });
+
+    it("keeps guided descriptions available beside canonical files", () => {
+        const guided = {
+            ...review.files[0],
+            id: "guided-parse",
+            label: "Parser moved after validation",
+        };
+        const result = render(() => (
+            <FlowDiff
+                review={{
+                    ...review,
+                    custom: true,
+                    guidedFiles: [guided],
+                }}
+            />
+        ));
+        expect(
+            result.getByRole("combobox", { name: "Changed file" }),
+        ).toBeTruthy();
+        fireEvent.click(result.getByRole("button", { name: "Guided" }));
+        expect(
+            result.getByRole("combobox", { name: "Guided section" }),
+        ).toBeTruthy();
+        expect(result.getByText("1 section")).toBeTruthy();
+        expect(result.getByText("1 / 1")).toBeTruthy();
+        expect(
+            result.getAllByText(
+                "Parser moved after validation · src/uneven.ts",
+            )[1],
+        ).toBeTruthy();
+    });
+
+    it("navigates each custom fragment before crossing to the next file", async () => {
+        const first = review.files[0];
+        const open = vi.fn();
+        const document: FlowDiffReview = {
+            ...review,
+            custom: true,
+            files: [
+                {
+                    ...first,
+                    hunks: [
+                        {
+                            ...first.hunks[0],
+                            lines: [
+                                { kind: "removed", text: "old a", oldLine: 4 },
+                                { kind: "added", text: "new a", newLine: 4 },
+                                {
+                                    kind: "context",
+                                    text: "between",
+                                    oldLine: 5,
+                                    newLine: 5,
+                                },
+                                { kind: "removed", text: "old b", oldLine: 6 },
+                                { kind: "added", text: "new b", newLine: 6 },
+                            ],
+                        },
+                    ],
+                },
+                {
+                    ...first,
+                    id: "src/next.ts",
+                    path: "src/next.ts",
+                    hunks: [
+                        {
+                            header: "@@ -1 +1 @@",
+                            oldStart: 1,
+                            oldCount: 1,
+                            newStart: 1,
+                            newCount: 1,
+                            lines: [
+                                { kind: "removed", text: "old c", oldLine: 1 },
+                                { kind: "added", text: "new c", newLine: 1 },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        const result = render(() => (
+            <FlowDiff review={document} onOpenSource={open} />
+        ));
+        const surface = result.getByRole("region", { name: "Diff review" });
+        expect(result.getByText("1 / 3")).toBeTruthy();
+        fireEvent.keyDown(surface, { key: "n" });
+        expect(result.getByText("2 / 3")).toBeTruthy();
+        fireEvent.keyDown(surface, { key: "Enter" });
+        expect(open).toHaveBeenLastCalledWith("src/uneven.ts", 6, "new");
+        const next = result.getByRole("button", { name: "Next change" });
+        next.focus();
+        fireEvent.keyDown(next, { key: "n" });
+        await waitFor(() =>
+            expect(
+                (
+                    result.getByRole("combobox", {
+                        name: "Changed file",
+                    }) as HTMLSelectElement
+                ).value,
+            ).toBe("src/next.ts"),
+        );
+        expect(result.getByText("3 / 3")).toBeTruthy();
+    });
+
+    it("offers matching overlay controls and saved review recovery", () => {
+        const cases = [
+            {
+                mode: "active",
+                label: "Remove overlay",
+                action: "toggle_overlay",
+            },
+            {
+                mode: "available",
+                label: "Apply overlay",
+                action: "toggle_overlay",
+            },
+            {
+                mode: "stale",
+                label: "View saved review",
+                action: "open_saved_overlay",
+            },
+            {
+                mode: "saved",
+                label: "Return to live diff",
+                action: "return_to_live_diff",
+            },
+        ] as const;
+        for (const item of cases) {
+            const onAction = vi.fn();
+            const result = render(() => (
+                <FlowDiff
+                    review={{
+                        ...review,
+                        overlay: { mode: item.mode, title: "Extract parser" },
+                    }}
+                    onAction={onAction}
+                />
+            ));
+            fireEvent.click(result.getByRole("button", { name: item.label }));
+            expect(onAction).toHaveBeenCalledWith(item.action);
+            result.unmount();
+        }
     });
 });

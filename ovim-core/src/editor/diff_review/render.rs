@@ -35,7 +35,7 @@ const MIN_SPLIT_TEXT_WIDTH: usize = 8;
 const MAX_WRAP_ROWS: usize = 12;
 
 const KEY_HINT: &str =
-    "# Enter open at cursor · ]c [c hunk · ]f [f file · r refresh · q close · <Space>gf fetch base";
+    "# Enter open at cursor · ]c [c hunk · ]f [f file · o overlay · O saved · r refresh · q close · <Space>gf fetch base";
 
 /// How the patch body is laid out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -545,7 +545,7 @@ pub fn render_custom(
     let toolbar = render_toolbar(layout, &mut builder);
     targets.resize(builder.len(), None);
     builder.header(
-        "# Enter open source · ]c [c section · s layout · r redraw · q close",
+        "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · r refresh/redraw · q close",
         Some(HighlightGroup::Comment),
     );
     targets.push(None);

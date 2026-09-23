@@ -2567,7 +2567,11 @@ function App() {
                                           pane: props.pane.index,
                                           bufferId: props.pane.bufferId,
                                           action:
-                                              key === "q" ? "close" : "refresh",
+                                              key === "q"
+                                                  ? "close"
+                                                  : key === "r"
+                                                    ? "refresh"
+                                                    : key,
                                       });
                                   }
                                 : undefined
