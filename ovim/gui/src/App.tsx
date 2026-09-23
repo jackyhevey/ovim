@@ -1574,7 +1574,7 @@ function App() {
     createEffect(() => {
         const mode = view().mode;
         const pane = view().panes.find((item) => item.focused);
-        if (mode !== "NORMAL" || !pane?.diffReview) return;
+        if (mode !== "NORMAL" || !pane) return;
         queueMicrotask(() => {
             if (
                 document.activeElement === inputSink ||

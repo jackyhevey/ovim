@@ -488,7 +488,7 @@ mod tests {
         commit(&repo);
 
         let mut editor = Editor::new();
-        editor.open_file(&root.join("sample.rs")).unwrap();
+        editor.open_file(root.join("sample.rs")).unwrap();
         editor.open_diff_review(Some("main")).unwrap();
         let review = project_diff(&editor, editor.buffer()).unwrap();
         assert!(review.managed);

@@ -179,9 +179,18 @@ test("native diff controls carry the pane and buffer identity", async ({
                 export const isTauri = () => true;
                 export class Channel {}
                 window.diffCommands = [];
+                let listener;
                 export const invoke = async (command, args) => {
                     window.diffCommands.push({command, args});
-                    if (command === 'gui_subscribe') args.onEvent.onmessage(mockSnapshot);
+                    if (command === 'gui_subscribe') {
+                        listener = args.onEvent;
+                        listener.onmessage(mockSnapshot);
+                    }
+                    if (command === 'gui_open_diff_source') listener.onmessage({
+                        ...mockSnapshot,
+                        revision: mockSnapshot.revision + 1,
+                        panes: [{ ...mockSnapshot.panes[0], diffReview: undefined }],
+                    });
                 };`,
             }),
     );
@@ -210,6 +219,15 @@ test("native diff controls carry the pane and buffer identity", async ({
             ),
         )
         .toBe(true);
+    await page.getByRole("button", { name: "Unified", exact: true }).click();
+    const action = await page.evaluate(
+        () =>
+            (window as any).diffCommands.find(
+                (item: any) => item.command === "gui_diff_action",
+            )?.args,
+    );
+    expect(action).toMatchObject({ pane: 0, action: "unified" });
+    expect(action.bufferId).toEqual(expect.any(Number));
     await page
         .getByRole("button", {
             name: "After line 1204, open source",
@@ -231,13 +249,8 @@ test("native diff controls carry the pane and buffer identity", async ({
             line: 1204,
             side: "new",
         });
-    await page.getByRole("button", { name: "Unified", exact: true }).click();
-    const action = await page.evaluate(
-        () =>
-            (window as any).diffCommands.find(
-                (item: any) => item.command === "gui_diff_action",
-            )?.args,
-    );
-    expect(action).toMatchObject({ pane: 0, action: "unified" });
-    expect(action.bufferId).toEqual(expect.any(Number));
+    await expect(page.locator(".flow-diff")).toHaveCount(0);
+    await expect(
+        page.getByRole("textbox", { name: "Ovim editor input" }),
+    ).toBeFocused();
 });

@@ -158,6 +158,7 @@ export default function FlowDiff(props: FlowDiffProps) {
     let unifiedScroller: HTMLDivElement | undefined;
     let lock = false;
     let pendingBracket = "";
+    let pendingGo = false;
     let resizeObserver: ResizeObserver | undefined;
     const leftSections = new Map<string, HTMLElement>();
     const rightSections = new Map<string, HTMLElement>();
@@ -381,6 +382,20 @@ export default function FlowDiff(props: FlowDiffProps) {
         });
     });
 
+    const openCurrentChange = () => {
+        const currentFile = file();
+        const lines = hunks()[activeHunk()]?.lines;
+        const line =
+            lines?.find((item) => item.kind === "added") ??
+            lines?.find((item) => item.kind === "removed") ??
+            lines?.[0];
+        if (!currentFile || !line) return;
+        const side = line.kind === "removed" ? "old" : "new";
+        const number = side === "old" ? line.oldLine : line.newLine;
+        if (number !== undefined)
+            props.onOpenSource?.(currentFile.path, number, side);
+    };
+
     const keydown: JSX.EventHandlerUnion<HTMLElement, KeyboardEvent> = (
         event,
     ) => {
@@ -389,6 +404,20 @@ export default function FlowDiff(props: FlowDiffProps) {
             event.target instanceof HTMLButtonElement
         )
             return;
+        if (event.metaKey || event.ctrlKey || event.altKey) return;
+        if (event.key === "g") {
+            pendingGo = true;
+            return;
+        }
+        const openSource =
+            event.key === "Enter" || (pendingGo && event.key === "f");
+        pendingGo = false;
+        if (openSource) {
+            event.preventDefault();
+            pendingBracket = "";
+            openCurrentChange();
+            return;
+        }
         if (event.key === "[" || event.key === "]") {
             pendingBracket = event.key;
             return;

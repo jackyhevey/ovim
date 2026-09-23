@@ -65,7 +65,8 @@ line number to open the working file. Old-side lines map to their corresponding
 location in the current file; deleted files stay read-only.
 
 The GUI also supports `n` / `N` (next / previous hunk), `j` / `k` to scroll,
-and the review keys below. `:` and `<Space>` return to Ovim's command input.
+and the review keys below. `Enter` or `gf` opens the active change in the GUI.
+`:` and `<Space>` return to Ovim's command input.
 Text can be selected and copied directly from either pane.
 
 | Key | Action |

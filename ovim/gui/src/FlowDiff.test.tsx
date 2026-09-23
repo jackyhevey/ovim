@@ -295,4 +295,23 @@ describe("FlowDiff", () => {
         fireEvent.scroll(before);
         expect(result.getByText("2 / 2")).toBeTruthy();
     });
+    it("opens the active change with Enter and gf without swallowing modified keys", () => {
+        const openSource = vi.fn();
+        const refresh = vi.fn();
+        const result = render(() => (
+            <FlowDiff
+                review={review}
+                onOpenSource={openSource}
+                onAction={refresh}
+            />
+        ));
+        const surface = result.getByRole("region", { name: "Diff review" });
+        fireEvent.keyDown(surface, { key: "Enter" });
+        expect(openSource).toHaveBeenLastCalledWith("src/uneven.ts", 5, "new");
+        fireEvent.keyDown(surface, { key: "g" });
+        fireEvent.keyDown(surface, { key: "f" });
+        expect(openSource).toHaveBeenCalledTimes(2);
+        fireEvent.keyDown(surface, { key: "r", metaKey: true });
+        expect(refresh).not.toHaveBeenCalled();
+    });
 });
