@@ -20,7 +20,7 @@ pub struct ChatInteractionGeometry {
     pub history: Option<crate::Rect>,
     pub slash_completions: Vec<(crate::Rect, usize)>,
     pub branches: Vec<(crate::Rect, crate::ai::chat_types::NodeId)>,
-    pub walkthrough_replays: Vec<(crate::Rect, String)>,
+    pub tool_replays: Vec<(crate::Rect, String)>,
 }
 
 impl ChatInteractionGeometry {
@@ -166,7 +166,7 @@ mod tests {
             history: Some(rect()),
             slash_completions: vec![(rect(), 1)],
             branches: vec![(rect(), 2)],
-            walkthrough_replays: vec![(rect(), "call-1".into())],
+            tool_replays: vec![(rect(), "call-1".into())],
         };
 
         interactions.begin_frame();
@@ -182,6 +182,6 @@ mod tests {
         assert!(interactions.history.is_none());
         assert!(interactions.slash_completions.is_empty());
         assert!(interactions.branches.is_empty());
-        assert!(interactions.walkthrough_replays.is_empty());
+        assert!(interactions.tool_replays.is_empty());
     }
 }

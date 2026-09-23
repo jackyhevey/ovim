@@ -730,6 +730,33 @@ impl Editor {
                 self.execute_record_comprehension_checkpoint(&tc.arguments),
             );
         }
+        if matches!(tc.name.as_str(), "read_diff" | "show_custom_diff") {
+            let capabilities = self.build_chat_capabilities();
+            let available = self
+                .ai_state
+                .config
+                .profiles
+                .get(&self.ai_chat_effective_profile())
+                .is_some_and(|profile| {
+                    self.ai_state
+                        .tool_registry
+                        .tools_for_profile(profile, &capabilities)
+                        .iter()
+                        .any(|tool| tool.name == tc.name)
+                });
+            if !available {
+                return ToolDispatchOutcome::Completed(ToolResult::Error(format!(
+                    "tool '{}' is unavailable for the active profile or scope",
+                    tc.name
+                )));
+            }
+            let result = if tc.name == "read_diff" {
+                self.execute_read_diff_tool(&tc.arguments)
+            } else {
+                self.execute_show_custom_diff_tool(tc)
+            };
+            return ToolDispatchOutcome::Completed(result);
+        }
         let has_explicit_path = tc
             .arguments
             .get("path")
@@ -1672,6 +1699,15 @@ impl Editor {
             ToolResult::Success(s) => s.as_str().to_string(),
             ToolResult::Error(s) => format!("Error: {s}"),
         };
+        if tc.name == "read_diff" && matches!(result, ToolResult::Success(_)) {
+            if self.active_chat_provider_is_remote() {
+                if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&raw_body) {
+                    redact_diff_json_strings(&mut value);
+                    return value.to_string();
+                }
+            }
+            return raw_body;
+        }
         if tc.name == ACTIVATE_SKILL_TOOL {
             let body = if self.active_chat_provider_is_remote() {
                 redact_high_risk_tokens(&raw_body)
@@ -1855,6 +1891,18 @@ impl Editor {
                     format!("walkthrough · {count} pages"),
                 )
             }
+            "read_diff" => (ToolSummaryKind::Read, "Git diff snapshot".into()),
+            "show_custom_diff" => {
+                let title = tc
+                    .arguments
+                    .get("title")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("Custom diff");
+                (
+                    ToolSummaryKind::Navigation,
+                    format!("diff · {}", compact_tool_label(title)),
+                )
+            }
             "select_text" => {
                 let start = tc
                     .arguments
@@ -1994,6 +2042,23 @@ fn tool_result_success(result: &ToolResult) -> Option<&str> {
     match result {
         ToolResult::Success(s) => Some(s.as_str()),
         ToolResult::Error(_) => None,
+    }
+}
+
+fn redact_diff_json_strings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => *text = redact_high_risk_tokens(text),
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_diff_json_strings(value);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for value in fields.values_mut() {
+                redact_diff_json_strings(value);
+            }
+        }
+        _ => {}
     }
 }
 

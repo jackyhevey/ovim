@@ -13,13 +13,16 @@ const review: FlowDiffReview = {
     title: "main → working tree",
     layout: "split",
     managed: false,
+    custom: false,
     files: [
         {
+            id: "src/uneven.ts",
             path: "src/uneven.ts",
             status: "modified",
             additions: 1,
             deletions: 3,
             binary: false,
+            metadata: [],
             hunks: [
                 {
                     header: "@@ -4,4 +4,2 @@",
@@ -77,11 +80,13 @@ const review: FlowDiffReview = {
             ],
         },
         {
+            id: "asset.png",
             path: "asset.png",
             status: "modified",
             additions: 0,
             deletions: 0,
             binary: true,
+            metadata: [],
             hunks: [],
         },
     ],
@@ -135,6 +140,79 @@ describe("flow diff model", () => {
 });
 
 describe("FlowDiff", () => {
+    it("keeps cross-file sections distinct and opens each side at its own path", () => {
+        const open = vi.fn();
+        const moved: FlowDiffReview = {
+            ...review,
+            custom: true,
+            files: [
+                {
+                    id: "pair_0",
+                    label: "Extract parser",
+                    path: "src/parser.ts",
+                    oldPath: "src/main.ts",
+                    status: "reassigned",
+                    additions: 1,
+                    deletions: 1,
+                    binary: false,
+                    metadata: ["new mode 100644"],
+                    hunks: [
+                        {
+                            header: "Extract parser",
+                            oldStart: 20,
+                            oldCount: 1,
+                            newStart: 3,
+                            newCount: 1,
+                            lines: [
+                                {
+                                    kind: "removed",
+                                    text: "parse()",
+                                    oldLine: 20,
+                                },
+                                { kind: "added", text: "parse()", newLine: 3 },
+                            ],
+                        },
+                    ],
+                },
+                {
+                    id: "residual_0",
+                    path: "src/parser.ts",
+                    status: "modified",
+                    additions: 0,
+                    deletions: 0,
+                    binary: false,
+                    metadata: [],
+                    hunks: [],
+                },
+            ],
+        };
+        const result = render(() => (
+            <FlowDiff review={moved} onOpenSource={open} />
+        ));
+        expect(
+            result.getByRole("combobox", { name: "Diff section" }),
+        ).toBeTruthy();
+        expect(result.getByText("2 sections")).toBeTruthy();
+        expect(result.getByText("new mode 100644")).toBeTruthy();
+        fireEvent.click(
+            result.getByRole("button", { name: "Before line 20, open source" }),
+        );
+        fireEvent.click(
+            result.getByRole("button", { name: "After line 3, open source" }),
+        );
+        expect(open.mock.calls).toEqual([
+            ["src/main.ts", 20, "old"],
+            ["src/parser.ts", 3, "new"],
+        ]);
+        fireEvent.change(
+            result.getByRole("combobox", { name: "Diff section" }),
+            {
+                target: { value: "residual_0" },
+            },
+        );
+        expect(result.getByText("No text changes in this file.")).toBeTruthy();
+    });
+
     it("shows independent compact streams and navigates source and hunks", () => {
         const navigate = vi.fn();
         const open = vi.fn();

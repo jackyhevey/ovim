@@ -111,7 +111,7 @@ impl Editor {
             "tools/list" => {
                 let mut tools = self.ai_state.tool_registry.editor_bridge_tools().map(|(tool, operation)| {
                     json!({"name":tool.name, "description":tool.description, "inputSchema":bridge_schema(tool, operation),
-                        "annotations":{"readOnlyHint":operation == EditorBridgeTool::Context, "destructiveHint":false, "openWorldHint":false}})
+                        "annotations":{"readOnlyHint":matches!(operation, EditorBridgeTool::Context | EditorBridgeTool::ReadDiff), "destructiveHint":false, "openWorldHint":false}})
                 }).collect::<Vec<_>>();
                 tools.sort_by_key(|tool| tool["name"].as_str().unwrap_or_default().to_owned());
                 Ok(json!({"tools":tools}))
@@ -155,7 +155,11 @@ impl Editor {
             return;
         }
         // A walkthrough owns navigation until the user finishes or dismisses it.
-        if operation != EditorBridgeTool::Context && self.ai_chat_has_pending_code_explanation() {
+        if !matches!(
+            operation,
+            EditorBridgeTool::Context | EditorBridgeTool::ReadDiff
+        ) && self.ai_chat_has_pending_code_explanation()
+        {
             let _ = response.send(tool_reply(
                 rpc_id,
                 ToolResult::Error(
@@ -221,6 +225,15 @@ impl Editor {
                     }
                 }
                 return;
+            }
+            EditorBridgeTool::ReadDiff => self.execute_read_diff_tool(&args),
+            EditorBridgeTool::ShowCustomDiff => {
+                let call = ToolCallInfo {
+                    id: request_id.clone(),
+                    name: name.into(),
+                    arguments: args,
+                };
+                self.execute_show_custom_diff_tool(&call)
             }
         };
         let _ = response.send(tool_reply(rpc_id, result));
@@ -353,7 +366,13 @@ mod tests {
                 .iter()
                 .map(|tool| tool["name"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            vec!["explain_with_codebase", "open_file", "workspace_context"]
+            vec![
+                "explain_with_codebase",
+                "open_file",
+                "read_diff",
+                "show_custom_diff",
+                "workspace_context"
+            ]
         );
         assert_eq!(
             tools[1]["inputSchema"]["properties"]["create"]["const"],

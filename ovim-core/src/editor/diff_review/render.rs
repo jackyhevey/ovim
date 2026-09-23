@@ -9,7 +9,10 @@ use std::ops::Range;
 use std::time::Duration;
 
 use crate::display::grapheme_display_width;
-use crate::native_diff::{BaseKind, DiffFile, PatchLine, PatchLineKind, ReviewPatch};
+use crate::native_diff::{
+    BaseKind, CustomReview, DiffFile, PatchLine, PatchLineKind, ReviewPatch, ReviewSection,
+    ReviewSectionLine,
+};
 use crate::syntax::HighlightGroup;
 use crate::unicode::grapheme_indices;
 
@@ -177,6 +180,15 @@ pub struct Rendered {
     pub toolbar: Toolbar,
     pub highlights: Vec<Vec<(Range<usize>, HighlightGroup)>>,
     pub code_highlights: Vec<Vec<(Range<usize>, HighlightGroup)>>,
+    pub custom_targets: Vec<Option<CustomTarget>>,
+}
+
+/// Source coordinates for a displayed custom row. A paired row can point to
+/// different files on its two sides.
+#[derive(Debug, Clone, Default)]
+pub struct CustomTarget {
+    pub old: Option<(String, usize)>,
+    pub new: Option<(String, usize)>,
 }
 
 /// One rendered grapheme of a patch line body.
@@ -495,7 +507,307 @@ pub fn render(
         toolbar,
         highlights: builder.highlights,
         code_highlights: code.into_lines(),
+        custom_targets: Vec::new(),
     }
+}
+
+/// Renders a saved arrangement from the same canonical patch used by the
+/// regular review. Section paths are independent, which makes cross-file
+/// moves visible in both terminal layouts.
+pub fn render_custom(
+    custom: &CustomReview,
+    title: &str,
+    layout: DiffLayout,
+    width: usize,
+    tab_width: usize,
+) -> Rendered {
+    let patch = &custom.snapshot.patch;
+    let bodies = patch_bodies(patch);
+    let code = PatchHighlights::compute(patch, &bodies);
+    let geometry = SplitGeometry::new(patch, width);
+    let mut builder = Builder::default();
+    let mut targets = Vec::new();
+    let mut hunk_lines = Vec::new();
+    let mut file_lines = vec![usize::MAX; patch.files.len()];
+    builder.header(title, Some(HighlightGroup::DiffHeader));
+    targets.push(None);
+    builder.header(
+        &format!(
+            "{} → {} / worktree · +{} −{} · saved comparison",
+            patch.base.name,
+            patch.head,
+            patch.additions(),
+            patch.deletions()
+        ),
+        Some(HighlightGroup::Comment),
+    );
+    targets.push(None);
+    let toolbar = render_toolbar(layout, &mut builder);
+    targets.resize(builder.len(), None);
+    builder.header(
+        "# Enter open source · ]c [c section · s layout · r redraw · q close",
+        Some(HighlightGroup::Comment),
+    );
+    targets.push(None);
+    builder.header("", None);
+    targets.push(None);
+
+    for section in &custom.sections {
+        let heading = section_heading(section);
+        let header_line = builder.header(&heading, Some(HighlightGroup::DiffHeader));
+        targets.push(None);
+        hunk_lines.push(header_line);
+        for (index, file) in patch.files.iter().enumerate() {
+            if file_lines[index] == usize::MAX
+                && (section.new_path.as_deref() == Some(file.path.as_str())
+                    || section.old_path.as_deref() == Some(file.path.as_str())
+                    || (section.old_path.is_some()
+                        && section.old_path.as_deref() == file.old_path.as_deref()))
+            {
+                file_lines[index] = header_line;
+            }
+        }
+        match layout {
+            DiffLayout::Unified => {
+                for line in &section.lines {
+                    emit_custom_unified(
+                        line,
+                        section,
+                        patch,
+                        &code,
+                        tab_width,
+                        &mut builder,
+                        &mut targets,
+                    );
+                }
+            }
+            DiffLayout::Split => {
+                let mut old = Vec::new();
+                let mut new = Vec::new();
+                for line in &section.lines {
+                    match line.kind {
+                        PatchLineKind::Removed => old.push(line),
+                        PatchLineKind::Added => new.push(line),
+                        PatchLineKind::Context => {
+                            flush_custom_pair(
+                                &old,
+                                &new,
+                                section,
+                                patch,
+                                &bodies,
+                                &code,
+                                tab_width,
+                                &geometry,
+                                &mut builder,
+                                &mut targets,
+                            );
+                            old.clear();
+                            new.clear();
+                            emit_custom_pair(
+                                Some(line),
+                                Some(line),
+                                section,
+                                patch,
+                                &bodies,
+                                &code,
+                                tab_width,
+                                &geometry,
+                                &mut builder,
+                                &mut targets,
+                            );
+                        }
+                        _ => {
+                            flush_custom_pair(
+                                &old,
+                                &new,
+                                section,
+                                patch,
+                                &bodies,
+                                &code,
+                                tab_width,
+                                &geometry,
+                                &mut builder,
+                                &mut targets,
+                            );
+                            old.clear();
+                            new.clear();
+                            builder
+                                .header(&line.text, Some(structural_group(line.kind, &line.text)));
+                            targets.push(None);
+                        }
+                    }
+                }
+                flush_custom_pair(
+                    &old,
+                    &new,
+                    section,
+                    patch,
+                    &bodies,
+                    &code,
+                    tab_width,
+                    &geometry,
+                    &mut builder,
+                    &mut targets,
+                );
+            }
+        }
+        builder.header("", None);
+        targets.push(None);
+    }
+    let fallback = builder.len().saturating_sub(1);
+    Rendered {
+        title: format!("{DIFF_REVIEW_TITLE_PREFIX}{title}"),
+        text: builder.text,
+        rows: builder.rows,
+        stat_rows: Vec::new(),
+        hunk_lines,
+        file_lines: file_lines
+            .into_iter()
+            .map(|line| if line == usize::MAX { fallback } else { line })
+            .collect(),
+        toolbar,
+        highlights: builder.highlights,
+        code_highlights: code.into_lines(),
+        custom_targets: targets,
+    }
+}
+
+fn section_heading(section: &ReviewSection) -> String {
+    let old = section.old_path.as_deref().unwrap_or("∅");
+    let new = section.new_path.as_deref().unwrap_or("∅");
+    let label = section.label.as_deref().unwrap_or("Change");
+    format!("── {label} · {old} → {new}")
+}
+
+fn is_source_line(kind: PatchLineKind) -> bool {
+    matches!(
+        kind,
+        PatchLineKind::Context | PatchLineKind::Added | PatchLineKind::Removed
+    )
+}
+
+fn custom_info(line: &ReviewSectionLine, patch: &ReviewPatch) -> PatchLine {
+    patch
+        .lines
+        .get(line.source_patch_line)
+        .copied()
+        .unwrap_or(PatchLine {
+            kind: line.kind,
+            file: None,
+            old_line: line.old_line,
+            new_line: line.new_line,
+        })
+}
+
+fn custom_target(line: &ReviewSectionLine, section: &ReviewSection) -> CustomTarget {
+    CustomTarget {
+        old: line
+            .old_line
+            .and_then(|number| section.old_path.as_ref().map(|path| (path.clone(), number))),
+        new: line
+            .new_line
+            .and_then(|number| section.new_path.as_ref().map(|path| (path.clone(), number))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_custom_unified(
+    source: &ReviewSectionLine,
+    section: &ReviewSection,
+    patch: &ReviewPatch,
+    code: &PatchHighlights,
+    tab_width: usize,
+    builder: &mut Builder,
+    targets: &mut Vec<Option<CustomTarget>>,
+) {
+    if !is_source_line(source.kind) {
+        builder.header(
+            &source.text,
+            Some(structural_group(source.kind, &source.text)),
+        );
+        targets.push(None);
+        return;
+    }
+    let glyphs = layout_body(&source.text, tab_width, false);
+    let mut row = RowBuilder::default();
+    let patch_line = source.source_patch_line;
+    let cell = push_cell(
+        &mut row,
+        CellSpec {
+            info: custom_info(source, patch),
+            patch_line,
+            glyphs: &glyphs,
+            segment: 0..glyphs.len(),
+            code: code.line(source.source_patch_line),
+            number: None,
+            number_width: 0,
+            marker: Some(marker_for(source.kind)),
+            pad_to: None,
+            elided: false,
+        },
+    );
+    builder.push(row, ReviewRow::single(cell));
+    targets.push(Some(custom_target(source, section)));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn flush_custom_pair(
+    old: &[&ReviewSectionLine],
+    new: &[&ReviewSectionLine],
+    section: &ReviewSection,
+    patch: &ReviewPatch,
+    bodies: &[&str],
+    code: &PatchHighlights,
+    tab_width: usize,
+    geometry: &SplitGeometry,
+    builder: &mut Builder,
+    targets: &mut Vec<Option<CustomTarget>>,
+) {
+    for index in 0..old.len().max(new.len()) {
+        emit_custom_pair(
+            old.get(index).copied(),
+            new.get(index).copied(),
+            section,
+            patch,
+            bodies,
+            code,
+            tab_width,
+            geometry,
+            builder,
+            targets,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_custom_pair(
+    old: Option<&ReviewSectionLine>,
+    new: Option<&ReviewSectionLine>,
+    section: &ReviewSection,
+    patch: &ReviewPatch,
+    bodies: &[&str],
+    code: &PatchHighlights,
+    tab_width: usize,
+    geometry: &SplitGeometry,
+    builder: &mut Builder,
+    targets: &mut Vec<Option<CustomTarget>>,
+) {
+    let before = builder.len();
+    emit_pair(
+        patch,
+        bodies,
+        code,
+        tab_width,
+        geometry,
+        builder,
+        old.map(|line| line.source_patch_line),
+        new.map(|line| line.source_patch_line),
+    );
+    let target = CustomTarget {
+        old: old.and_then(|line| custom_target(line, section).old),
+        new: new.and_then(|line| custom_target(line, section).new),
+    };
+    targets.resize(builder.len().max(before), Some(target));
 }
 
 /// The text of each patch line without its marker column.

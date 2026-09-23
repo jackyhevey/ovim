@@ -14,6 +14,36 @@ fn set_active_profile_project_scope(editor: &mut Editor) {
     }
 }
 
+#[test]
+fn remote_read_diff_result_remains_complete_json() {
+    let mut editor = Editor::default();
+    editor
+        .ai_state
+        .config
+        .profiles
+        .get_mut("local")
+        .unwrap()
+        .provider = crate::ai::AiProviderKind::Codex;
+    let call = ToolCallInfo {
+        id: "read-diff".into(),
+        name: "read_diff".into(),
+        arguments: serde_json::json!({}),
+    };
+    let page = serde_json::json!({
+        "snapshot_id": "diff_example",
+        "blocks": [{"content": "x".repeat(24_000)}],
+        "next_cursor": "opaque-cursor",
+    });
+    let formatted = editor
+        .format_tool_result_with_target(&call, &crate::ai::ToolResult::Success(page.to_string()));
+    let parsed: serde_json::Value = serde_json::from_str(&formatted).unwrap();
+    assert_eq!(parsed["next_cursor"], "opaque-cursor");
+    assert_eq!(
+        parsed["blocks"][0]["content"].as_str().unwrap().len(),
+        24_000
+    );
+}
+
 fn make_symbol(
     name: &str,
     kind: lsp_types::SymbolKind,

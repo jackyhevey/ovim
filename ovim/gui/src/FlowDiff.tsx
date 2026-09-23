@@ -143,7 +143,7 @@ function FileLine(props: {
 }
 
 export default function FlowDiff(props: FlowDiffProps) {
-    const [selectedPath, setSelectedPath] = createSignal("");
+    const [selectedId, setSelectedId] = createSignal("");
     const [layout, setLayout] = createSignal<"split" | "unified">(
         props.review.layout,
     );
@@ -166,7 +166,7 @@ export default function FlowDiff(props: FlowDiffProps) {
 
     const file = createMemo(
         () =>
-            props.review.files.find((item) => item.path === selectedPath()) ||
+            props.review.files.find((item) => item.id === selectedId()) ||
             props.review.files[0],
     );
     const sections = createMemo(() => (file() ? sectionsForFile(file()!) : []));
@@ -174,8 +174,8 @@ export default function FlowDiff(props: FlowDiffProps) {
 
     createEffect(() => setLayout(props.review.layout));
     createEffect(() => {
-        const identity = `${props.review.title}\0${props.review.files.map((item) => item.path).join("\0")}`;
-        if (reviewIdentity && identity !== reviewIdentity) setSelectedPath("");
+        const identity = `${props.review.title}\0${props.review.files.map((item) => item.id).join("\0")}`;
+        if (reviewIdentity && identity !== reviewIdentity) setSelectedId("");
         reviewIdentity = identity;
     });
     createEffect(() => {
@@ -393,7 +393,13 @@ export default function FlowDiff(props: FlowDiffProps) {
         const side = line.kind === "removed" ? "old" : "new";
         const number = side === "old" ? line.oldLine : line.newLine;
         if (number !== undefined)
-            props.onOpenSource?.(currentFile.path, number, side);
+            props.onOpenSource?.(
+                side === "old"
+                    ? currentFile.oldPath || currentFile.path
+                    : currentFile.path,
+                number,
+                side,
+            );
     };
 
     const keydown: JSX.EventHandlerUnion<HTMLElement, KeyboardEvent> = (
@@ -428,14 +434,14 @@ export default function FlowDiff(props: FlowDiffProps) {
                 goToHunk(activeHunk() + (pendingBracket === "]" ? 1 : -1));
             else {
                 const current = props.review.files.findIndex(
-                    (item) => item.path === file()?.path,
+                    (item) => item.id === file()?.id,
                 );
                 const next =
                     (current +
                         (pendingBracket === "]" ? 1 : -1) +
                         props.review.files.length) %
                     props.review.files.length;
-                setSelectedPath(props.review.files[next]?.path ?? "");
+                setSelectedId(props.review.files[next]?.id ?? "");
             }
             pendingBracket = "";
             return;
@@ -495,18 +501,24 @@ export default function FlowDiff(props: FlowDiffProps) {
                 </div>
                 <div class="flow-toolbar-actions">
                     <label class="flow-file-picker">
-                        <span>File</span>
+                        <span>{props.review.custom ? "Section" : "File"}</span>
                         <select
-                            aria-label="Changed file"
-                            value={file()?.path ?? ""}
+                            aria-label={
+                                props.review.custom
+                                    ? "Diff section"
+                                    : "Changed file"
+                            }
+                            value={file()?.id ?? ""}
                             onChange={(event) =>
-                                setSelectedPath(event.currentTarget.value)
+                                setSelectedId(event.currentTarget.value)
                             }
                         >
                             <For each={props.review.files}>
                                 {(item) => (
-                                    <option value={item.path}>
-                                        {item.path}
+                                    <option value={item.id}>
+                                        {item.label
+                                            ? `${item.label} · ${item.path}`
+                                            : item.path}
                                     </option>
                                 )}
                             </For>
@@ -514,7 +526,13 @@ export default function FlowDiff(props: FlowDiffProps) {
                     </label>
                     <span class="flow-file-count">
                         {props.review.files.length}{" "}
-                        {props.review.files.length === 1 ? "file" : "files"}
+                        {props.review.custom
+                            ? props.review.files.length === 1
+                                ? "section"
+                                : "sections"
+                            : props.review.files.length === 1
+                              ? "file"
+                              : "files"}
                     </span>
                     <div class="flow-hunk-nav" aria-label="Change navigation">
                         <button
@@ -571,10 +589,14 @@ export default function FlowDiff(props: FlowDiffProps) {
                         <div class="flow-action-buttons">
                             <button
                                 type="button"
-                                title="Refresh review (R)"
+                                title={
+                                    props.review.custom
+                                        ? "Redraw saved review (R)"
+                                        : "Refresh review (R)"
+                                }
                                 onClick={() => props.onAction?.("r")}
                             >
-                                Refresh
+                                {props.review.custom ? "Redraw" : "Refresh"}
                             </button>
                             <button
                                 type="button"
@@ -600,7 +622,11 @@ export default function FlowDiff(props: FlowDiffProps) {
                         <span class={`flow-status ${file()!.status}`}>
                             {file()!.status}
                         </span>
-                        <strong>{file()!.path}</strong>
+                        <strong>
+                            {file()!.label
+                                ? `${file()!.label} · ${file()!.path}`
+                                : file()!.path}
+                        </strong>
                         <Show
                             when={
                                 file()!.oldPath &&
@@ -617,6 +643,13 @@ export default function FlowDiff(props: FlowDiffProps) {
                         <i>−{file()!.deletions}</i>
                     </span>
                 </div>
+                <Show when={file()!.metadata?.length}>
+                    <div class="flow-file-metadata" aria-label="File metadata">
+                        <For each={file()!.metadata}>
+                            {(line) => <code>{line}</code>}
+                        </For>
+                    </div>
+                </Show>
                 <Show
                     when={!file()!.binary}
                     fallback={

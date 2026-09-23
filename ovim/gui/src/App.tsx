@@ -178,6 +178,7 @@ export const QueuedChatMessage = (props: {
 export const ChatActivityGroup = (props: {
     item: Extract<ChatTranscriptItem, { kind: "activity" }>;
     onSelect?: (index: number) => void;
+    onReplay?: (toolCallId: string) => void;
 }) => {
     const [expanded, setExpanded] = createSignal(false);
     return (
@@ -230,6 +231,10 @@ export const ChatActivityGroup = (props: {
                                         {entry.live ? "live" : entry.model}
                                     </small>
                                 </header>
+                                <ToolReplayButton
+                                    message={entry}
+                                    onReplay={props.onReplay}
+                                />
                                 <Show when={entry.content}>
                                     <Markdown text={entry.content} />
                                 </Show>
@@ -591,7 +596,7 @@ export type ChatTranscriptItem =
 
 const isActivityMessage = (message: GuiChatMessage) =>
     message.role === "thinking" ||
-    message.role === "tool" ||
+    (message.role === "tool" && !message.replayToolCallId) ||
     (message.role === "assistant" &&
         message.tools.length > 0 &&
         !message.content.trim());
@@ -664,6 +669,8 @@ const sameChatMessage = (left: GuiChatMessage, right: GuiChatMessage) =>
     left.content === right.content &&
     left.model === right.model &&
     left.toolName === right.toolName &&
+    left.replayToolCallId === right.replayToolCallId &&
+    left.replayLabel === right.replayLabel &&
     sameStrings(left.tools, right.tools) &&
     sameStrings(left.images ?? [], right.images ?? []) &&
     (left as ChatActivityEntry).live === (right as ChatActivityEntry).live;
@@ -763,9 +770,29 @@ export const ToolCallList = (props: { tools: string[] }) => (
     </Show>
 );
 
+const ToolReplayButton = (props: {
+    message: GuiChatMessage;
+    onReplay?: (toolCallId: string) => void;
+}) => (
+    <Show when={props.message.replayToolCallId}>
+        {(id) => (
+            <button
+                type="button"
+                onClick={(event) => {
+                    event.stopPropagation();
+                    props.onReplay?.(id());
+                }}
+            >
+                {props.message.replayLabel}
+            </button>
+        )}
+    </Show>
+);
+
 export const ChatMessageView = (props: {
     message: GuiChatMessage;
     onSelect?: (index: number) => void;
+    onReplay?: (toolCallId: string) => void;
 }) => {
     const [expanded, setExpanded] = createSignal(false);
     let disclosure: HTMLDetailsElement | undefined;
@@ -831,6 +858,10 @@ export const ChatMessageView = (props: {
                     </Show>
                 </details>
             </Show>
+            <ToolReplayButton
+                message={props.message}
+                onReplay={props.onReplay}
+            />
             <Show when={props.message.images?.length}>
                 <footer
                     class="chat-message-attachments"
@@ -866,6 +897,7 @@ export const ChatPanel = (props: {
     onYolo?: () => void;
     onComprehension?: () => void;
     onMessage?: (index: number) => void;
+    onReplay?: (toolCallId: string) => void;
     onAgent?: (agentId?: string) => void;
     hideComposer?: boolean;
     onQueuedAction?: (
@@ -1128,6 +1160,7 @@ export const ChatPanel = (props: {
                                                 ).message
                                             }
                                             onSelect={props.onMessage}
+                                            onReplay={props.onReplay}
                                         />
                                     }
                                 >
@@ -1135,6 +1168,7 @@ export const ChatPanel = (props: {
                                         <ChatActivityGroup
                                             item={activity()}
                                             onSelect={props.onMessage}
+                                            onReplay={props.onReplay}
                                         />
                                     )}
                                 </Show>
@@ -2635,6 +2669,9 @@ function App() {
                     }
                     onMessage={(index) =>
                         void mutate("gui_select_chat_message", { index })
+                    }
+                    onReplay={(toolCallId) =>
+                        void mutate("gui_replay_chat_tool", { toolCallId })
                     }
                     onAgent={(agentId) =>
                         void mutate("gui_select_chat_agent", { agentId })

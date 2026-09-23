@@ -560,6 +560,10 @@ fn handle_message_history(editor: &mut Editor, key_event: KeyEvent) -> Result<()
 
                 if role == ChatRole::Tool {
                     if let Some(tool_call_id) = tool_call_id.as_deref() {
+                        if editor.ai_chat_tool_replay_label(tool_call_id).is_some() {
+                            editor.replay_ai_chat_tool(tool_call_id);
+                            return Ok(());
+                        }
                         if !editor.open_ai_shell_process_inspector(tool_call_id) {
                             editor.toggle_ai_chat_tool_event(tool_call_id);
                         }
