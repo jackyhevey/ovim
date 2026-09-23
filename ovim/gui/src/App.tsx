@@ -1942,19 +1942,18 @@ function App() {
         )
             return;
         const target = event.target as Element | null;
+        const primaryModifier = macos ? event.metaKey : event.ctrlKey;
         if (
-            event.ctrlKey &&
-            !event.metaKey &&
+            primaryModifier &&
             !event.altKey &&
-            !event.shiftKey &&
-            (event.code === "Backquote" || event.key === "`")
+            event.shiftKey &&
+            event.key.toLowerCase() === "t"
         ) {
             event.preventDefault();
             toggleTerminal();
             return;
         }
         if (target?.closest?.(".terminal-panel")) return;
-        const primaryModifier = macos ? event.metaKey : event.ctrlKey;
         if (primaryModifier && event.key.toLowerCase() === "s") {
             event.preventDefault();
             performMenuAction(event.altKey ? "file.save-all" : "file.save");
@@ -3494,7 +3493,7 @@ function App() {
                         <IconButton
                             icon="terminal"
                             label="Terminal"
-                            shortcut="Ctrl+`"
+                            shortcut={macos ? "Cmd+Shift+T" : "Ctrl+Shift+T"}
                             selected={
                                 terminalDockOpen() &&
                                 activeDock() === "context" &&

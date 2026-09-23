@@ -3,9 +3,10 @@
 ## Native GUI
 
 Click the Terminal icon in the left activity bar, choose **View → Terminal**, or
-press **Ctrl+`** to show or hide the integrated terminal. The terminal opens an
-interactive shell in the current workspace directory. Typing, paste, and terminal
-shortcuts go directly to the shell while it has focus.
+press **Cmd+Shift+T** on macOS or **Ctrl+Shift+T** elsewhere to show or hide the
+integrated terminal. The terminal opens an interactive shell in the current
+workspace directory. Typing, paste, and terminal shortcuts go directly to the
+shell while it has focus.
 
 Hiding the panel preserves the running shell and its scrollback. Exit the shell
 normally, then use **Restart terminal** to start a fresh session. Closing Ovim
@@ -43,6 +44,6 @@ shows that output and waits for Enter before returning.
 Terminal sessions temporarily use the terminal that launched Ovim. They are not
 PTY-backed Ovim buffers, so there is no terminal scrollback buffer, split-window
 terminal, or terminal-mode keymap yet. The TUI event loop is paused until the
-child exits. The `:terminal` and `:shell` commands still belong to the terminal frontend; use
-the Terminal icon or Ctrl+` in the GUI. The headless command API rejects
-interactive sessions.
+child exits. The `:terminal` and `:shell` commands still belong to the terminal
+frontend; use the Terminal icon or Cmd/Ctrl+Shift+T in the GUI. The headless
+command API rejects interactive sessions.

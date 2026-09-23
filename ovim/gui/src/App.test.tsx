@@ -404,28 +404,42 @@ describe("Ovim Solid workbench", () => {
         ).toBeTruthy();
     });
 
-    it("toggles the terminal with Ctrl+Backquote while keeping its dock mounted", () => {
-        const result = render(() => <App />);
-        const shortcut = { key: "`", code: "Backquote", ctrlKey: true };
+    it.each(["MacIntel", "Linux x86_64"])(
+        "toggles the terminal with the platform shortcut on %s while keeping its dock mounted",
+        (platform) => {
+            vi.spyOn(navigator, "platform", "get").mockReturnValue(platform);
+            const result = render(() => <App />);
+            const shortcut = {
+                key: "T",
+                code: "KeyT",
+                shiftKey: true,
+                ctrlKey: platform !== "MacIntel",
+                metaKey: platform === "MacIntel",
+            };
 
-        fireEvent.keyDown(window, shortcut);
-        const panel = screen.getByRole("tabpanel", { name: "Terminal" });
-        expect(
-            screen.getByText("Terminal is available in the desktop app."),
-        ).toBeTruthy();
+            fireEvent.keyDown(document.body, shortcut);
+            const panel = screen.getByRole("tabpanel", { name: "Terminal" });
+            expect(
+                screen.getByText("Terminal is available in the desktop app."),
+            ).toBeTruthy();
 
-        fireEvent.keyDown(window, shortcut);
-        expect(
-            result.container.querySelector(".workbench")?.classList,
-        ).toContain("terminal-collapsed");
-        expect(result.container.querySelector(".context-panel")).toBe(panel);
+            fireEvent.keyDown(document.body, shortcut);
+            expect(
+                result.container.querySelector(".workbench")?.classList,
+            ).toContain("terminal-collapsed");
+            expect(result.container.querySelector(".context-panel")).toBe(
+                panel,
+            );
 
-        fireEvent.keyDown(window, shortcut);
-        expect(
-            result.container.querySelector(".workbench")?.classList,
-        ).not.toContain("terminal-collapsed");
-        expect(screen.getByRole("tabpanel", { name: "Terminal" })).toBe(panel);
-    });
+            fireEvent.keyDown(document.body, shortcut);
+            expect(
+                result.container.querySelector(".workbench")?.classList,
+            ).not.toContain("terminal-collapsed");
+            expect(screen.getByRole("tabpanel", { name: "Terminal" })).toBe(
+                panel,
+            );
+        },
+    );
 
     it("opens the terminal from the dashboard", () => {
         const previousDashboard = mockSnapshot.dashboard;
@@ -443,9 +457,10 @@ describe("Ovim Solid workbench", () => {
             expect(
                 result.container.querySelector(".workbench")?.classList,
             ).toContain("terminal-collapsed");
-            fireEvent.keyDown(window, {
-                key: "`",
-                code: "Backquote",
+            fireEvent.keyDown(document.body, {
+                key: "T",
+                code: "KeyT",
+                shiftKey: true,
                 ctrlKey: true,
             });
             expect(

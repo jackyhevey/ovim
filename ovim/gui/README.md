@@ -116,9 +116,9 @@ chat profile enables it by default. See
 [`user-docs/ai.md`](../../user-docs/ai.md#shared-embedded-browser-ovim-gui) for
 the control and security boundary.
 
-The activity bar's Terminal action (also **View → Terminal** and **Ctrl+`**)
-opens a persistent workspace shell. `TerminalPanel` owns xterm rendering and
-focus; the native `TerminalHost` owns the pseudoterminal, shell process, and
+The activity bar's Terminal action (also **View → Terminal**, **Cmd+Shift+T** on
+macOS, or **Ctrl+Shift+T** elsewhere) opens a persistent workspace shell.
+`TerminalPanel` owns xterm rendering and focus; the native `TerminalHost` owns the pseudoterminal, shell process, and
 session lifecycle. Hiding the panel retains the shell and scrollback, while
 closing the application tears down the session. The browser development preview
 shows an unavailable state because it has no local PTY bridge.

@@ -82,7 +82,7 @@ describe("browser key router", () => {
                 false,
                 true,
             ),
-        ).toBe("browser.restore-tab");
+        ).toBeUndefined();
     });
 
     it("routes browser actions through the shared workbench controller", async () => {

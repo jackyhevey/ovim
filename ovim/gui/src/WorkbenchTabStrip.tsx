@@ -191,7 +191,7 @@ export default function WorkbenchTabStrip(props: WorkbenchTabStripProps) {
                         props.browserState.sessions.length >=
                         props.browserState.maxSessions
                             ? `Close a Browser tab before restoring one (limit ${props.browserState.maxSessions})`
-                            : "Restore closed Browser tab · X or Cmd/Ctrl+Shift+T in Browser"
+                            : "Restore closed Browser tab · X in Browser"
                     }
                     onClick={props.onRestoreBrowser}
                 >
