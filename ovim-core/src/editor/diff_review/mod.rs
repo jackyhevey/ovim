@@ -393,8 +393,16 @@ impl Editor {
         }
         let root = state.patch.root.clone();
         if let Some(saved) = self.ui_panels.diff_review_overlays.get_mut(&root) {
+            let previous = saved.enabled;
             saved.enabled = !saved.enabled;
-            self.refresh_diff_review();
+            if let Err(error) = self.refresh_live_diff_review() {
+                self.ui_panels
+                    .diff_review_overlays
+                    .get_mut(&root)
+                    .expect("saved overlay remains cached")
+                    .enabled = previous;
+                return Err(error);
+            }
             Ok(())
         } else {
             anyhow::bail!("No saved moves for this repository")
@@ -623,6 +631,16 @@ impl Editor {
             self.set_status_message("Saved diff review");
             return;
         }
+        if let Err(error) = self.refresh_live_diff_review() {
+            self.review_toast(ToastLevel::Error, format!("Diff review: {error:#}"));
+        }
+    }
+
+    /// Compute the entire live comparison before replacing the visible review.
+    fn refresh_live_diff_review(&mut self) -> anyhow::Result<()> {
+        let index = self
+            .review_buffer_index()
+            .ok_or_else(|| anyhow::anyhow!("No diff review is open"))?;
         let (root, explicit) = {
             let state = self.ui_panels.diff_review.as_ref().expect("review state");
             (state.patch.root.clone(), state.explicit_spec.clone())
@@ -631,21 +649,8 @@ impl Editor {
         let base = match explicit.as_deref() {
             Some(spec) => Ok(ReviewBase::explicit(spec)),
             None => self.resolve_review_base_for_path(&root),
-        };
-        let base = match base {
-            Ok(base) => base,
-            Err(error) => {
-                self.review_toast(ToastLevel::Error, format!("Diff review: {error:#}"));
-                return;
-            }
-        };
-        let patch = match native_diff::review_patch(&root, &base) {
-            Ok(patch) => patch,
-            Err(error) => {
-                self.review_toast(ToastLevel::Error, format!("Diff review: {error:#}"));
-                return;
-            }
-        };
+        }?;
+        let patch = native_diff::review_patch(&root, &base)?;
 
         let overlay = self.active_overlay_for_patch(&patch);
         let anchor = self.diff_review_anchor(index, true);
@@ -667,6 +672,7 @@ impl Editor {
         if let Some(message) = message {
             self.set_status_message(message);
         }
+        Ok(())
     }
 
     /// `s` in the review, or a click on the toolbar.

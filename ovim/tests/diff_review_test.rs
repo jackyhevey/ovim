@@ -180,6 +180,26 @@ async fn saved_moves_follow_exact_live_diff_and_recover_after_undo() {
         test.editor.diff_review_overlay_state().unwrap().mode,
         "active"
     );
+
+    test.editor.open_diff_review(Some("main")).unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+    let visible = test.editor.buffer().rope().to_string();
+    Repository::open(&fixture.root)
+        .unwrap()
+        .find_reference("refs/heads/main")
+        .unwrap()
+        .delete()
+        .unwrap();
+    assert!(test.editor.toggle_diff_review_overlay().is_err());
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+    assert!(test.editor.diff_review().unwrap().custom().is_some());
+    assert_eq!(test.editor.buffer().rope().to_string(), visible);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
