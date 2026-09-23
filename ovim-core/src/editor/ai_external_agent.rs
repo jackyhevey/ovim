@@ -482,8 +482,8 @@ impl Editor {
     pub(crate) fn observe_external_result(
         &mut self,
         id: String,
-        content: String,
-        error: bool,
+        mut content: String,
+        mut error: bool,
     ) -> Result<()> {
         let (call, tool) = self
             .ai_state
@@ -494,6 +494,12 @@ impl Editor {
             .context("Claude result has no matching tool observation")?;
         if call.name == "explain_with_codebase" {
             self.bind_editor_walkthrough_result(&call.id, &content);
+        }
+        if call.name == "show_custom_diff" && !error {
+            if let Err(reason) = self.bind_editor_custom_diff_result(&call.id, &content) {
+                content = reason;
+                error = true;
+            }
         }
         let result = if error {
             crate::ai::ToolResult::Error(content.clone())

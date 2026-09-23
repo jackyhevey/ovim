@@ -18,13 +18,16 @@ const review: GuiDiffDocument = {
     title: "Diff · main → payment-api",
     layout: "split",
     managed: true,
+    custom: false,
     files: [
         {
+            id: "src/payments/PaymentResource.java",
             path: "src/payments/PaymentResource.java",
             status: "modified",
             additions: 5,
             deletions: 24,
             binary: false,
+            metadata: [],
             hunks: [
                 {
                     header: "@@ -1200,104 +1200,85 @@ public Response acceptPayment()",
@@ -59,17 +62,19 @@ const review: GuiDiffDocument = {
             ],
         },
         {
+            id: "assets/receipt.png",
             path: "assets/receipt.png",
             status: "modified",
             additions: 0,
             deletions: 0,
             binary: true,
+            metadata: [],
             hunks: [],
         },
     ],
 };
 
-async function setup(page: Page) {
+async function setup(page: Page, document: GuiDiffDocument = review) {
     await page.route("**/src/mock.ts", async (route) => {
         const response = await route.fetch();
         await route.fulfill({
@@ -77,15 +82,94 @@ async function setup(page: Page) {
             body: `${await response.text()}
                 delete mockSnapshot.aiChat;
                 delete mockSnapshot.fileTree;
-                mockSnapshot.fileName = 'Diff · main → payment-api';
+                mockSnapshot.fileName = ${JSON.stringify(document.title)};
                 mockSnapshot.filePath = undefined;
                 mockSnapshot.readOnly = true;
-                mockSnapshot.panes = [{...mockSnapshot.panes[0], diffReview: ${JSON.stringify(review)}}];`,
+                mockSnapshot.panes = [{...mockSnapshot.panes[0], diffReview: ${JSON.stringify(document)}}];`,
         });
     });
     await page.goto("/");
     await expect(page.locator(".flow-diff")).toBeVisible();
 }
+
+test("custom comparison shows cross-file sides and a metadata-only section", async ({
+    page,
+}) => {
+    const custom: GuiDiffDocument = {
+        title: "Diff · Extract parser",
+        layout: "split",
+        managed: true,
+        custom: true,
+        files: [
+            {
+                id: "pair_0",
+                label: "Parser moved and simplified",
+                path: "src/parser.ts",
+                oldPath: "src/main.ts",
+                status: "reassigned",
+                additions: 2,
+                deletions: 3,
+                binary: false,
+                metadata: [],
+                hunks: [
+                    {
+                        header: "Parser moved and simplified",
+                        oldStart: 44,
+                        oldCount: 3,
+                        newStart: 8,
+                        newCount: 2,
+                        lines: [
+                            {
+                                kind: "removed",
+                                text: "function parse(input: string) {",
+                                oldLine: 44,
+                            },
+                            {
+                                kind: "removed",
+                                text: "  return legacyParse(input);",
+                                oldLine: 45,
+                            },
+                            { kind: "removed", text: "}", oldLine: 46 },
+                            {
+                                kind: "added",
+                                text: "export function parse(input: string) {",
+                                newLine: 8,
+                            },
+                            {
+                                kind: "added",
+                                text: "  return parseTokens(input); }",
+                                newLine: 9,
+                            },
+                        ],
+                    },
+                ],
+            },
+            {
+                id: "residual_1",
+                path: "src/parser.ts",
+                status: "modified",
+                additions: 0,
+                deletions: 0,
+                binary: false,
+                metadata: ["new mode 100644"],
+                hunks: [],
+            },
+        ],
+    };
+    await setup(page, custom);
+    await expect(page.getByText("src/main.ts", { exact: true })).toBeVisible();
+    await expect(
+        page.locator(".flow-side-heading").last().getByText("src/parser.ts"),
+    ).toBeVisible();
+    await expect(page.getByText("2 sections")).toBeVisible();
+    await page.screenshot({
+        path: test.info().outputPath("custom-diff-cross-file.png"),
+    });
+    await page
+        .getByRole("combobox", { name: "Diff section" })
+        .selectOption("residual_1");
+    await expect(page.getByText("new mode 100644")).toBeVisible();
+});
 
 test("compact diff panes stay centered and draw unequal change connectors", async ({
     page,

@@ -2,14 +2,14 @@
 
 use anyhow::{bail, Context, Result};
 use git2::{Delta, Diff, DiffFindOptions, DiffOptions, Oid, Patch, Repository, Tree};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const MAX_PATCH_BYTES: usize = 4 * 1024 * 1024;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffFile {
     pub path: String,
@@ -37,7 +37,7 @@ pub fn worktree_root(path: &Path) -> Result<PathBuf> {
 const DEFAULT_BRANCH_CANDIDATES: &[&str] = &["main", "master", "develop", "trunk"];
 
 /// How the comparison base of a branch review was chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BaseKind {
     /// The repository's default branch (merge-base with HEAD).
@@ -51,7 +51,7 @@ pub enum BaseKind {
 }
 
 /// The base a branch review compares the working tree against.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewBase {
     /// Human-readable name, e.g. `origin/main`, `main`, or `HEAD`.
@@ -317,7 +317,7 @@ fn fetch_age(repo: &Repository) -> (Option<Duration>, bool) {
 }
 
 /// Kind of a line in a rendered patch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PatchLineKind {
     /// `diff --git`, `index`, `---`, `+++`, rename/mode lines
@@ -332,7 +332,7 @@ pub enum PatchLineKind {
 }
 
 /// Source mapping for one line of a rendered patch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PatchLine {
     pub kind: PatchLineKind,
@@ -348,7 +348,7 @@ pub struct PatchLine {
 
 /// A full branch review: summary plus a unified patch with per-line source
 /// mapping, ready to be shown in a buffer.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewPatch {
     pub root: PathBuf,
@@ -357,6 +357,9 @@ pub struct ReviewPatch {
     pub base: ReviewBase,
     /// Short OID of the merge-base used, when the spec has one.
     pub merge_base: Option<String>,
+    /// Full commit OID of the left side actually used to build the patch.
+    #[serde(default)]
+    pub comparison_base_oid: String,
     /// Commits on HEAD that are not on the base.
     pub ahead: usize,
     /// Commits on the base that are not on HEAD.
@@ -377,6 +380,12 @@ impl ReviewPatch {
         self.files.iter().map(|file| file.deletions).sum()
     }
 }
+
+mod custom;
+pub use custom::{
+    review_snapshot, ChangeBlock, ChangeRef, CustomReview, DiffPairing, ReviewSection,
+    ReviewSectionLine, ReviewSnapshot,
+};
 
 /// Builds the full review patch for `base`.
 pub fn review_patch(path: &Path, base: &ReviewBase) -> Result<ReviewPatch> {
@@ -407,7 +416,7 @@ pub fn review_patch(path: &Path, base: &ReviewBase) -> Result<ReviewPatch> {
         _ => (None, 0, 0),
     };
 
-    let diff = build_diff(&repo, &base.spec)?;
+    let (diff, comparison_base_oid) = build_diff(&repo, &base.spec)?;
     let files = summarize(&diff)?;
     let file_index: HashMap<&str, usize> = files
         .iter()
@@ -534,6 +543,7 @@ pub fn review_patch(path: &Path, base: &ReviewBase) -> Result<ReviewPatch> {
         head,
         base: base.clone(),
         merge_base,
+        comparison_base_oid: comparison_base_oid.to_string(),
         ahead,
         behind,
         files,
@@ -554,7 +564,7 @@ fn short_oid(oid: &Oid) -> String {
     hex[..7.min(hex.len())].to_string()
 }
 
-fn build_diff<'repo>(repo: &'repo Repository, spec: &str) -> Result<Diff<'repo>> {
+fn build_diff<'repo>(repo: &'repo Repository, spec: &str) -> Result<(Diff<'repo>, Oid)> {
     let mut options = DiffOptions::new();
     options
         .include_untracked(true)
@@ -565,28 +575,42 @@ fn build_diff<'repo>(repo: &'repo Repository, spec: &str) -> Result<Diff<'repo>>
         .old_prefix("a")
         .new_prefix("b");
 
-    let mut diff = if let Some(base) = spec.strip_suffix("...WORKTREE") {
-        let base_tree = merge_base_tree(repo, base.trim())?;
-        repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut options))?
+    let (mut diff, comparison_base_oid) = if let Some(base) = spec.strip_suffix("...WORKTREE") {
+        let (base_tree, oid) = merge_base_tree(repo, base.trim())?;
+        (
+            repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut options))?,
+            oid,
+        )
     } else if let Some(base) = spec.strip_suffix("..WORKTREE") {
-        let base_tree = resolve_tree(repo, base.trim())?;
-        repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut options))?
+        let oid = resolve_commit_oid(repo, base.trim())?;
+        let base_tree = repo.find_commit(oid)?.tree()?;
+        (
+            repo.diff_tree_to_workdir_with_index(Some(&base_tree), Some(&mut options))?,
+            oid,
+        )
     } else if let Some((left, right)) = spec.split_once("...") {
         let left = resolve_commit_oid(repo, left.trim())?;
         let right = resolve_commit_oid(repo, right.trim())?;
         let base = repo.merge_base(left, right)?;
         let base_tree = repo.find_commit(base)?.tree()?;
         let right_tree = repo.find_commit(right)?.tree()?;
-        repo.diff_tree_to_tree(Some(&base_tree), Some(&right_tree), Some(&mut options))?
+        (
+            repo.diff_tree_to_tree(Some(&base_tree), Some(&right_tree), Some(&mut options))?,
+            base,
+        )
     } else if let Some((left, right)) = spec.split_once("..") {
-        let left_tree = resolve_tree(repo, left.trim())?;
+        let left = resolve_commit_oid(repo, left.trim())?;
+        let left_tree = repo.find_commit(left)?.tree()?;
         let right_tree = resolve_tree(repo, right.trim())?;
-        repo.diff_tree_to_tree(Some(&left_tree), Some(&right_tree), Some(&mut options))?
+        (
+            repo.diff_tree_to_tree(Some(&left_tree), Some(&right_tree), Some(&mut options))?,
+            left,
+        )
     } else {
         bail!("Use a comparison such as HEAD...WORKTREE, main...WORKTREE, or main..feature")
     };
     diff.find_similar(Some(DiffFindOptions::new().renames(true)))?;
-    Ok(diff)
+    Ok((diff, comparison_base_oid))
 }
 
 fn resolve_commit_oid(repo: &Repository, reference: &str) -> Result<Oid> {
@@ -603,11 +627,11 @@ fn resolve_tree<'repo>(repo: &'repo Repository, reference: &str) -> Result<Tree<
         .with_context(|| format!("Could not read the tree for {reference}"))
 }
 
-fn merge_base_tree<'repo>(repo: &'repo Repository, base: &str) -> Result<Tree<'repo>> {
+fn merge_base_tree<'repo>(repo: &'repo Repository, base: &str) -> Result<(Tree<'repo>, Oid)> {
     let base = resolve_commit_oid(repo, base)?;
     let head = resolve_commit_oid(repo, "HEAD")?;
     let oid = repo.merge_base(base, head).unwrap_or(base);
-    Ok(repo.find_commit(oid)?.tree()?)
+    Ok((repo.find_commit(oid)?.tree()?, oid))
 }
 
 fn summarize(diff: &Diff<'_>) -> Result<Vec<DiffFile>> {

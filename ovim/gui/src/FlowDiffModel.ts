@@ -23,7 +23,7 @@ export function sectionsForFile(file: FlowDiffFile): FlowSection[] {
     file.hunks.forEach((hunk, hunkIndex) => {
         const skippedOld = Math.max(0, hunk.oldStart - previousOldEnd);
         const skippedNew = Math.max(0, hunk.newStart - previousNewEnd);
-        if (skippedOld || skippedNew) {
+        if ((skippedOld || skippedNew) && file.status !== "reassigned") {
             sections.push({
                 id: `gap-${hunkIndex}`,
                 kind: "gap",

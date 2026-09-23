@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::buffer::Buffer;
 use crate::editor::{DiffLayout, DiffReviewState, Editor, DIFF_REVIEW_TITLE_PREFIX};
-use ovim_core::native_diff::{PatchLineKind, ReviewPatch};
+use ovim_core::native_diff::{CustomReview, PatchLineKind, ReviewPatch};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +15,7 @@ pub struct GuiDiffReview {
     pub title: String,
     pub layout: &'static str,
     pub managed: bool,
+    pub custom: bool,
     pub files: Vec<GuiDiffFile>,
 }
 
@@ -38,6 +39,9 @@ impl Serialize for GuiDiffDocument {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuiDiffFile {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
@@ -45,6 +49,7 @@ pub struct GuiDiffFile {
     pub additions: usize,
     pub deletions: usize,
     pub binary: bool,
+    pub metadata: Vec<String>,
     pub hunks: Vec<GuiDiffHunk>,
 }
 
@@ -89,6 +94,9 @@ pub fn project_diff(editor: &Editor, buffer: &Buffer) -> Option<GuiDiffReview> {
         .diff_review()
         .filter(|state| state.buffer_id == buffer.id())
     {
+        if let Some(custom) = review.custom() {
+            return Some(project_custom_review(&title, review, custom));
+        }
         return Some(project_review_patch(&title, review));
     }
     let path = title.strip_prefix(DIFF_REVIEW_TITLE_PREFIX)?;
@@ -102,12 +110,15 @@ fn project_review_patch(title: &str, review: &DiffReviewState) -> GuiDiffReview 
         .files
         .iter()
         .map(|file| GuiDiffFile {
+            id: file.path.clone(),
+            label: None,
             path: file.path.clone(),
             old_path: file.old_path.clone(),
             status: file.status.clone(),
             additions: file.additions,
             deletions: file.deletions,
             binary: file.binary,
+            metadata: Vec::new(),
             hunks: Vec::new(),
         })
         .collect();
@@ -146,7 +157,11 @@ fn project_review_patch(title: &str, review: &DiffReviewState) -> GuiDiffReview 
                     ),
                 });
             }
-            PatchLineKind::FileHeader | PatchLineKind::Meta => {}
+            PatchLineKind::FileHeader | PatchLineKind::Meta => {
+                if is_visible_metadata(text) {
+                    file.metadata.push(text.to_string());
+                }
+            }
         }
     }
 
@@ -154,18 +169,152 @@ fn project_review_patch(title: &str, review: &DiffReviewState) -> GuiDiffReview 
         title: title.to_string(),
         layout: layout_name(review.layout),
         managed: true,
+        custom: false,
+        files,
+    }
+}
+
+fn project_custom_review(
+    title: &str,
+    review: &DiffReviewState,
+    custom: &CustomReview,
+) -> GuiDiffReview {
+    let patch = review.patch();
+    let review_lines = review.patch_review_lines();
+    let files = custom
+        .sections
+        .iter()
+        .map(|section| {
+            let path = section
+                .new_path
+                .as_deref()
+                .or(section.old_path.as_deref())
+                .unwrap_or("(metadata)")
+                .to_string();
+            let canonical = patch.files.iter().find(|file| {
+                section.new_path.as_deref() == Some(file.path.as_str())
+                    || section.old_path.as_deref() == Some(file.path.as_str())
+                    || (section.old_path.is_some()
+                        && section.old_path.as_deref() == file.old_path.as_deref())
+            });
+            let additions = section
+                .lines
+                .iter()
+                .filter(|line| line.kind == PatchLineKind::Added)
+                .count();
+            let deletions = section
+                .lines
+                .iter()
+                .filter(|line| line.kind == PatchLineKind::Removed)
+                .count();
+            let header = section
+                .lines
+                .iter()
+                .find(|line| line.kind == PatchLineKind::HunkHeader)
+                .map(|line| line.text.clone())
+                .or_else(|| section.label.clone())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{} → {}",
+                        section.old_path.as_deref().unwrap_or("∅"),
+                        section.new_path.as_deref().unwrap_or("∅")
+                    )
+                });
+            let old_start = section
+                .lines
+                .iter()
+                .filter_map(|line| line.old_line)
+                .min()
+                .unwrap_or(0);
+            let new_start = section
+                .lines
+                .iter()
+                .filter_map(|line| line.new_line)
+                .min()
+                .unwrap_or(0);
+            let lines: Vec<GuiDiffLine> = section
+                .lines
+                .iter()
+                .filter(|line| {
+                    matches!(
+                        line.kind,
+                        PatchLineKind::Context | PatchLineKind::Added | PatchLineKind::Removed
+                    )
+                })
+                .map(|line| GuiDiffLine {
+                    kind: kind_name(line.kind),
+                    text: line.text.clone(),
+                    old_line: (line.kind != PatchLineKind::Added)
+                        .then_some(line.old_line)
+                        .flatten(),
+                    new_line: (line.kind != PatchLineKind::Removed)
+                        .then_some(line.new_line)
+                        .flatten(),
+                    review_line: review_lines.get(line.source_patch_line).copied().flatten(),
+                    highlights: project_highlights(
+                        &line.text,
+                        review.patch_line_highlights(line.source_patch_line),
+                    ),
+                })
+                .collect();
+            let hunks = if lines.is_empty() {
+                Vec::new()
+            } else {
+                vec![GuiDiffHunk {
+                    header,
+                    old_start,
+                    old_count: lines.iter().filter(|line| line.old_line.is_some()).count(),
+                    new_start,
+                    new_count: lines.iter().filter(|line| line.new_line.is_some()).count(),
+                    review_line: lines.iter().find_map(|line| line.review_line),
+                    lines,
+                }]
+            };
+            GuiDiffFile {
+                id: section.id.clone(),
+                label: section.label.clone(),
+                path,
+                old_path: section.old_path.clone(),
+                status: if section.is_reassigned {
+                    "reassigned".to_string()
+                } else {
+                    canonical
+                        .map(|file| file.status.clone())
+                        .unwrap_or_else(|| "modified".to_string())
+                },
+                additions,
+                deletions,
+                binary: canonical.is_some_and(|file| file.binary),
+                metadata: section
+                    .lines
+                    .iter()
+                    .filter(|line| is_visible_metadata(&line.text))
+                    .map(|line| line.text.clone())
+                    .collect(),
+                hunks,
+            }
+        })
+        .collect();
+    GuiDiffReview {
+        title: title.to_string(),
+        layout: layout_name(review.layout),
+        managed: true,
+        custom: true,
         files,
     }
 }
 
 fn project_standalone(title: &str, path: &str, content: &str) -> GuiDiffReview {
     let mut file = GuiDiffFile {
+        id: path.to_string(),
+        label: None,
         path: path.to_string(),
         old_path: None,
         status: "modified".to_string(),
         additions: 0,
         deletions: 0,
         binary: false,
+        metadata: Vec::new(),
         hunks: Vec::new(),
     };
     let mut old_line = 0;
@@ -188,6 +337,9 @@ fn project_standalone(title: &str, path: &str, content: &str) -> GuiDiffReview {
         }
         if text.starts_with("Binary files ") || text.starts_with("GIT binary patch") {
             file.binary = true;
+        }
+        if is_visible_metadata(text) {
+            file.metadata.push(text.to_string());
         }
         if let Some(old_path) = text.strip_prefix("rename from ") {
             file.old_path = Some(old_path.to_string());
@@ -234,8 +386,28 @@ fn project_standalone(title: &str, path: &str, content: &str) -> GuiDiffReview {
         title: title.to_string(),
         layout: "split",
         managed: false,
+        custom: false,
         files: vec![file],
     }
+}
+
+fn is_visible_metadata(text: &str) -> bool {
+    [
+        "old mode ",
+        "new mode ",
+        "new file mode ",
+        "deleted file mode ",
+        "rename from ",
+        "rename to ",
+        "copy from ",
+        "copy to ",
+        "similarity index ",
+        "Binary files ",
+        "GIT binary patch",
+        "\\ No newline at end of file",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
 }
 
 fn project_highlights(

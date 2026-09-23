@@ -159,6 +159,21 @@
     font: 600 11px var(--editor-font);
 }
 
+.flow-file-metadata {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-secondary);
+    background: var(--surface-1);
+    font: 10px var(--editor-font);
+}
+
+.flow-file-metadata code {
+    white-space: pre-wrap;
+}
+
 .flow-renamed,
 .flow-file-stats {
     color: var(--text-secondary);

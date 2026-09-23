@@ -564,7 +564,7 @@ fn handle_left_click(editor: &mut Editor, col: u16, row: u16) -> Result<Option<S
         if let Some(tool_call_id) = editor
             .render_cache
             .ai_chat_interactions
-            .walkthrough_replays
+            .tool_replays
             .iter()
             .find(|(area, _)| area.contains(col, row))
             .map(|(_, tool_call_id)| tool_call_id.clone())
@@ -572,7 +572,7 @@ fn handle_left_click(editor: &mut Editor, col: u16, row: u16) -> Result<Option<S
             editor.render_cache.ai_chat_text_selection = None;
             editor.render_cache.ai_chat_text_selecting = false;
             editor.clear_ai_chat_text_selection_autoscroll();
-            editor.replay_code_explanation(&tool_call_id);
+            editor.replay_ai_chat_tool(&tool_call_id);
             return Ok(None);
         }
         if let Some((history_row, history_column)) = ai_chat_screen_position(editor, col, row) {
@@ -1442,7 +1442,7 @@ mod tests {
     #[test]
     fn clicking_walkthrough_replay_takes_priority_over_text_selection() {
         let mut editor = editor_with_docked_chat();
-        editor.render_cache.ai_chat_interactions.walkthrough_replays = vec![(
+        editor.render_cache.ai_chat_interactions.tool_replays = vec![(
             crate::Rect {
                 x: 68,
                 y: 4,

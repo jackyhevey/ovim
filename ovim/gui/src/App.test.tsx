@@ -1631,6 +1631,34 @@ describe("Ovim Solid workbench", () => {
         expect(screen.getByText("stable")).toBe(historicalMarkup);
     });
 
+    it("keeps saved diff actions visible outside collapsed agent activity", () => {
+        const onReplay = vi.fn();
+        const onSelect = vi.fn();
+        const message = {
+            id: "1:3",
+            index: 2,
+            selected: false,
+            role: "tool",
+            content: "Saved refactor review",
+            toolName: "show_custom_diff",
+            replayToolCallId: "custom-diff-call",
+            replayLabel: "Open diff",
+            tools: [],
+        };
+        expect(chatTranscriptItems([message])[0].kind).toBe("message");
+        render(() => (
+            <ChatMessageView
+                message={message}
+                onReplay={onReplay}
+                onSelect={onSelect}
+            />
+        ));
+        fireEvent.click(screen.getByRole("button", { name: "Open diff" }));
+        expect(onReplay).toHaveBeenCalledWith("custom-diff-call");
+        expect(onSelect).not.toHaveBeenCalled();
+        expect(screen.queryByText(message.content)).toBeNull();
+    });
+
     it("keeps tool results collapsed until their details are requested", async () => {
         const payload = "large tool payload that should start hidden";
         const result = render(() => (

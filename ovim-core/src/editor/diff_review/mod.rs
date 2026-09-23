@@ -20,13 +20,14 @@
 mod highlight;
 mod render;
 
+use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 
 use super::{Editor, ToastLevel, ToastRequest, ToastSource};
 use crate::buffer::{Buffer, BufferId};
-use crate::native_diff::{self, PatchLineKind, ReviewBase, ReviewPatch};
+use crate::native_diff::{self, CustomReview, PatchLineKind, ReviewBase, ReviewPatch};
 use crate::syntax::HighlightGroup;
 use crate::unicode::{grapheme_index_for_byte, GraphemeCol};
 
@@ -52,6 +53,10 @@ pub struct DiffReviewState {
     /// The patch the buffer was rendered from, kept so switching layout or
     /// re-flowing after a resize costs no Git work.
     patch: ReviewPatch,
+    /// A saved reassignment of the patch's changes. Its sections are never
+    /// regenerated from the worktree when the review is revisited.
+    custom: Option<CustomReview>,
+    custom_title: Option<String>,
     /// Text width the side-by-side layout was laid out for.
     layout_width: usize,
     /// Buffer-area width that produced `layout_width`. Re-flowing keys off
@@ -77,12 +82,17 @@ pub struct DiffReviewState {
     /// owned lines: a review can hold a hundred thousand of them.
     patch_line_ranges: Vec<(usize, usize)>,
     code_highlights: Vec<Vec<(Range<usize>, HighlightGroup)>>,
+    custom_targets: Vec<Option<render::CustomTarget>>,
 }
 
 impl DiffReviewState {
     /// The source patch retained by the review, independent of terminal layout.
     pub fn patch(&self) -> &ReviewPatch {
         &self.patch
+    }
+
+    pub fn custom(&self) -> Option<&CustomReview> {
+        self.custom.as_ref()
     }
 
     /// First rendered row for each patch line, including both sides of a split.
@@ -202,6 +212,34 @@ impl DiffReviewState {
         self.text_lines.get(line).map(String::as_str)
     }
 
+    fn custom_target_at(&self, line: usize, col: usize) -> Option<(String, usize, &'static str)> {
+        let target = self.custom_targets.get(line)?.as_ref()?;
+        let row = self.row(line)?;
+        let right_selected = self.layout == DiffLayout::Split
+            && row
+                .right
+                .is_some_and(|cell| col >= cell.text_col.saturating_sub(2));
+        if right_selected {
+            target
+                .new
+                .clone()
+                .map(|(path, line)| (path, line, "new"))
+                .or_else(|| target.old.clone().map(|(path, line)| (path, line, "old")))
+        } else if self.layout == DiffLayout::Unified
+            && row
+                .left
+                .is_some_and(|cell| cell.info.kind == PatchLineKind::Added)
+        {
+            target.new.clone().map(|(path, line)| (path, line, "new"))
+        } else {
+            target
+                .old
+                .clone()
+                .map(|(path, line)| (path, line, "old"))
+                .or_else(|| target.new.clone().map(|(path, line)| (path, line, "new")))
+        }
+    }
+
     /// The `(byte range, added)` tints for a rendered line, so the frontend
     /// can paint the added/removed background the way `delta` does.
     pub fn line_tints(&self, line: usize) -> Vec<(std::ops::Range<usize>, bool)> {
@@ -291,6 +329,17 @@ impl Editor {
             return;
         }
         if self.review_buffer_index().is_some() {
+            if self
+                .ui_panels
+                .diff_review
+                .as_ref()
+                .is_some_and(|state| state.custom.is_some())
+            {
+                if let Err(error) = self.open_diff_review(None) {
+                    self.review_toast(ToastLevel::Error, format!("Diff review: {error:#}"));
+                }
+                return;
+            }
             self.enter_diff_review();
             return;
         }
@@ -301,6 +350,15 @@ impl Editor {
 
     /// `:GitDiff [spec]`. Reuses the open review buffer when there is one.
     pub fn open_diff_review(&mut self, spec: Option<&str>) -> anyhow::Result<()> {
+        let custom_root = self
+            .ui_panels
+            .diff_review
+            .as_ref()
+            .filter(|state| state.custom.is_some())
+            .map(|state| state.patch.root.clone());
+        if custom_root.is_some() {
+            self.close_diff_review();
+        }
         let explicit_spec = spec.map(str::trim).filter(|spec| !spec.is_empty());
         if let Some(state) = self.ui_panels.diff_review.as_mut() {
             state.explicit_spec = explicit_spec.map(str::to_string);
@@ -314,10 +372,10 @@ impl Editor {
             return Ok(());
         }
 
-        let root_hint = self.diff_review_root_hint();
+        let root_hint = custom_root.unwrap_or_else(|| self.diff_review_workspace_hint());
         let base = match explicit_spec {
             Some(spec) => ReviewBase::explicit(spec),
-            None => self.resolve_review_base(&root_hint)?,
+            None => self.resolve_review_base_for_path(&root_hint)?,
         };
         let patch = native_diff::review_patch(&root_hint, &base)?;
 
@@ -346,6 +404,9 @@ impl Editor {
             layout_area_width: area_width,
             patch_line_ranges: patch_line_ranges(&patch),
             code_highlights: Vec::new(),
+            custom_targets: Vec::new(),
+            custom: None,
+            custom_title: None,
             patch,
             rows: Vec::new(),
             stat_rows: Vec::new(),
@@ -369,11 +430,74 @@ impl Editor {
         Ok(())
     }
 
+    /// Opens a saved, agent-arranged comparison. The original patch remains
+    /// available for source syntax and accounting; the sections control what
+    /// is shown and stay fixed when the worktree changes.
+    pub fn open_custom_diff_review(
+        &mut self,
+        title: &str,
+        custom: CustomReview,
+    ) -> anyhow::Result<()> {
+        custom.validate_coverage()?;
+        if self.ui_panels.diff_review.is_some() {
+            self.close_diff_review();
+        }
+        let patch = custom.snapshot.patch.clone();
+        let layout = self.ui_panels.diff_review_layout;
+        let (area_width, width) = self.diff_review_widths();
+        let rendered =
+            render::render_custom(&custom, title, layout, width, self.diff_review_tab_width());
+        if self.mode() == crate::mode::Mode::AiChat {
+            self.close_ai_chat();
+            self.set_mode(crate::mode::Mode::Normal);
+        }
+        let origin_buffer_id = Some(self.buffer().id());
+        let origin_tab = self.current_tab_index();
+        self.open_diff_buffer_in_new_tab(&rendered.title, &rendered.text);
+        let buffer_id = self.buffer().id();
+        self.ui_panels.diff_review = Some(DiffReviewState {
+            buffer_id,
+            origin_buffer_id,
+            origin_tab,
+            explicit_spec: None,
+            layout,
+            patch_line_ranges: patch_line_ranges(&patch),
+            patch,
+            custom: Some(custom),
+            custom_title: Some(title.to_string()),
+            layout_width: width,
+            layout_area_width: area_width,
+            rows: Vec::new(),
+            stat_rows: Vec::new(),
+            hunk_lines: Vec::new(),
+            file_lines: Vec::new(),
+            file_nav: Vec::new(),
+            toolbar: Toolbar::default(),
+            text_lines: Vec::new(),
+            code_highlights: Vec::new(),
+            custom_targets: Vec::new(),
+        });
+        self.apply_rendered_review(rendered);
+        self.mark_dirty();
+        Ok(())
+    }
+
     /// Recomputes the patch, keeping the cursor on the same source location.
     pub fn refresh_diff_review(&mut self) {
         let Some(index) = self.review_buffer_index() else {
             return;
         };
+        if self
+            .ui_panels
+            .diff_review
+            .as_ref()
+            .is_some_and(|state| state.custom.is_some())
+        {
+            let anchor = self.diff_review_anchor(index, true);
+            self.rerender_diff_review(anchor);
+            self.set_status_message("Saved diff review");
+            return;
+        }
         let (root, explicit) = {
             let state = self.ui_panels.diff_review.as_ref().expect("review state");
             (state.patch.root.clone(), state.explicit_spec.clone())
@@ -381,7 +505,7 @@ impl Editor {
 
         let base = match explicit.as_deref() {
             Some(spec) => Ok(ReviewBase::explicit(spec)),
-            None => self.resolve_review_base(&root),
+            None => self.resolve_review_base_for_path(&root),
         };
         let base = match base {
             Ok(base) => base,
@@ -531,6 +655,24 @@ impl Editor {
         let line = cursor.line();
         let col = cursor.col().0;
 
+        if state.custom.is_some() {
+            let target = state.custom_target_at(line, col);
+            match target {
+                Some((path, source_line, side)) => {
+                    if let Err(error) = self.open_custom_review_source(&path, source_line, side) {
+                        self.review_toast(
+                            ToastLevel::Error,
+                            format!("Could not open {path}: {error:#}"),
+                        );
+                    }
+                }
+                None => {
+                    self.set_status_message("Move to a changed line and press Enter to open it")
+                }
+            }
+            return;
+        }
+
         if let Some(file) = state.file_for_stat_row(line) {
             if let Some(&target) = state.file_lines.get(file) {
                 self.jump_to_review_line(target);
@@ -592,6 +734,23 @@ impl Editor {
             .diff_review
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No branch review is open"))?;
+        if let Some(custom) = &state.custom {
+            let valid = custom
+                .sections
+                .iter()
+                .flat_map(|section| section.lines.iter().map(move |entry| (section, entry)))
+                .any(|(section, entry)| match side {
+                    "old" => {
+                        section.old_path.as_deref() == Some(path) && entry.old_line == Some(line)
+                    }
+                    "new" => {
+                        section.new_path.as_deref() == Some(path) && entry.new_line == Some(line)
+                    }
+                    _ => false,
+                });
+            anyhow::ensure!(valid, "Source is not in this review: {path}:{line}");
+            return self.open_custom_review_source(path, line, side);
+        }
         let file = state
             .patch
             .files
@@ -637,6 +796,81 @@ impl Editor {
         self.set_status_message(format!(
             "{path}:{new_line} · <Space>gd returns to the review"
         ));
+        self.mark_dirty();
+        Ok(())
+    }
+
+    fn open_custom_review_source(
+        &mut self,
+        path: &str,
+        line: usize,
+        side: &str,
+    ) -> anyhow::Result<()> {
+        use std::path::Component;
+        anyhow::ensure!(
+            Path::new(path)
+                .components()
+                .all(|component| matches!(component, Component::Normal(_))),
+            "Source path is outside the review"
+        );
+        let state = self
+            .ui_panels
+            .diff_review
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No diff review is open"))?;
+        let root = state.patch.root.clone();
+        let custom = state
+            .custom
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No custom review is open"))?;
+        anyhow::ensure!(side == "old" || side == "new", "Unknown diff side: {side}");
+        let saved_line = custom.sections.iter().find_map(|section| {
+            let matches = if side == "old" {
+                section.old_path.as_deref() == Some(path)
+            } else {
+                section.new_path.as_deref() == Some(path)
+            };
+            matches
+                .then(|| {
+                    section.lines.iter().find_map(|entry| {
+                        let number = if side == "old" && entry.kind != PatchLineKind::Added {
+                            entry.old_line
+                        } else if side == "new" && entry.kind != PatchLineKind::Removed {
+                            entry.new_line
+                        } else {
+                            None
+                        };
+                        (number == Some(line)).then_some(entry.text.as_str())
+                    })
+                })
+                .flatten()
+        });
+        let saved_line = saved_line
+            .ok_or_else(|| anyhow::anyhow!("Source is not in this review: {path}:{line}"))?;
+        let current_matches = side == "new"
+            && std::fs::read_to_string(root.join(path))
+                .ok()
+                .and_then(|text| text.lines().nth(line.saturating_sub(1)).map(str::to_string))
+                .as_deref()
+                == Some(saved_line);
+        self.go_to_review_origin();
+        if !current_matches {
+            let (excerpt, target_line) = custom_source_excerpt(&custom, path, line, side)?;
+            let label = if side == "old" { "Before" } else { "After" };
+            self.open_diff_buffer_in_new_tab(&format!("{label} excerpt · {path}"), &excerpt);
+            self.buffer_mut()
+                .cursor_mut()
+                .set_position(target_line, GraphemeCol(0));
+            self.set_status_message(format!("Saved {label} excerpt · {path}:{line}"));
+        } else {
+            self.open_file(root.join(path))?;
+            self.buffer_mut()
+                .cursor_mut()
+                .set_position(line.saturating_sub(1), GraphemeCol(0));
+            self.set_status_message(format!("{path}:{line} · <Space>gd opens the live diff"));
+        }
+        self.buffer_mut().validate_cursor_position();
+        self.center_cursor_in_viewport();
         self.mark_dirty();
         Ok(())
     }
@@ -706,10 +940,10 @@ impl Editor {
             self.review_toast(ToastLevel::Info, "A fetch is already running");
             return;
         }
-        let root = self.diff_review_root_hint();
+        let root = self.diff_review_workspace_hint();
         let base = match self.ui_panels.diff_review.as_ref() {
             Some(state) if state.explicit_spec.is_some() => Ok(state.patch.base.clone()),
-            _ => self.resolve_review_base(&root),
+            _ => self.resolve_review_base_for_path(&root),
         };
         let remote = match base {
             Ok(base) => base.remote,
@@ -822,13 +1056,22 @@ impl Editor {
         let tab_width = self.diff_review_tab_width();
         let rendered = {
             let state = self.ui_panels.diff_review.as_ref().expect("review state");
-            render::render(
-                &state.patch,
-                state.layout,
-                state.layout_width,
-                unsaved,
-                tab_width,
-            )
+            match &state.custom {
+                Some(custom) => render::render_custom(
+                    custom,
+                    state.custom_title.as_deref().unwrap_or("Custom diff"),
+                    state.layout,
+                    state.layout_width,
+                    tab_width,
+                ),
+                None => render::render(
+                    &state.patch,
+                    state.layout,
+                    state.layout_width,
+                    unsaved,
+                    tab_width,
+                ),
+            }
         };
         self.buffers[index].replace_content(&rendered.text);
         self.buffers[index].set_display_name(rendered.title.clone());
@@ -873,6 +1116,7 @@ impl Editor {
         state.toolbar = rendered.toolbar;
         state.text_lines = rendered.text.lines().map(str::to_string).collect();
         state.code_highlights = rendered.code_highlights;
+        state.custom_targets = rendered.custom_targets;
     }
 
     /// `(buffer area width, text width)` the review lays out against.
@@ -983,7 +1227,7 @@ impl Editor {
         }
     }
 
-    fn resolve_review_base(&self, path: &Path) -> anyhow::Result<ReviewBase> {
+    pub fn resolve_review_base_for_path(&self, path: &Path) -> anyhow::Result<ReviewBase> {
         let branch = native_diff::pullbase_for_path(
             path,
             self.options.pullbase.as_deref(),
@@ -992,7 +1236,7 @@ impl Editor {
         native_diff::resolve_pullbase(path, branch)
     }
 
-    fn diff_review_root_hint(&self) -> PathBuf {
+    pub fn diff_review_workspace_hint(&self) -> PathBuf {
         if let Some(state) = self.ui_panels.diff_review.as_ref() {
             return state.patch.root.clone();
         }
@@ -1038,6 +1282,58 @@ fn patch_line_ranges(patch: &ReviewPatch) -> Vec<(usize, usize)> {
         ranges.push((start, patch.text.len()));
     }
     ranges
+}
+
+/// Builds a numbered excerpt from the persisted patch. The old side always
+/// uses this path: a moved or deleted file's current contents are not its
+/// contents in the saved comparison.
+fn custom_source_excerpt(
+    custom: &CustomReview,
+    path: &str,
+    requested_line: usize,
+    side: &str,
+) -> anyhow::Result<(String, usize)> {
+    let mut source = BTreeMap::new();
+    for section in &custom.sections {
+        let matches = if side == "old" {
+            section.old_path.as_deref() == Some(path)
+        } else {
+            section.new_path.as_deref() == Some(path)
+        };
+        if !matches {
+            continue;
+        }
+        for entry in &section.lines {
+            let number = if side == "old" && entry.kind != PatchLineKind::Added {
+                entry.old_line
+            } else if side == "new" && entry.kind != PatchLineKind::Removed {
+                entry.new_line
+            } else {
+                None
+            };
+            if let Some(number) = number {
+                source.entry(number).or_insert_with(|| entry.text.clone());
+            }
+        }
+    }
+    anyhow::ensure!(!source.is_empty(), "No saved {side} source for {path}");
+    let mut text = format!("# Saved {side} excerpt · {path}\n");
+    let mut previous = None;
+    let mut target = 0;
+    let mut output_line = 1;
+    for (number, body) in source {
+        if previous.is_some_and(|last: usize| number > last + 1) {
+            text.push_str("       ⋮\n");
+            output_line += 1;
+        }
+        if number == requested_line {
+            target = output_line;
+        }
+        text.push_str(&format!("{number:>6} │ {body}\n"));
+        previous = Some(number);
+        output_line += 1;
+    }
+    Ok((text, target))
 }
 
 fn next_in(lines: &[usize], cursor_line: usize, forward: bool) -> Option<usize> {

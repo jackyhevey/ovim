@@ -713,6 +713,8 @@ pub struct GuiChatMessage {
     pub attachment: Option<String>,
     pub model: Option<String>,
     pub tool_name: Option<String>,
+    pub replay_tool_call_id: Option<String>,
+    pub replay_label: Option<String>,
     pub tools: Vec<String>,
     pub images: Vec<String>,
 }
@@ -894,6 +896,10 @@ enum GuiRequest {
     },
     SelectPermissionMode {
         mode: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ReplayChatTool {
+        tool_call_id: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
     SelectChatMessage {
@@ -1264,6 +1270,14 @@ impl GuiBridge {
     pub async fn select_permission_mode(&self, mode: String) -> Result<(), String> {
         self.request(|reply| GuiRequest::SelectPermissionMode { mode, reply })
             .await
+    }
+
+    pub async fn replay_chat_tool(&self, tool_call_id: String) -> Result<(), String> {
+        self.request(|reply| GuiRequest::ReplayChatTool {
+            tool_call_id,
+            reply,
+        })
+        .await
     }
 
     pub async fn select_chat_message(&self, index: usize) -> Result<(), String> {
@@ -1765,6 +1779,17 @@ async fn handle_request(
             };
             refresh_after_input(editor);
             editor.dispatch_pending_intents().await;
+            (reply, result)
+        }
+        GuiRequest::ReplayChatTool {
+            tool_call_id,
+            reply,
+        } => {
+            let result = editor
+                .replay_ai_chat_tool(&tool_call_id)
+                .then_some(())
+                .ok_or_else(|| anyhow::anyhow!(editor.status_message().to_owned()));
+            refresh_after_input(editor);
             (reply, result)
         }
         GuiRequest::SelectChatMessage { index, reply } => {
@@ -3316,6 +3341,16 @@ fn ai_chat(editor: &Editor) -> Option<GuiAiChat> {
                             .as_deref()
                             .and_then(|id| tool_names.get(id).copied())
                             .map(str::to_string),
+                        replay_tool_call_id: message
+                            .tool_call_id
+                            .as_deref()
+                            .filter(|id| editor.ai_chat_tool_replay_label(id).is_some())
+                            .map(str::to_owned),
+                        replay_label: message
+                            .tool_call_id
+                            .as_deref()
+                            .and_then(|id| editor.ai_chat_tool_replay_label(id))
+                            .map(str::to_owned),
                         tools: message
                             .tool_calls
                             .iter()

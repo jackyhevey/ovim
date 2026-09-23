@@ -1,5 +1,6 @@
 pub mod browser;
 pub mod builtins;
+pub mod custom_diff;
 pub mod schema;
 pub mod subagents;
 
@@ -280,6 +281,8 @@ pub(crate) enum EditorBridgeTool {
     Context,
     OpenFile,
     Explain,
+    ReadDiff,
+    ShowCustomDiff,
 }
 
 impl ToolRegistry {
@@ -430,7 +433,7 @@ mod tests {
     #[test]
     fn replacing_a_definition_does_not_inherit_bridge_authority() {
         let mut registry = ToolRegistry::new();
-        assert_eq!(registry.editor_bridge_tools().count(), 3);
+        assert_eq!(registry.editor_bridge_tools().count(), 5);
         registry.register(make_tool(
             "open_file",
             FileScope::File,

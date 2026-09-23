@@ -276,6 +276,14 @@ pub fn register_builtins(registry: &mut ToolRegistry) {
     registry.register(read_file_def());
     registry.register(read_buffer_def());
     registry.register_editor_bridge(workspace_context_def(), super::EditorBridgeTool::Context);
+    registry.register_editor_bridge(
+        super::custom_diff::read_diff_definition(),
+        super::EditorBridgeTool::ReadDiff,
+    );
+    registry.register_editor_bridge(
+        super::custom_diff::show_custom_diff_definition(),
+        super::EditorBridgeTool::ShowCustomDiff,
+    );
     registry.register(read_file_at_path_def());
     registry.register(view_image_def());
     registry.register(read_selection_def());
@@ -350,6 +358,9 @@ pub fn execute_builtin(
                 .to_string(),
         ),
         "workspace_context" => handle_workspace_context(args, ctx),
+        "read_diff" | "show_custom_diff" => ToolResult::Error(format!(
+            "'{name}' must be dispatched by the editor so the review can be retained and opened"
+        )),
         "read_file_at_path" => handle_read_file_at_path(args, ctx),
         "view_image" => ToolResult::Error(
             "'view_image' must be dispatched by the editor so its image can be attached to the agent response"

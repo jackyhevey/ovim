@@ -5,7 +5,10 @@ mod helpers;
 
 use git2::{IndexAddOption, Oid, Repository, Signature};
 use helpers::EditorTest;
-use ovim_core::KeyCode;
+use ovim_core::native_diff::{
+    review_patch, ChangeRef, DiffPairing, PatchLineKind, ReviewBase, ReviewSnapshot,
+};
+use ovim_core::{KeyCode, Mode};
 use std::fs;
 use std::path::Path;
 
@@ -82,6 +85,104 @@ fn line_index_of(test: &EditorTest, needle: &str) -> usize {
     (0..buffer.line_count())
         .find(|&index| buffer.line_text(index).as_deref() == Some(needle))
         .unwrap_or_else(|| panic!("no line {needle:?} in review"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn custom_review_keeps_cross_file_sources_and_a_frozen_layout() {
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    let snapshot = ReviewSnapshot::from_patch(
+        review_patch(&fixture.root, &ReviewBase::explicit("main")).unwrap(),
+    )
+    .unwrap();
+    let removed = snapshot
+        .blocks
+        .iter()
+        .find(|block| {
+            block.kind == PatchLineKind::Removed && snapshot.patch.files[block.file].path == "a.txt"
+        })
+        .unwrap();
+    let added = snapshot
+        .blocks
+        .iter()
+        .find(|block| {
+            block.kind == PatchLineKind::Added && snapshot.patch.files[block.file].path == "b.txt"
+        })
+        .unwrap();
+    let custom = snapshot
+        .reassign(&[DiffPairing {
+            label: Some("Move old line".to_string()),
+            old: ChangeRef {
+                block_id: removed.id.clone(),
+                offset: None,
+                count: None,
+            },
+            new: ChangeRef {
+                block_id: added.id.clone(),
+                offset: None,
+                count: None,
+            },
+        }])
+        .unwrap();
+
+    test.editor.set_mode(Mode::AiChat);
+    test.editor
+        .open_custom_diff_review("Move old line", custom.clone())
+        .unwrap();
+    assert_eq!(test.editor.mode(), Mode::Normal);
+    assert!(test.editor.is_diff_review_buffer());
+    assert!(test
+        .editor
+        .buffer()
+        .rope()
+        .to_string()
+        .contains("a.txt → b.txt"));
+    test.editor
+        .set_diff_review_layout(ovim_core::editor::DiffLayout::Split);
+    let split = test.editor.buffer().rope().to_string();
+    assert!(
+        split.lines().any(|line| line.matches("three").count() == 2),
+        "{split}"
+    );
+
+    fs::write(fixture.root.join("a.txt"), "changed\n").unwrap();
+    fs::write(fixture.root.join("b.txt"), "changed\n").unwrap();
+    test.editor.refresh_diff_review();
+    assert_eq!(test.editor.buffer().rope().to_string(), split);
+
+    test.editor
+        .diff_review_open_source("a.txt", 2, "old")
+        .unwrap();
+    assert!(test
+        .editor
+        .buffer()
+        .display_name()
+        .unwrap()
+        .contains("Before excerpt"));
+    assert!(test.editor.buffer().rope().to_string().contains("2 │ two"));
+
+    test.keys(" gd");
+    assert!(test.editor.is_diff_review_buffer());
+    assert!(test.editor.diff_review().unwrap().custom().is_none());
+
+    test.editor
+        .open_custom_diff_review("Move old line", custom)
+        .unwrap();
+    test.editor
+        .diff_review_open_source("b.txt", 1, "new")
+        .unwrap();
+    assert!(test
+        .editor
+        .buffer()
+        .display_name()
+        .unwrap()
+        .contains("After excerpt"));
+    assert!(test
+        .editor
+        .buffer()
+        .rope()
+        .to_string()
+        .contains("1 │ new file"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

@@ -512,7 +512,7 @@ integration guidance to Claude's standard prompt. Use Claude's settings for
 further customization, rather than Ovim inference-profile prompt or tool overrides.
 
 Ovim supplies the current editor snapshot and attached context as user input.
-The private MCP connection also exposes three tools:
+The private MCP connection also exposes editor tools:
 
 - `workspace_context` refreshes the active/open files, cursor, selection,
   diagnostics and bounded editor snapshot, including unsaved visible content.
@@ -522,6 +522,10 @@ The private MCP connection also exposes three tools:
 - `explain_with_codebase` presents the normal interactive concept/code
   walkthrough. Claude waits until you finish, dismiss it, or ask a question.
   Questions return to the running Claude turn. Completed walkthroughs support replay.
+- `read_diff` reads a saved snapshot of the comparison used by `<leader>gd`,
+  respecting `pullbase` and its directory overrides.
+- `show_custom_diff` pairs removed and added ranges from that snapshot, including
+  across files. The review opens immediately and can be reopened from chat.
 
 The connection is bound to the originating editor turn and cannot discover or
 control other Ovim sessions. It closes when that turn ends. Claude's normal
@@ -838,6 +842,27 @@ motions and Visual mode to select the relevant lines, then press `<Space><Space>
 Ovim keeps the selection highlighted and places the existing AI composer directly below
 it; the selected patch and your message are sent through the normal project chat.
 No external diff application or background review server is required.
+
+For refactors, ask the agent to show how code moved between files. It first calls
+`read_diff`, then uses `show_custom_diff` to pair related old and new code. Every
+original addition and removal stays represented; changes the agent does not pair
+remain in their original order. This changes the review presentation only.
+
+Use **Open diff** on the chat entry to reopen the saved review. In the terminal,
+select the tool result in chat history and press Enter, or click its open action.
+Replay uses the saved content, including after the source files change or the
+chat is restored. `<leader>gd` from outside the saved review opens the current
+regular comparison. Custom reviews show both source paths for cross-file pairs;
+old-side navigation opens a labeled snapshot excerpt.
+
+Agents should use the block IDs returned by `read_diff`, rather than generating
+a replacement patch. Finish edits before reading the diff; after further edits,
+read a fresh snapshot. Continue reading with `snapshot_id` and `next_cursor`
+until `next_cursor` is null. Like `<leader>gd`, the snapshot uses files on disk,
+not unsaved buffer edits. Pairings accept an optional zero-based `offset` and `count`
+on each side to select part of a block. Reusing the same changed line in multiple
+pairings is rejected. Binary and metadata-only changes remain visible, and
+incomplete diffs exceeding the review size limit cannot be reassigned.
 
 ## Legacy `ai.toml` (Still Supported)
 

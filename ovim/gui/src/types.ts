@@ -71,13 +71,17 @@ export interface GuiDiffDocument {
     title: string;
     layout: "split" | "unified";
     managed: boolean;
+    custom: boolean;
     files: Array<{
+        id: string;
+        label?: string;
         path: string;
         oldPath?: string;
         status: string;
         additions: number;
         deletions: number;
         binary: boolean;
+        metadata: string[];
         hunks: GuiDiffHunk[];
     }>;
 }
@@ -164,6 +168,8 @@ export interface GuiAiChat {
         attachment?: string;
         model?: string;
         toolName?: string;
+        replayToolCallId?: string;
+        replayLabel?: string;
         tools: string[];
         images?: string[];
     }>;

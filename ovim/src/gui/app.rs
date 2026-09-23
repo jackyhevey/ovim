@@ -330,6 +330,14 @@ async fn gui_editor_command(bridge: State<'_, GuiBridge>, command: String) -> Re
 }
 
 #[tauri::command]
+async fn gui_replay_chat_tool(
+    bridge: State<'_, GuiBridge>,
+    tool_call_id: String,
+) -> Result<(), String> {
+    bridge.replay_chat_tool(tool_call_id).await
+}
+
+#[tauri::command]
 async fn gui_select_chat_message(bridge: State<'_, GuiBridge>, index: usize) -> Result<(), String> {
     bridge.select_chat_message(index).await
 }
@@ -500,6 +508,7 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
             gui_ai_policy,
             gui_editor_command,
             gui_select_chat_message,
+            gui_replay_chat_tool,
             gui_manage_queued_chat_input,
             gui_select_chat_agent,
             gui_select_tab,
