@@ -5,9 +5,17 @@
 
 use super::{review_patch, DiffFile, PatchLineKind, ReviewBase, ReviewPatch};
 use anyhow::{bail, ensure, Context, Result};
+use git2::{Oid, Repository, Tree};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::Read;
+use std::path::{Component, Path};
+
+const MAX_FROZEN_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_FROZEN_BYTES_PER_SOURCE: usize = 1024 * 1024;
+const MAX_SOURCE_READ_BYTES: usize = 32 * 1024 * 1024;
+const CONTEXT_RADIUS: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -15,6 +23,34 @@ pub struct ReviewSnapshot {
     pub id: String,
     pub patch: ReviewPatch,
     pub blocks: Vec<ChangeBlock>,
+    /// Captured source text for navigation and context on replay.
+    #[serde(default)]
+    pub sources: Vec<SourceFileSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceFileSnapshot {
+    pub file: usize,
+    pub old: Option<FrozenSource>,
+    pub new: Option<FrozenSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrozenSource {
+    pub path: String,
+    /// Gaps between windows are uncaptured source, not unchanged lines.
+    pub windows: Vec<SourceWindow>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceWindow {
+    /// 1-based line number of the first line in this window.
+    pub start_line: usize,
+    pub lines: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,10 +116,118 @@ pub struct CustomReview {
 }
 
 pub fn review_snapshot(path: &Path, base: &ReviewBase) -> Result<ReviewSnapshot> {
-    ReviewSnapshot::from_patch(review_patch(path, base)?)
+    let mut snapshot = ReviewSnapshot::from_patch(review_patch(path, base)?)?;
+    snapshot.capture_sources(path)?;
+    snapshot.refresh_id()?;
+    Ok(snapshot)
 }
 
 impl ReviewSnapshot {
+    pub fn source_for(&self, path: &str, side: &str) -> Option<&FrozenSource> {
+        self.sources.iter().find_map(|entry| {
+            let source = match side {
+                "old" => entry.old.as_ref(),
+                "new" => entry.new.as_ref(),
+                _ => None,
+            }?;
+            (source.path == path).then_some(source)
+        })
+    }
+
+    fn refresh_id(&mut self) -> Result<()> {
+        let digest = Sha256::digest(serde_json::to_vec(&(&self.patch, &self.sources))?);
+        self.id = format!(
+            "diff_{}",
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        Ok(())
+    }
+
+    fn capture_sources(&mut self, path: &Path) -> Result<()> {
+        let repo = Repository::discover(path)?;
+        let base_oid = Oid::from_str(&self.patch.comparison_base_oid)?;
+        let old_tree = repo.find_commit(base_oid)?.tree()?;
+        let new_tree = comparison_target_tree(&repo, &self.patch.base.spec)?;
+        let mut remaining = MAX_FROZEN_SOURCE_BYTES;
+        let raw = self.patch.text.lines().collect::<Vec<_>>();
+        let mut by_file = vec![Vec::new(); self.patch.files.len()];
+        for (index, line) in self.patch.lines.iter().enumerate() {
+            if let Some(file) = line.file {
+                if let Some(entries) = by_file.get_mut(file) {
+                    entries.push(index);
+                }
+            }
+        }
+
+        for (file_index, file) in self.patch.files.iter().enumerate() {
+            if file.binary {
+                continue;
+            }
+            let mut captured = SourceFileSnapshot {
+                file: file_index,
+                old: None,
+                new: None,
+            };
+            for is_old in [true, false] {
+                let source_path = if is_old {
+                    old_path(file)
+                } else {
+                    file.path.clone()
+                };
+                if !safe_relative_path(&source_path) {
+                    bail!("Git diff path is not a safe relative path: {source_path}");
+                }
+                let changed = by_file[file_index]
+                    .iter()
+                    .map(|&index| &self.patch.lines[index])
+                    .filter(|line| {
+                        line.kind
+                            == if is_old {
+                                PatchLineKind::Removed
+                            } else {
+                                PatchLineKind::Added
+                            }
+                    })
+                    .filter_map(|line| if is_old { line.old_line } else { line.new_line })
+                    .collect::<Vec<_>>();
+                let source = if is_old {
+                    source_from_tree(&repo, &old_tree, &source_path)?
+                } else if let Some(tree) = &new_tree {
+                    source_from_tree(&repo, tree, &source_path)?
+                } else {
+                    source_from_worktree(&self.patch.root, &source_path)?
+                };
+                let Some(source) = source else {
+                    continue;
+                };
+                verify_changed_lines(
+                    &self.patch,
+                    &raw,
+                    &by_file[file_index],
+                    is_old,
+                    &source,
+                    &source_path,
+                )?;
+                let budget = remaining.min(MAX_FROZEN_BYTES_PER_SOURCE);
+                let mut allowance = budget;
+                let frozen = freeze_source(&source_path, &source, &changed, &mut allowance);
+                remaining -= budget - allowance;
+                if is_old {
+                    captured.old = frozen;
+                } else {
+                    captured.new = frozen;
+                }
+            }
+            if captured.old.is_some() || captured.new.is_some() {
+                self.sources.push(captured);
+            }
+        }
+        Ok(())
+    }
+
     pub fn from_patch(patch: ReviewPatch) -> Result<Self> {
         ensure!(
             !patch.truncated && patch.text.len() <= super::MAX_PATCH_BYTES,
@@ -155,7 +299,12 @@ impl ReviewSnapshot {
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         );
-        Ok(Self { id, patch, blocks })
+        Ok(Self {
+            id,
+            patch,
+            blocks,
+            sources: Vec::new(),
+        })
     }
 
     /// Reassign disjoint line ranges; unassigned lines stay in canonical order.
@@ -298,6 +447,180 @@ impl ReviewSnapshot {
         }
         sections
     }
+}
+
+impl FrozenSource {
+    pub fn line(&self, number: usize) -> Option<&str> {
+        self.windows.iter().find_map(|window| {
+            number
+                .checked_sub(window.start_line)
+                .and_then(|offset| window.lines.get(offset))
+                .map(String::as_str)
+        })
+    }
+}
+
+fn comparison_target_tree<'repo>(
+    repo: &'repo Repository,
+    spec: &str,
+) -> Result<Option<Tree<'repo>>> {
+    if spec.ends_with("...WORKTREE") || spec.ends_with("..WORKTREE") {
+        return Ok(None);
+    }
+    let (_, target) = spec
+        .split_once("...")
+        .or_else(|| spec.split_once(".."))
+        .context("Unsupported comparison spec for source capture")?;
+    let oid = super::resolve_commit_oid(repo, target.trim())?;
+    Ok(Some(repo.find_commit(oid)?.tree()?))
+}
+
+fn safe_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && Path::new(path)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+}
+
+fn source_from_tree(repo: &Repository, tree: &Tree<'_>, path: &str) -> Result<Option<Vec<String>>> {
+    let Ok(entry) = tree.get_path(Path::new(path)) else {
+        return Ok(None);
+    };
+    let Ok(blob) = repo.find_blob(entry.id()) else {
+        return Ok(None);
+    };
+    if blob.size() > MAX_SOURCE_READ_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(source_lines(blob.content())))
+}
+
+fn source_from_worktree(root: &Path, path: &str) -> Result<Option<Vec<String>>> {
+    let path = root.join(path);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(_) => return Ok(None),
+    };
+    if !metadata.file_type().is_file() || metadata.len() > MAX_SOURCE_READ_BYTES as u64 {
+        return Ok(None);
+    }
+    let Ok(file) = File::open(path) else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_SOURCE_READ_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_SOURCE_READ_BYTES {
+        return Ok(None);
+    }
+    Ok(Some(source_lines(&bytes)))
+}
+
+fn source_lines(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+        .collect()
+}
+
+fn verify_changed_lines(
+    patch: &ReviewPatch,
+    raw: &[&str],
+    file_lines: &[usize],
+    is_old: bool,
+    source: &[String],
+    path: &str,
+) -> Result<()> {
+    for &index in file_lines {
+        let info = &patch.lines[index];
+        let source_line = match (is_old, info.kind) {
+            (true, PatchLineKind::Removed | PatchLineKind::Context) => info.old_line,
+            (false, PatchLineKind::Added | PatchLineKind::Context) => info.new_line,
+            _ => None,
+        };
+        let Some(source_line) = source_line else {
+            continue;
+        };
+        let expected = raw[index].get(1..).unwrap_or("");
+        ensure!(
+            source
+                .get(source_line.saturating_sub(1))
+                .map(String::as_str)
+                == Some(expected),
+            "{path} changed while capturing the diff; call read_diff again"
+        );
+    }
+    Ok(())
+}
+
+fn freeze_source(
+    path: &str,
+    lines: &[String],
+    changed: &[usize],
+    remaining: &mut usize,
+) -> Option<FrozenSource> {
+    let full_bytes = lines.iter().map(|line| line.len() + 1).sum::<usize>();
+    if full_bytes <= *remaining {
+        *remaining -= full_bytes;
+        return Some(FrozenSource {
+            path: path.to_string(),
+            windows: vec![SourceWindow {
+                start_line: 1,
+                lines: lines.to_vec(),
+            }],
+            complete: true,
+        });
+    }
+    if changed.is_empty() || *remaining == 0 {
+        return None;
+    }
+
+    let mut ranges: Vec<(usize, usize)> = changed
+        .iter()
+        .map(|&number| {
+            (
+                number.saturating_sub(CONTEXT_RADIUS + 1),
+                (number + CONTEXT_RADIUS).min(lines.len()),
+            )
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 {
+                last.1 = last.1.max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    let mut windows = Vec::new();
+    for (start, end) in merged {
+        let mut captured = Vec::new();
+        for line in &lines[start..end] {
+            let size = line.len() + 1;
+            if size > *remaining {
+                break;
+            }
+            captured.push(line.clone());
+            *remaining -= size;
+        }
+        if !captured.is_empty() {
+            windows.push(SourceWindow {
+                start_line: start + 1,
+                lines: captured,
+            });
+        }
+        if *remaining == 0 {
+            break;
+        }
+    }
+    (!windows.is_empty()).then(|| FrozenSource {
+        path: path.to_string(),
+        windows,
+        complete: false,
+    })
 }
 
 fn is_plain_file_header(line: &str) -> bool {
@@ -634,6 +957,25 @@ mod tests {
         let snapshot = review_snapshot(temp.path(), &base).unwrap();
         assert_eq!(snapshot.patch, regular);
         assert_eq!(snapshot.patch.comparison_base_oid.len(), 40);
+        assert_eq!(
+            snapshot
+                .source_for("old.rs", "old")
+                .and_then(|source| source.line(1)),
+            Some("alpha")
+        );
+        assert_eq!(
+            snapshot
+                .source_for("new.rs", "new")
+                .and_then(|source| source.line(2)),
+            Some("beta moved")
+        );
+        fs::write(temp.path().join("new.rs"), "later edit\n").unwrap();
+        assert_eq!(
+            snapshot
+                .source_for("new.rs", "new")
+                .and_then(|source| source.line(2)),
+            Some("beta moved")
+        );
         for name in ["old.rs", "new.rs", "staged.rs", "untracked.rs"] {
             assert!(snapshot.patch.files.iter().any(|file| file.path == name));
         }
@@ -665,5 +1007,62 @@ mod tests {
         assert_eq!(review.sections[0].new_path.as_deref(), Some("new.rs"));
         assert_eq!(review.snapshot.patch.additions(), regular.additions());
         assert_eq!(review.snapshot.patch.deletions(), regular.deletions());
+    }
+
+    #[test]
+    fn large_source_uses_frozen_windows_with_visible_gaps() {
+        let lines = (1..=1000)
+            .map(|number| format!("source line {number:04}"))
+            .collect::<Vec<_>>();
+        let mut budget = 3_000;
+        let source = freeze_source("large.rs", &lines, &[500], &mut budget).unwrap();
+        assert!(!source.complete);
+        assert_eq!(source.line(500), Some("source line 0500"));
+        assert_eq!(source.line(1), None);
+        assert!(source.windows[0].start_line > 1);
+    }
+
+    #[test]
+    fn explicit_comparison_captures_right_tree_instead_of_worktree() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        fs::write(temp.path().join("file.rs"), "old\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.rs")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        let signature = Signature::now("Ovim", "ovim@example.com").unwrap();
+        repo.commit(Some("HEAD"), &signature, &signature, "base", &tree, &[])
+            .unwrap();
+        drop(tree);
+        let head = repo.head().unwrap().peel_to_commit().unwrap();
+        repo.branch("feature", &head, false).unwrap();
+        repo.set_head("refs/heads/feature").unwrap();
+        fs::write(temp.path().join("file.rs"), "new in commit\n").unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("file.rs")).unwrap();
+        index.write().unwrap();
+        let tree = repo.find_tree(index.write_tree().unwrap()).unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "feature",
+            &tree,
+            &[&head],
+        )
+        .unwrap();
+        drop(tree);
+        fs::write(temp.path().join("file.rs"), "uncommitted later edit\n").unwrap();
+
+        let base = ReviewBase::explicit("main..feature");
+        let snapshot = review_snapshot(temp.path(), &base).unwrap();
+        assert_eq!(
+            snapshot
+                .source_for("file.rs", "new")
+                .and_then(|source| source.line(1)),
+            Some("new in commit")
+        );
     }
 }

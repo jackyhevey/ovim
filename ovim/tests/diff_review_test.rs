@@ -6,7 +6,8 @@ mod helpers;
 use git2::{IndexAddOption, Oid, Repository, Signature};
 use helpers::EditorTest;
 use ovim_core::native_diff::{
-    review_patch, ChangeRef, DiffPairing, PatchLineKind, ReviewBase, ReviewSnapshot,
+    review_patch, review_snapshot, ChangeRef, DiffPairing, PatchLineKind, ReviewBase,
+    ReviewSnapshot,
 };
 use ovim_core::{KeyCode, Mode};
 use std::fs;
@@ -85,6 +86,120 @@ fn line_index_of(test: &EditorTest, needle: &str) -> usize {
     (0..buffer.line_count())
         .find(|&index| buffer.line_text(index).as_deref() == Some(needle))
         .unwrap_or_else(|| panic!("no line {needle:?} in review"))
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn saved_moves_follow_exact_live_diff_and_recover_after_undo() {
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    let snapshot = ReviewSnapshot::from_patch(
+        review_patch(&fixture.root, &ReviewBase::explicit("main")).unwrap(),
+    )
+    .unwrap();
+    let removed = snapshot
+        .blocks
+        .iter()
+        .find(|block| block.kind == PatchLineKind::Removed)
+        .unwrap();
+    let added = snapshot
+        .blocks
+        .iter()
+        .find(|block| {
+            block.kind == PatchLineKind::Added && snapshot.patch.files[block.file].path == "b.txt"
+        })
+        .unwrap();
+    let custom = snapshot
+        .reassign(&[DiffPairing {
+            label: Some("Move line".into()),
+            old: ChangeRef {
+                block_id: removed.id.clone(),
+                offset: None,
+                count: None,
+            },
+            new: ChangeRef {
+                block_id: added.id.clone(),
+                offset: None,
+                count: None,
+            },
+        }])
+        .unwrap();
+
+    test.editor
+        .open_custom_diff_review("Move line", custom)
+        .unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "saved"
+    );
+    test.editor.return_to_live_diff_review().unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+    assert!(test.editor.diff_review().unwrap().custom().is_some());
+
+    fs::write(fixture.root.join("a.txt"), "one\nchanged\nthree\nfour\n").unwrap();
+    test.editor.refresh_diff_review();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "stale"
+    );
+    assert!(test.editor.diff_review().unwrap().custom().is_none());
+    test.editor.open_saved_diff_overlay().unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "saved"
+    );
+    test.editor.return_to_live_diff_review().unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "stale"
+    );
+
+    fs::write(fixture.root.join("a.txt"), "one\n2\nthree\nfour\n").unwrap();
+    test.editor.refresh_diff_review();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+    test.editor.toggle_diff_review_overlay().unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "available"
+    );
+    assert!(test.editor.diff_review().unwrap().custom().is_none());
+    test.editor.toggle_diff_review_overlay().unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+
+    test.editor.close_diff_review();
+    test.keys(" gd");
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+
+    test.editor.open_diff_review(Some("main")).unwrap();
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+    let visible = test.editor.buffer().rope().to_string();
+    Repository::open(&fixture.root)
+        .unwrap()
+        .find_reference("refs/heads/main")
+        .unwrap()
+        .delete()
+        .unwrap();
+    assert!(test.editor.toggle_diff_review_overlay().is_err());
+    assert_eq!(
+        test.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+    assert!(test.editor.diff_review().unwrap().custom().is_some());
+    assert_eq!(test.editor.buffer().rope().to_string(), visible);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -183,6 +298,42 @@ async fn custom_review_keeps_cross_file_sources_and_a_frozen_layout() {
         .rope()
         .to_string()
         .contains("1 │ new file"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn saved_review_opens_context_outside_the_patch_after_source_deletion() {
+    let fixture = Fixture::new();
+    let repo = Repository::open(&fixture.root).unwrap();
+    let original = (1..=80)
+        .map(|line| format!("source line {line}\n"))
+        .collect::<String>();
+    fs::write(fixture.root.join("context.txt"), &original).unwrap();
+    commit_all(&repo, "add context source");
+    fs::write(
+        fixture.root.join("context.txt"),
+        original.replace("source line 40\n", "changed line 40\n"),
+    )
+    .unwrap();
+    let snapshot = review_snapshot(&fixture.root, &ReviewBase::explicit("HEAD")).unwrap();
+    assert!(!snapshot.patch.text.contains("source line 10\n"));
+    let custom = snapshot.reassign(&[]).unwrap();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    fs::remove_file(fixture.root.join("context.txt")).unwrap();
+    for side in ["old", "new"] {
+        test.editor
+            .open_custom_diff_review("Saved context", custom.clone())
+            .unwrap();
+        test.editor
+            .diff_review_open_source("context.txt", 10, side)
+            .unwrap();
+        assert!(current_line(&test).contains("10 │ source line 10"));
+        assert!(test
+            .editor
+            .buffer()
+            .rope()
+            .to_string()
+            .contains("80 │ source line 80"));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

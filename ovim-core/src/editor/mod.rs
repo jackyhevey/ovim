@@ -131,7 +131,9 @@ pub use code_explanation::{
 };
 pub use command_context::CommandContext;
 pub use completion::CompletionMenu;
-pub use diff_review::{DiffLayout, DiffReviewState, PendingGitFetch, DIFF_REVIEW_TITLE_PREFIX};
+pub use diff_review::{
+    DiffLayout, DiffOverlayViewState, DiffReviewState, PendingGitFetch, DIFF_REVIEW_TITLE_PREFIX,
+};
 pub use editing_state::{EditingState, PendingChangeRepeat};
 pub use filetree::{FileTree, FileTreeAction, FileTreeClipboardKind, TreeNode};
 pub use fold::{Fold, FoldManager};

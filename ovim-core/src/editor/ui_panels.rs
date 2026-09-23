@@ -41,6 +41,9 @@ pub struct UiPanels {
     pub toast_center: ToastCenter,
     /// Open branch diff review (`<Space>gd`), if any
     pub diff_review: Option<super::diff_review::DiffReviewState>,
+    /// Latest agent arrangement for each Git worktree in this editor session.
+    pub diff_review_overlays:
+        std::collections::HashMap<std::path::PathBuf, super::diff_review::SavedDiffOverlay>,
     /// Background `git fetch` started from the diff review
     pub pending_git_fetch: Option<super::diff_review::PendingGitFetch>,
     /// Layout the next review opens in; `s` and the toolbar change it.

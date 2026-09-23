@@ -851,9 +851,25 @@ remain in their original order. This changes the review presentation only.
 Use **Open diff** on the chat entry to reopen the saved review. In the terminal,
 select the tool result in chat history and press Enter, or click its open action.
 Replay uses the saved content, including after the source files change or the
-chat is restored. `<leader>gd` from outside the saved review opens the current
-regular comparison. Custom reviews show both source paths for cross-file pairs;
-old-side navigation opens a labeled snapshot excerpt.
+chat is restored. `<leader>gd` opens the current comparison and reapplies the
+session's saved restructuring when the comparison still matches. Use **Remove
+overlay** to see the regular diff, or **Apply overlay** to bring it back.
+After further edits, the live diff marks the saved restructuring as outdated and
+offers **View saved review**. **Return to live diff** keeps the saved arrangement
+available. Undoing back to the original comparison makes it usable again on
+refresh or reopening. In the terminal, `o` toggles the overlay (or returns from a
+saved view), and `O` opens the saved review.
+
+In the GUI, custom reviews keep changes together by file. Moved code appears in
+an embedded comparison with its source path; scroll inside it to inspect the saved
+surrounding code. Switch the reconstruction between **Before** and **After** to choose
+which side brings in the moved code. Use `n` / `N` or `]c` / `[c` to move between
+changes, and `]f` / `[f` to change files. Move descriptions appear beside their
+source paths; hover over the heading to read the full description. Switch to
+**Guided** to step through the agent's pairings and explanations one section at
+a time, or **Files** to return to the continuous file view. The terminal shows paired sections with
+both source paths. Old-side navigation opens a labeled snapshot excerpt.
+Older saved reviews and large files may have limited surrounding context.
 
 Agents should use the block IDs returned by `read_diff`, rather than generating
 a replacement patch. Finish edits before reading the diff; after further edits,

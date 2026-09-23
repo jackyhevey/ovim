@@ -12,10 +12,13 @@ import {
     mappedScrollTop,
     replacementParts,
     sectionsForFile,
+    sectionsWithMoves,
     type FlowDiffFile,
     type FlowDiffLine,
+    type FlowDiffMove,
     type FlowDiffReview,
     type FlowSection,
+    type Reconstruction,
 } from "./FlowDiffModel";
 import "./FlowDiff.css";
 
@@ -27,18 +30,50 @@ export type FlowDiffProps = {
     onNavigateReviewLine?: (line: number) => void;
     onOpenSource?: (path: string, line: number, side: Side) => void;
     onLayoutChange?: (layout: "split" | "unified") => void;
-    onAction?: (key: "q" | "r") => void;
+    onAction?: (
+        key:
+            | "q"
+            | "r"
+            | "toggle_overlay"
+            | "open_saved_overlay"
+            | "return_to_live_diff",
+    ) => void;
     onCoreKey?: (key: ":" | " ") => void;
 };
 
 function lineParts(line: FlowDiffLine, counterpart: FlowDiffLine | undefined) {
-    return line.kind === "context"
-        ? [{ text: line.text, changed: false }]
-        : replacementParts(line.text, counterpart?.text);
+    return replacementParts(line.text, counterpart?.text);
+}
+
+function pairedMoveLine(
+    move: FlowDiffMove,
+    line: FlowDiffLine,
+    side: Side,
+): FlowDiffLine | undefined {
+    const endpoint = move[side];
+    const number = side === "old" ? line.oldLine : line.newLine;
+    if (number === undefined) return undefined;
+    const offset = number - endpoint.startLine;
+    if (offset < 0 || offset >= endpoint.lineCount) return undefined;
+    const otherSide = side === "old" ? "new" : "old";
+    if (offset >= move[otherSide].lineCount) return undefined;
+    const otherNumber = move[otherSide].startLine + offset;
+    const window = move[otherSide].contextWindows.find(
+        (item) =>
+            otherNumber >= item.startLine &&
+            otherNumber < item.startLine + item.lines.length,
+    );
+    const counterpart = window?.lines[otherNumber - window.startLine];
+    return (otherSide === "old"
+        ? counterpart?.oldLine
+        : counterpart?.newLine) === otherNumber
+        ? counterpart
+        : undefined;
 }
 
 function FileLine(props: {
     file: FlowDiffFile;
+    pathOverride?: string;
     line: FlowDiffLine;
     counterpart?: FlowDiffLine;
     side: Side;
@@ -52,9 +87,10 @@ function FileLine(props: {
     const open = () => {
         if (canOpen())
             props.onOpenSource?.(
-                props.side === "old"
-                    ? props.file.oldPath || props.file.path
-                    : props.file.path,
+                props.pathOverride ||
+                    (props.side === "old"
+                        ? props.file.oldPath || props.file.path
+                        : props.file.path),
                 number()!,
                 props.side,
             );
@@ -142,8 +178,111 @@ function FileLine(props: {
     );
 }
 
+function MoveOverlay(props: {
+    move: FlowDiffMove;
+    reconstruction: Reconstruction;
+    file: FlowDiffFile;
+    syntax?: Record<string, string>;
+    onOpenSource?: FlowDiffProps["onOpenSource"];
+}) {
+    const endpoint = () =>
+        props.reconstruction === "old" ? props.move.old : props.move.new;
+    let scroller: HTMLDivElement | undefined;
+    createEffect(() => {
+        endpoint();
+        queueMicrotask(() => {
+            const pairedLine =
+                scroller?.querySelector<HTMLElement>(".flow-move-paired");
+            if (scroller && pairedLine)
+                scroller.scrollTop = Math.max(0, pairedLine.offsetTop - 44);
+        });
+    });
+
+    return (
+        <aside
+            class="flow-move-overlay"
+            aria-label={`Moved segment: ${props.move.label || props.move.id}`}
+            style={{
+                "--flow-move-height": `${Math.min(12, Math.max(5, endpoint().lineCount + 3)) * 22}px`,
+            }}
+        >
+            <div class="flow-move-heading" title={props.move.label}>
+                <span>
+                    {props.reconstruction === "old" ? "Moved from" : "Moved to"}
+                </span>
+                <code title={endpoint().path}>{endpoint().path}</code>
+                <Show when={props.move.label}>
+                    <span class="flow-move-label" title={props.move.label}>
+                        {props.move.label}
+                    </span>
+                </Show>
+            </div>
+            <div
+                class="flow-move-scroll"
+                ref={scroller}
+                role="region"
+                aria-label={`${endpoint().path} context`}
+                tabindex={0}
+            >
+                <For each={endpoint().contextWindows}>
+                    {(window, index) => (
+                        <>
+                            <Show when={index() > 0}>
+                                <div class="flow-move-gap">
+                                    ··· context omitted ···
+                                </div>
+                            </Show>
+                            <For each={window.lines}>
+                                {(line) => {
+                                    const number =
+                                        props.reconstruction === "old"
+                                            ? line.oldLine
+                                            : line.newLine;
+                                    const paired =
+                                        number !== undefined &&
+                                        number >= endpoint().startLine &&
+                                        number <
+                                            endpoint().startLine +
+                                                endpoint().lineCount;
+                                    return (
+                                        <div
+                                            classList={{
+                                                "flow-move-paired": paired,
+                                            }}
+                                        >
+                                            <FileLine
+                                                file={props.file}
+                                                pathOverride={endpoint().path}
+                                                line={line}
+                                                counterpart={pairedMoveLine(
+                                                    props.move,
+                                                    line,
+                                                    props.reconstruction,
+                                                )}
+                                                side={props.reconstruction}
+                                                syntax={props.syntax}
+                                                onOpenSource={
+                                                    props.onOpenSource
+                                                }
+                                            />
+                                        </div>
+                                    );
+                                }}
+                            </For>
+                        </>
+                    )}
+                </For>
+            </div>
+            <Show when={!endpoint().contextComplete}>
+                <div class="flow-move-truncated">Showing nearby context</div>
+            </Show>
+        </aside>
+    );
+}
+
 export default function FlowDiff(props: FlowDiffProps) {
     const [selectedId, setSelectedId] = createSignal("");
+    const [view, setView] = createSignal<"files" | "guided">("files");
     const [layout, setLayout] = createSignal<"split" | "unified">(
         props.review.layout,
     );
@@ -151,6 +290,10 @@ export default function FlowDiff(props: FlowDiffProps) {
         Array<{ id: string; path: string; kind: string }>
     >([]);
     const [activeHunk, setActiveHunk] = createSignal(0);
+    const [activeSectionId, setActiveSectionId] = createSignal("");
+    const [reconstruction, setReconstruction] =
+        createSignal<Reconstruction>("old");
+    const [activeMoveId, setActiveMoveId] = createSignal("");
     let reviewIdentity = "";
     let leftScroller: HTMLDivElement | undefined;
     let rightScroller: HTMLDivElement | undefined;
@@ -163,24 +306,73 @@ export default function FlowDiff(props: FlowDiffProps) {
     const leftSections = new Map<string, HTMLElement>();
     const rightSections = new Map<string, HTMLElement>();
     const unifiedHunks = new Map<number, HTMLElement>();
+    const unifiedSections = new Map<string, HTMLElement>();
 
+    const visibleFiles = createMemo(() =>
+        view() === "guided" && props.review.guidedFiles?.length
+            ? props.review.guidedFiles
+            : props.review.files,
+    );
     const file = createMemo(
         () =>
-            props.review.files.find((item) => item.id === selectedId()) ||
-            props.review.files[0],
+            visibleFiles().find((item) => item.id === selectedId()) ||
+            visibleFiles()[0],
     );
-    const sections = createMemo(() => (file() ? sectionsForFile(file()!) : []));
+    const sections = createMemo(() =>
+        file()
+            ? props.review.custom &&
+              view() === "files" &&
+              props.review.moves?.length
+                ? sectionsWithMoves(
+                      file()!,
+                      props.review.moves,
+                      reconstruction(),
+                  )
+                : sectionsForFile(file()!)
+            : [],
+    );
     const hunks = createMemo(() => file()?.hunks ?? []);
+    const changes = createMemo(() =>
+        visibleFiles().flatMap((item) =>
+            (props.review.moves?.length && view() === "files"
+                ? sectionsWithMoves(item, props.review.moves, reconstruction())
+                : sectionsForFile(item)
+            )
+                .filter((section) => section.kind === "change")
+                .map((section) => ({
+                    fileId: item.id,
+                    sectionId: section.id,
+                    hunkIndex: section.hunkIndex,
+                })),
+        ),
+    );
+    const activeChange = createMemo(() =>
+        changes().findIndex(
+            (change) =>
+                change.fileId === file()?.id &&
+                change.sectionId === activeSectionId(),
+        ),
+    );
 
     createEffect(() => setLayout(props.review.layout));
     createEffect(() => {
-        const identity = `${props.review.title}\0${props.review.files.map((item) => item.id).join("\0")}`;
-        if (reviewIdentity && identity !== reviewIdentity) setSelectedId("");
+        const identity = `${props.review.title}\0${visibleFiles()
+            .map((item) => item.id)
+            .join("\0")}`;
+        if (reviewIdentity && identity !== reviewIdentity) {
+            setSelectedId("");
+        }
         reviewIdentity = identity;
     });
     createEffect(() => {
         file()?.path;
         setActiveHunk(0);
+        setActiveSectionId(
+            sections().find((section) => section.kind === "change")?.id ?? "",
+        );
+        setActiveMoveId(
+            sections().find((section) => section.move)?.move?.id ?? "",
+        );
         queueMicrotask(() => {
             if (leftScroller) leftScroller.scrollTop = 0;
             if (rightScroller) rightScroller.scrollTop = 0;
@@ -256,7 +448,11 @@ export default function FlowDiff(props: FlowDiffProps) {
                 element.offsetTop + element.offsetHeight > from.scrollTop + 8
             );
         });
-        if (visible) setActiveHunk(visible.hunkIndex);
+        if (visible) {
+            setActiveHunk(visible.hunkIndex);
+            if (visible.kind === "change") setActiveSectionId(visible.id);
+            if (visible.move) setActiveMoveId(visible.move.id);
+        }
         to.scrollTop = mappedScrollTop(
             from.scrollTop,
             boxes(source),
@@ -272,12 +468,17 @@ export default function FlowDiff(props: FlowDiffProps) {
         const section = sections().find((item) => item.id === id);
         if (!section) return;
         setActiveHunk(section.hunkIndex);
+        if (section.kind === "change") setActiveSectionId(section.id);
+        if (section.move) setActiveMoveId(section.move.id);
         const left = leftSections.get(id);
         const right = rightSections.get(id);
+        const unified = unifiedSections.get(id);
         if (leftScroller && left)
             leftScroller.scrollTop = Math.max(0, left.offsetTop - 8);
         if (rightScroller && right)
             rightScroller.scrollTop = Math.max(0, right.offsetTop - 8);
+        if (unifiedScroller && unified)
+            unifiedScroller.scrollTop = Math.max(0, unified.offsetTop - 8);
         measure();
         const reviewLine = [...section.left, ...section.right].find(
             (line) => line.reviewLine !== undefined,
@@ -304,9 +505,75 @@ export default function FlowDiff(props: FlowDiffProps) {
         if (reviewLine !== undefined) props.onNavigateReviewLine?.(reviewLine);
     }
 
+    function stepChange(direction: number) {
+        if (!props.review.custom) {
+            goToHunk(activeHunk() + direction);
+            return;
+        }
+        const entries = changes();
+        if (!entries.length) return;
+        const current = activeChange();
+        const next =
+            entries[
+                ((current < 0 ? (direction > 0 ? -1 : 0) : current) +
+                    direction +
+                    entries.length) %
+                    entries.length
+            ];
+        if (!next) return;
+        setSelectedId(next.fileId);
+        setActiveHunk(next.hunkIndex);
+        setActiveSectionId(next.sectionId);
+        queueMicrotask(() => goToSection(next.sectionId));
+    }
+
+    function changeReconstruction(next: Reconstruction) {
+        if (next === reconstruction()) return;
+        const anchorSide = reconstruction() === "old" ? "new" : "old";
+        const move =
+            props.review.moves?.find((item) => item.id === activeMoveId()) ??
+            props.review.moves?.find(
+                (item) =>
+                    item[anchorSide].path ===
+                    (anchorSide === "old"
+                        ? file()?.oldPath || file()?.path
+                        : file()?.path),
+            );
+        setReconstruction(next);
+        if (!move) return;
+        const anchor = next === "old" ? move.new : move.old;
+        const target = visibleFiles().find(
+            (item) =>
+                (next === "old" ? item.path : item.oldPath || item.path) ===
+                anchor.path,
+        );
+        if (target) setSelectedId(target.id);
+        queueMicrotask(() => {
+            const section = sections().find(
+                (item) => item.move?.id === move.id,
+            );
+            if (section) goToSection(section.id, false);
+        });
+    }
+
     function updateUnifiedActive() {
         if (!unifiedScroller) return;
         const threshold = unifiedScroller.scrollTop + 8;
+        if (props.review.custom) {
+            const visible = [...sections()]
+                .reverse()
+                .filter((section) => section.kind === "change")
+                .find((section) => {
+                    const element = unifiedSections.get(section.id);
+                    return element && element.offsetTop <= threshold;
+                });
+            if (visible) {
+                setActiveSectionId(visible.id);
+                setActiveHunk(visible.hunkIndex);
+                if (visible.move) setActiveMoveId(visible.move.id);
+            }
+            return;
+        }
         for (let index = hunks().length - 1; index >= 0; index--) {
             const element = unifiedHunks.get(index);
             if (element && element.offsetTop <= threshold) {
@@ -321,7 +588,7 @@ export default function FlowDiff(props: FlowDiffProps) {
         const other = side === "old" ? section.right : section.left;
         return (
             <div
-                class={`flow-section ${section.kind}`}
+                class={`flow-section ${section.kind}${section.move && side !== reconstruction() ? " flow-move-anchor" : ""}`}
                 data-section={section.id}
                 ref={(element) =>
                     (side === "old" ? leftSections : rightSections).set(
@@ -342,9 +609,11 @@ export default function FlowDiff(props: FlowDiffProps) {
                             file={file()!}
                             line={line}
                             counterpart={
-                                section.kind === "change"
-                                    ? other[index()]
-                                    : undefined
+                                section.move && side !== reconstruction()
+                                    ? pairedMoveLine(section.move, line, side)
+                                    : section.kind === "change"
+                                      ? other[index()]
+                                      : undefined
                             }
                             side={side}
                             syntax={props.syntax}
@@ -353,7 +622,28 @@ export default function FlowDiff(props: FlowDiffProps) {
                         />
                     )}
                 </For>
-                <Show when={section.kind === "change" && lines.length === 0}>
+                <Show
+                    when={
+                        section.move &&
+                        side === reconstruction() &&
+                        props.review.custom
+                    }
+                >
+                    <MoveOverlay
+                        move={section.move!}
+                        reconstruction={reconstruction()}
+                        file={file()!}
+                        syntax={props.syntax}
+                        onOpenSource={props.onOpenSource}
+                    />
+                </Show>
+                <Show
+                    when={
+                        section.kind === "change" &&
+                        lines.length === 0 &&
+                        !(section.move && side === reconstruction())
+                    }
+                >
                     <div
                         class="flow-absence"
                         aria-label={`No ${side === "old" ? "removed" : "added"} lines in this section`}
@@ -364,6 +654,22 @@ export default function FlowDiff(props: FlowDiffProps) {
             </div>
         );
     };
+
+    const unifiedLine = (
+        line: FlowDiffLine,
+        side: Side,
+        counterpart?: FlowDiffLine,
+    ) => (
+        <FileLine
+            file={file()!}
+            line={line}
+            side={side}
+            counterpart={counterpart}
+            syntax={props.syntax}
+            onNavigateReviewLine={props.onNavigateReviewLine}
+            onOpenSource={props.onOpenSource}
+        />
+    );
 
     onMount(() => {
         if (typeof ResizeObserver !== "undefined")
@@ -384,7 +690,12 @@ export default function FlowDiff(props: FlowDiffProps) {
 
     const openCurrentChange = () => {
         const currentFile = file();
-        const lines = hunks()[activeHunk()]?.lines;
+        const activeSection = sections().find(
+            (section) => section.id === activeSectionId(),
+        );
+        const lines = props.review.custom
+            ? [...(activeSection?.right ?? []), ...(activeSection?.left ?? [])]
+            : hunks()[activeHunk()]?.lines;
         const line =
             lines?.find((item) => item.kind === "added") ??
             lines?.find((item) => item.kind === "removed") ??
@@ -405,9 +716,10 @@ export default function FlowDiff(props: FlowDiffProps) {
     const keydown: JSX.EventHandlerUnion<HTMLElement, KeyboardEvent> = (
         event,
     ) => {
+        if (event.target instanceof HTMLSelectElement) return;
         if (
-            event.target instanceof HTMLSelectElement ||
-            event.target instanceof HTMLButtonElement
+            event.target instanceof HTMLButtonElement &&
+            (event.key === "Enter" || event.key === " ")
         )
             return;
         if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -430,18 +742,17 @@ export default function FlowDiff(props: FlowDiffProps) {
         }
         if (pendingBracket && (event.key === "c" || event.key === "f")) {
             event.preventDefault();
-            if (event.key === "c")
-                goToHunk(activeHunk() + (pendingBracket === "]" ? 1 : -1));
+            if (event.key === "c") stepChange(pendingBracket === "]" ? 1 : -1);
             else {
-                const current = props.review.files.findIndex(
+                const current = visibleFiles().findIndex(
                     (item) => item.id === file()?.id,
                 );
                 const next =
                     (current +
                         (pendingBracket === "]" ? 1 : -1) +
-                        props.review.files.length) %
-                    props.review.files.length;
-                setSelectedId(props.review.files[next]?.id ?? "");
+                        visibleFiles().length) %
+                    visibleFiles().length;
+                setSelectedId(visibleFiles()[next]?.id ?? "");
             }
             pendingBracket = "";
             return;
@@ -449,12 +760,12 @@ export default function FlowDiff(props: FlowDiffProps) {
         pendingBracket = "";
         if (event.key === "F7" || event.key === "n") {
             event.preventDefault();
-            goToHunk(activeHunk() + 1);
+            stepChange(1);
             return;
         }
         if (event.key === "N") {
             event.preventDefault();
-            goToHunk(activeHunk() - 1);
+            stepChange(-1);
             return;
         }
         if (event.key === "s") {
@@ -472,7 +783,12 @@ export default function FlowDiff(props: FlowDiffProps) {
         if (event.key === "j" || event.key === "k") {
             event.preventDefault();
             const step = event.key === "j" ? 22 : -22;
-            if (layout() === "unified" && unifiedScroller)
+            const localScroller =
+                event.target instanceof Element
+                    ? event.target.closest<HTMLElement>(".flow-move-scroll")
+                    : null;
+            if (localScroller) localScroller.scrollTop += step;
+            else if (layout() === "unified" && unifiedScroller)
                 unifiedScroller.scrollTop += step;
             else if (leftScroller) {
                 leftScroller.scrollTop += step;
@@ -500,12 +816,39 @@ export default function FlowDiff(props: FlowDiffProps) {
                     <span>{props.review.title}</span>
                 </div>
                 <div class="flow-toolbar-actions">
+                    <Show
+                        when={
+                            props.review.custom &&
+                            props.review.guidedFiles?.length
+                        }
+                    >
+                        <div
+                            class="flow-view-switch"
+                            role="group"
+                            aria-label="Review view"
+                        >
+                            <button
+                                type="button"
+                                aria-pressed={view() === "files"}
+                                onClick={() => setView("files")}
+                            >
+                                Files
+                            </button>
+                            <button
+                                type="button"
+                                aria-pressed={view() === "guided"}
+                                onClick={() => setView("guided")}
+                            >
+                                Guided
+                            </button>
+                        </div>
+                    </Show>
                     <label class="flow-file-picker">
-                        <span>{props.review.custom ? "Section" : "File"}</span>
+                        <span>{view() === "guided" ? "Section" : "File"}</span>
                         <select
                             aria-label={
-                                props.review.custom
-                                    ? "Diff section"
+                                view() === "guided"
+                                    ? "Guided section"
                                     : "Changed file"
                             }
                             value={file()?.id ?? ""}
@@ -513,10 +856,10 @@ export default function FlowDiff(props: FlowDiffProps) {
                                 setSelectedId(event.currentTarget.value)
                             }
                         >
-                            <For each={props.review.files}>
+                            <For each={visibleFiles()}>
                                 {(item) => (
-                                    <option value={item.id}>
-                                        {item.label
+                                    <option value={item.id} title={item.label}>
+                                        {view() === "guided" && item.label
                                             ? `${item.label} · ${item.path}`
                                             : item.path}
                                     </option>
@@ -525,12 +868,12 @@ export default function FlowDiff(props: FlowDiffProps) {
                         </select>
                     </label>
                     <span class="flow-file-count">
-                        {props.review.files.length}{" "}
-                        {props.review.custom
-                            ? props.review.files.length === 1
+                        {visibleFiles().length}{" "}
+                        {view() === "guided"
+                            ? visibleFiles().length === 1
                                 ? "section"
                                 : "sections"
-                            : props.review.files.length === 1
+                            : visibleFiles().length === 1
                               ? "file"
                               : "files"}
                     </span>
@@ -539,25 +882,71 @@ export default function FlowDiff(props: FlowDiffProps) {
                             type="button"
                             aria-label="Previous change"
                             title="Previous change (Shift+N)"
-                            disabled={!hunks().length}
-                            onClick={() => goToHunk(activeHunk() - 1)}
+                            disabled={
+                                props.review.custom
+                                    ? !changes().length
+                                    : !hunks().length
+                            }
+                            onClick={() => stepChange(-1)}
                         >
                             ↑
                         </button>
                         <span>
-                            {hunks().length ? activeHunk() + 1 : 0} /{" "}
-                            {hunks().length}
+                            {props.review.custom
+                                ? activeChange() + 1
+                                : hunks().length
+                                  ? activeHunk() + 1
+                                  : 0}{" "}
+                            /{" "}
+                            {props.review.custom
+                                ? changes().length
+                                : hunks().length}
                         </span>
                         <button
                             type="button"
                             aria-label="Next change"
                             title="Next change (F7 or N)"
-                            disabled={!hunks().length}
-                            onClick={() => goToHunk(activeHunk() + 1)}
+                            disabled={
+                                props.review.custom
+                                    ? !changes().length
+                                    : !hunks().length
+                            }
+                            onClick={() => stepChange(1)}
                         >
                             ↓
                         </button>
                     </div>
+                    <Show
+                        when={
+                            props.review.custom &&
+                            view() === "files" &&
+                            props.review.moves?.length
+                        }
+                    >
+                        <div
+                            class="flow-reconstruction-switch"
+                            role="group"
+                            aria-label="Moved segment reconstruction"
+                        >
+                            <span class="flow-reconstruction-label">
+                                Reconstruct
+                            </span>
+                            <button
+                                type="button"
+                                aria-pressed={reconstruction() === "old"}
+                                onClick={() => changeReconstruction("old")}
+                            >
+                                Before
+                            </button>
+                            <button
+                                type="button"
+                                aria-pressed={reconstruction() === "new"}
+                                onClick={() => changeReconstruction("new")}
+                            >
+                                After
+                            </button>
+                        </div>
+                    </Show>
                     <div
                         class="flow-layout-switch"
                         role="group"
@@ -590,13 +979,17 @@ export default function FlowDiff(props: FlowDiffProps) {
                             <button
                                 type="button"
                                 title={
-                                    props.review.custom
+                                    props.review.custom &&
+                                    props.review.overlay?.mode !== "active"
                                         ? "Redraw saved review (R)"
                                         : "Refresh review (R)"
                                 }
                                 onClick={() => props.onAction?.("r")}
                             >
-                                {props.review.custom ? "Redraw" : "Refresh"}
+                                {props.review.custom &&
+                                props.review.overlay?.mode !== "active"
+                                    ? "Redraw"
+                                    : "Refresh"}
                             </button>
                             <button
                                 type="button"
@@ -609,6 +1002,44 @@ export default function FlowDiff(props: FlowDiffProps) {
                     </Show>
                 </div>
             </header>
+            <Show when={props.review.overlay && props.onAction}>
+                <div class="flow-overlay-status" role="status">
+                    <span>
+                        {props.review.overlay?.mode === "stale"
+                            ? "Saved restructuring no longer matches these changes."
+                            : props.review.overlay?.mode === "saved"
+                              ? "Viewing saved restructuring."
+                              : props.review.overlay?.mode === "active"
+                                ? "Restructuring overlay applied."
+                                : "Saved restructuring available."}
+                    </span>
+                    <Show when={props.review.overlay?.title}>
+                        <code title={props.review.overlay?.title}>
+                            {props.review.overlay?.title}
+                        </code>
+                    </Show>
+                    <button
+                        type="button"
+                        onClick={() =>
+                            props.onAction?.(
+                                props.review.overlay?.mode === "stale"
+                                    ? "open_saved_overlay"
+                                    : props.review.overlay?.mode === "saved"
+                                      ? "return_to_live_diff"
+                                      : "toggle_overlay",
+                            )
+                        }
+                    >
+                        {props.review.overlay?.mode === "stale"
+                            ? "View saved review"
+                            : props.review.overlay?.mode === "saved"
+                              ? "Return to live diff"
+                              : props.review.overlay?.mode === "active"
+                                ? "Remove overlay"
+                                : "Apply overlay"}
+                    </button>
+                </div>
+            </Show>
             <Show
                 when={file()}
                 fallback={
@@ -622,7 +1053,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                         <span class={`flow-status ${file()!.status}`}>
                             {file()!.status}
                         </span>
-                        <strong>
+                        <strong title={file()!.label || file()!.path}>
                             {file()!.label
                                 ? `${file()!.label} · ${file()!.path}`
                                 : file()!.path}
@@ -677,49 +1108,156 @@ export default function FlowDiff(props: FlowDiffProps) {
                                     aria-label="Unified changes"
                                     tabindex={0}
                                 >
-                                    <For each={file()!.hunks}>
-                                        {(hunk, hunkIndex) => (
-                                            <div
-                                                class="flow-unified-hunk"
-                                                ref={(element) =>
-                                                    unifiedHunks.set(
-                                                        hunkIndex(),
-                                                        element,
-                                                    )
-                                                }
-                                            >
-                                                <div class="flow-unified-heading">
-                                                    <span>
-                                                        Change {hunkIndex() + 1}
-                                                    </span>
-                                                    <code>{hunk.header}</code>
-                                                </div>
-                                                <For each={hunk.lines}>
-                                                    {(line) => (
-                                                        <FileLine
-                                                            file={file()!}
-                                                            line={line}
-                                                            side={
-                                                                line.kind ===
-                                                                "removed"
-                                                                    ? "old"
-                                                                    : "new"
+                                    <Show
+                                        when={props.review.custom}
+                                        fallback={
+                                            <For each={file()!.hunks}>
+                                                {(hunk, hunkIndex) => (
+                                                    <div
+                                                        class="flow-unified-hunk"
+                                                        ref={(element) =>
+                                                            unifiedHunks.set(
+                                                                hunkIndex(),
+                                                                element,
+                                                            )
+                                                        }
+                                                    >
+                                                        <div class="flow-unified-heading">
+                                                            <span>
+                                                                Change{" "}
+                                                                {hunkIndex() +
+                                                                    1}
+                                                            </span>
+                                                            <code>
+                                                                {hunk.header}
+                                                            </code>
+                                                        </div>
+                                                        <For each={hunk.lines}>
+                                                            {(line) =>
+                                                                unifiedLine(
+                                                                    line,
+                                                                    line.kind ===
+                                                                        "removed"
+                                                                        ? "old"
+                                                                        : "new",
+                                                                )
                                                             }
+                                                        </For>
+                                                    </div>
+                                                )}
+                                            </For>
+                                        }
+                                    >
+                                        <For each={sections()}>
+                                            {(section) => (
+                                                <div
+                                                    class={`flow-unified-section ${section.kind}`}
+                                                    data-section={section.id}
+                                                    ref={(element) =>
+                                                        unifiedSections.set(
+                                                            section.id,
+                                                            element,
+                                                        )
+                                                    }
+                                                >
+                                                    <Show
+                                                        when={
+                                                            section.kind ===
+                                                            "gap"
+                                                        }
+                                                    >
+                                                        <div class="flow-gap">
+                                                            <span>···</span>
+                                                            {section.label}
+                                                        </div>
+                                                    </Show>
+                                                    <Show
+                                                        when={
+                                                            section.kind ===
+                                                            "change"
+                                                        }
+                                                    >
+                                                        <div class="flow-unified-heading">
+                                                            Change{" "}
+                                                            {changes().findIndex(
+                                                                (change) =>
+                                                                    change.fileId ===
+                                                                        file()
+                                                                            ?.id &&
+                                                                    change.sectionId ===
+                                                                        section.id,
+                                                            ) + 1}
+                                                        </div>
+                                                    </Show>
+                                                    <For
+                                                        each={
+                                                            section.kind ===
+                                                            "context"
+                                                                ? []
+                                                                : section.left
+                                                        }
+                                                    >
+                                                        {(line, index) =>
+                                                            unifiedLine(
+                                                                line,
+                                                                "old",
+                                                                section.move &&
+                                                                    reconstruction() ===
+                                                                        "new"
+                                                                    ? pairedMoveLine(
+                                                                          section.move,
+                                                                          line,
+                                                                          "old",
+                                                                      )
+                                                                    : section
+                                                                          .right[
+                                                                          index()
+                                                                      ],
+                                                            )
+                                                        }
+                                                    </For>
+                                                    <For each={section.right}>
+                                                        {(line, index) =>
+                                                            unifiedLine(
+                                                                line,
+                                                                "new",
+                                                                section.move &&
+                                                                    reconstruction() ===
+                                                                        "old"
+                                                                    ? pairedMoveLine(
+                                                                          section.move,
+                                                                          line,
+                                                                          "new",
+                                                                      )
+                                                                    : section
+                                                                          .left[
+                                                                          index()
+                                                                      ],
+                                                            )
+                                                        }
+                                                    </For>
+                                                    <Show
+                                                        when={
+                                                            section.move &&
+                                                            view() === "files"
+                                                        }
+                                                    >
+                                                        <MoveOverlay
+                                                            move={section.move!}
+                                                            reconstruction={reconstruction()}
+                                                            file={file()!}
                                                             syntax={
                                                                 props.syntax
-                                                            }
-                                                            onNavigateReviewLine={
-                                                                props.onNavigateReviewLine
                                                             }
                                                             onOpenSource={
                                                                 props.onOpenSource
                                                             }
                                                         />
-                                                    )}
-                                                </For>
-                                            </div>
-                                        )}
-                                    </For>
+                                                    </Show>
+                                                </div>
+                                            )}
+                                        </For>
+                                    </Show>
                                 </div>
                             }
                         >

@@ -11,6 +11,7 @@
 //! - `]c` / `[c` move between hunks, `]f` / `[f` between files
 //! - `Enter` (or `gf`) opens the file at the line under the cursor in the tab
 //!   the review was opened from; `<Space>gd` returns to the review, refreshed
+//! - `o` toggles saved moves, `O` opens their frozen snapshot
 //! - `r` refreshes, `q` closes, `<Space>gf` fetches the base branch
 //!
 //! The base is chosen by [`crate::native_diff::resolve_base`], which prefers
@@ -57,6 +58,8 @@ pub struct DiffReviewState {
     /// regenerated from the worktree when the review is revisited.
     custom: Option<CustomReview>,
     custom_title: Option<String>,
+    /// True when the custom view is attached to the current live Git patch.
+    live_overlay: bool,
     /// Text width the side-by-side layout was laid out for.
     layout_width: usize,
     /// Buffer-area width that produced `layout_width`. Re-flowing keys off
@@ -304,9 +307,123 @@ pub struct PendingGitFetch {
     target: String,
 }
 
+/// Most recent agent arrangement for one worktree in this editor session.
+pub struct SavedDiffOverlay {
+    title: String,
+    review: CustomReview,
+    enabled: bool,
+}
+
+pub struct DiffOverlayViewState {
+    pub mode: &'static str,
+    pub title: Option<String>,
+}
+
+fn same_canonical_patch(left: &ReviewPatch, right: &ReviewPatch) -> bool {
+    left.root == right.root
+        && left.base.spec == right.base.spec
+        && left.comparison_base_oid == right.comparison_base_oid
+        && left.text == right.text
+        && left.lines == right.lines
+        && left.files == right.files
+        && left.truncated == right.truncated
+}
+
 impl Editor {
     pub fn diff_review(&self) -> Option<&DiffReviewState> {
         self.ui_panels.diff_review.as_ref()
+    }
+
+    pub fn diff_review_overlay_state(&self) -> Option<DiffOverlayViewState> {
+        let state = self.ui_panels.diff_review.as_ref()?;
+        let cached = self.ui_panels.diff_review_overlays.get(&state.patch.root);
+        if state.custom.is_some() && !state.live_overlay {
+            return Some(DiffOverlayViewState {
+                mode: "saved",
+                title: state.custom_title.clone(),
+            });
+        }
+        let mode = match cached {
+            Some(saved) if !same_canonical_patch(&saved.review.snapshot.patch, &state.patch) => {
+                "stale"
+            }
+            Some(saved) if saved.enabled => "active",
+            Some(_) => "available",
+            None => "none",
+        };
+        Some(DiffOverlayViewState {
+            mode,
+            title: cached.map(|saved| saved.title.clone()),
+        })
+    }
+
+    fn active_overlay_for_patch(&self, patch: &ReviewPatch) -> Option<(String, CustomReview)> {
+        self.ui_panels
+            .diff_review_overlays
+            .get(&patch.root)
+            .filter(|saved| {
+                saved.enabled && same_canonical_patch(&saved.review.snapshot.patch, patch)
+            })
+            .map(|saved| (saved.title.clone(), saved.review.clone()))
+    }
+
+    fn live_review_status(&self, patch: &ReviewPatch) -> String {
+        match self.ui_panels.diff_review_overlays.get(&patch.root) {
+            Some(saved) if !same_canonical_patch(&saved.review.snapshot.patch, patch) => {
+                "Saved moves outdated · press O to view the frozen diff".to_string()
+            }
+            Some(saved) if saved.enabled => {
+                "Saved moves applied · press o to remove overlay".to_string()
+            }
+            Some(_) => "Saved moves available · press o to apply overlay".to_string(),
+            None => summary_message(patch),
+        }
+    }
+
+    pub fn return_to_live_diff_review(&mut self) -> anyhow::Result<()> {
+        self.open_diff_review(None)
+    }
+
+    pub fn toggle_diff_review_overlay(&mut self) -> anyhow::Result<()> {
+        let Some(state) = self.ui_panels.diff_review.as_ref() else {
+            anyhow::bail!("No diff review is open");
+        };
+        if state.custom.is_some() && !state.live_overlay {
+            return self.return_to_live_diff_review();
+        }
+        let root = state.patch.root.clone();
+        if let Some(saved) = self.ui_panels.diff_review_overlays.get_mut(&root) {
+            let previous = saved.enabled;
+            saved.enabled = !saved.enabled;
+            if let Err(error) = self.refresh_live_diff_review() {
+                self.ui_panels
+                    .diff_review_overlays
+                    .get_mut(&root)
+                    .expect("saved overlay remains cached")
+                    .enabled = previous;
+                return Err(error);
+            }
+            Ok(())
+        } else {
+            anyhow::bail!("No saved moves for this repository")
+        }
+    }
+
+    pub fn open_saved_diff_overlay(&mut self) -> anyhow::Result<()> {
+        let root = self
+            .ui_panels
+            .diff_review
+            .as_ref()
+            .map(|state| state.patch.root.clone())
+            .unwrap_or_else(|| self.diff_review_workspace_hint());
+        let saved = self
+            .ui_panels
+            .diff_review_overlays
+            .get(&root)
+            .ok_or_else(|| anyhow::anyhow!("No saved moves for this repository"))?;
+        let title = saved.title.clone();
+        let review = saved.review.clone();
+        self.open_custom_diff_review_impl(&title, review, false)
     }
 
     /// Branch reviews and commit/patch buffers share diff viewport affordances.
@@ -329,18 +446,9 @@ impl Editor {
             return;
         }
         if self.review_buffer_index().is_some() {
-            if self
-                .ui_panels
-                .diff_review
-                .as_ref()
-                .is_some_and(|state| state.custom.is_some())
-            {
-                if let Err(error) = self.open_diff_review(None) {
-                    self.review_toast(ToastLevel::Error, format!("Diff review: {error:#}"));
-                }
-                return;
+            if let Err(error) = self.open_diff_review(None) {
+                self.review_toast(ToastLevel::Error, format!("Diff review: {error:#}"));
             }
-            self.enter_diff_review();
             return;
         }
         if let Err(error) = self.open_diff_review(None) {
@@ -366,9 +474,8 @@ impl Editor {
         if self.review_buffer_index().is_some() {
             if !self.is_diff_review_buffer() {
                 self.enter_diff_review();
-            } else {
-                self.refresh_diff_review();
             }
+            self.refresh_diff_review();
             return Ok(());
         }
 
@@ -381,13 +488,18 @@ impl Editor {
 
         let layout = self.ui_panels.diff_review_layout;
         let (area_width, width) = self.diff_review_widths();
-        let rendered = render::render(
-            &patch,
-            layout,
-            width,
-            self.unsaved_buffer_count(),
-            self.diff_review_tab_width(),
-        );
+        let overlay = self.active_overlay_for_patch(&patch);
+        let rendered = if let Some((title, custom)) = &overlay {
+            render::render_custom(custom, title, layout, width, self.diff_review_tab_width())
+        } else {
+            render::render(
+                &patch,
+                layout,
+                width,
+                self.unsaved_buffer_count(),
+                self.diff_review_tab_width(),
+            )
+        };
 
         let origin_buffer_id = Some(self.buffer().id());
         let origin_tab = self.current_tab_index();
@@ -405,8 +517,9 @@ impl Editor {
             patch_line_ranges: patch_line_ranges(&patch),
             code_highlights: Vec::new(),
             custom_targets: Vec::new(),
-            custom: None,
-            custom_title: None,
+            custom: overlay.as_ref().map(|(_, custom)| custom.clone()),
+            custom_title: overlay.as_ref().map(|(title, _)| title.clone()),
+            live_overlay: overlay.is_some(),
             patch,
             rows: Vec::new(),
             stat_rows: Vec::new(),
@@ -422,7 +535,7 @@ impl Editor {
             .ui_panels
             .diff_review
             .as_ref()
-            .map(|state| summary_message(&state.patch));
+            .map(|state| self.live_review_status(&state.patch));
         if let Some(message) = message {
             self.set_status_message(message);
         }
@@ -438,7 +551,26 @@ impl Editor {
         title: &str,
         custom: CustomReview,
     ) -> anyhow::Result<()> {
+        self.open_custom_diff_review_impl(title, custom, true)
+    }
+
+    fn open_custom_diff_review_impl(
+        &mut self,
+        title: &str,
+        custom: CustomReview,
+        remember: bool,
+    ) -> anyhow::Result<()> {
         custom.validate_coverage()?;
+        if remember {
+            self.ui_panels.diff_review_overlays.insert(
+                custom.snapshot.patch.root.clone(),
+                SavedDiffOverlay {
+                    title: title.to_string(),
+                    review: custom.clone(),
+                    enabled: true,
+                },
+            );
+        }
         if self.ui_panels.diff_review.is_some() {
             self.close_diff_review();
         }
@@ -465,6 +597,7 @@ impl Editor {
             patch,
             custom: Some(custom),
             custom_title: Some(title.to_string()),
+            live_overlay: false,
             layout_width: width,
             layout_area_width: area_width,
             rows: Vec::new(),
@@ -491,13 +624,23 @@ impl Editor {
             .ui_panels
             .diff_review
             .as_ref()
-            .is_some_and(|state| state.custom.is_some())
+            .is_some_and(|state| state.custom.is_some() && !state.live_overlay)
         {
             let anchor = self.diff_review_anchor(index, true);
             self.rerender_diff_review(anchor);
             self.set_status_message("Saved diff review");
             return;
         }
+        if let Err(error) = self.refresh_live_diff_review() {
+            self.review_toast(ToastLevel::Error, format!("Diff review: {error:#}"));
+        }
+    }
+
+    /// Compute the entire live comparison before replacing the visible review.
+    fn refresh_live_diff_review(&mut self) -> anyhow::Result<()> {
+        let index = self
+            .review_buffer_index()
+            .ok_or_else(|| anyhow::anyhow!("No diff review is open"))?;
         let (root, explicit) = {
             let state = self.ui_panels.diff_review.as_ref().expect("review state");
             (state.patch.root.clone(), state.explicit_spec.clone())
@@ -506,27 +649,18 @@ impl Editor {
         let base = match explicit.as_deref() {
             Some(spec) => Ok(ReviewBase::explicit(spec)),
             None => self.resolve_review_base_for_path(&root),
-        };
-        let base = match base {
-            Ok(base) => base,
-            Err(error) => {
-                self.review_toast(ToastLevel::Error, format!("Diff review: {error:#}"));
-                return;
-            }
-        };
-        let patch = match native_diff::review_patch(&root, &base) {
-            Ok(patch) => patch,
-            Err(error) => {
-                self.review_toast(ToastLevel::Error, format!("Diff review: {error:#}"));
-                return;
-            }
-        };
+        }?;
+        let patch = native_diff::review_patch(&root, &base)?;
 
+        let overlay = self.active_overlay_for_patch(&patch);
         let anchor = self.diff_review_anchor(index, true);
         {
             let state = self.ui_panels.diff_review.as_mut().expect("review state");
             state.patch_line_ranges = patch_line_ranges(&patch);
             state.patch = patch;
+            state.custom = overlay.as_ref().map(|(_, custom)| custom.clone());
+            state.custom_title = overlay.as_ref().map(|(title, _)| title.clone());
+            state.live_overlay = overlay.is_some();
         }
         self.rerender_diff_review(anchor);
 
@@ -534,10 +668,11 @@ impl Editor {
             .ui_panels
             .diff_review
             .as_ref()
-            .map(|state| summary_message(&state.patch));
+            .map(|state| self.live_review_status(&state.patch));
         if let Some(message) = message {
             self.set_status_message(message);
         }
+        Ok(())
     }
 
     /// `s` in the review, or a click on the toolbar.
@@ -735,19 +870,7 @@ impl Editor {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No branch review is open"))?;
         if let Some(custom) = &state.custom {
-            let valid = custom
-                .sections
-                .iter()
-                .flat_map(|section| section.lines.iter().map(move |entry| (section, entry)))
-                .any(|(section, entry)| match side {
-                    "old" => {
-                        section.old_path.as_deref() == Some(path) && entry.old_line == Some(line)
-                    }
-                    "new" => {
-                        section.new_path.as_deref() == Some(path) && entry.new_line == Some(line)
-                    }
-                    _ => false,
-                });
+            let valid = custom_saved_line(custom, path, line, side).is_some();
             anyhow::ensure!(valid, "Source is not in this review: {path}:{line}");
             return self.open_custom_review_source(path, line, side);
         }
@@ -824,28 +947,7 @@ impl Editor {
             .clone()
             .ok_or_else(|| anyhow::anyhow!("No custom review is open"))?;
         anyhow::ensure!(side == "old" || side == "new", "Unknown diff side: {side}");
-        let saved_line = custom.sections.iter().find_map(|section| {
-            let matches = if side == "old" {
-                section.old_path.as_deref() == Some(path)
-            } else {
-                section.new_path.as_deref() == Some(path)
-            };
-            matches
-                .then(|| {
-                    section.lines.iter().find_map(|entry| {
-                        let number = if side == "old" && entry.kind != PatchLineKind::Added {
-                            entry.old_line
-                        } else if side == "new" && entry.kind != PatchLineKind::Removed {
-                            entry.new_line
-                        } else {
-                            None
-                        };
-                        (number == Some(line)).then_some(entry.text.as_str())
-                    })
-                })
-                .flatten()
-        });
-        let saved_line = saved_line
+        let saved_line = custom_saved_line(&custom, path, line, side)
             .ok_or_else(|| anyhow::anyhow!("Source is not in this review: {path}:{line}"))?;
         let current_matches = side == "new"
             && std::fs::read_to_string(root.join(path))
@@ -1284,9 +1386,51 @@ fn patch_line_ranges(patch: &ReviewPatch) -> Vec<(usize, usize)> {
     ranges
 }
 
-/// Builds a numbered excerpt from the persisted patch. The old side always
-/// uses this path: a moved or deleted file's current contents are not its
-/// contents in the saved comparison.
+/// Finds saved source text without consulting files that may have changed since capture.
+fn custom_saved_line<'a>(
+    custom: &'a CustomReview,
+    path: &str,
+    line: usize,
+    side: &str,
+) -> Option<&'a str> {
+    custom
+        .snapshot
+        .source_for(path, side)
+        .and_then(|source| source.line(line))
+        .or_else(|| {
+            let patch = &custom.snapshot.patch;
+            patch
+                .text
+                .lines()
+                .zip(&patch.lines)
+                .find_map(|(text, entry)| {
+                    let file = patch.files.get(entry.file?)?;
+                    let matches = match side {
+                        "old" => {
+                            file.old_path.as_deref().unwrap_or(&file.path) == path
+                                && entry.old_line == Some(line)
+                                && matches!(
+                                    entry.kind,
+                                    PatchLineKind::Context | PatchLineKind::Removed
+                                )
+                        }
+                        "new" => {
+                            file.path == path
+                                && entry.new_line == Some(line)
+                                && matches!(
+                                    entry.kind,
+                                    PatchLineKind::Context | PatchLineKind::Added
+                                )
+                        }
+                        _ => false,
+                    };
+                    matches.then(|| text.get(1..)).flatten()
+                })
+        })
+}
+
+/// Builds a numbered excerpt from saved source, falling back to the canonical
+/// patch for reviews captured before surrounding source was retained.
 fn custom_source_excerpt(
     custom: &CustomReview,
     path: &str,
@@ -1294,26 +1438,35 @@ fn custom_source_excerpt(
     side: &str,
 ) -> anyhow::Result<(String, usize)> {
     let mut source = BTreeMap::new();
-    for section in &custom.sections {
-        let matches = if side == "old" {
-            section.old_path.as_deref() == Some(path)
-        } else {
-            section.new_path.as_deref() == Some(path)
-        };
-        if !matches {
-            continue;
-        }
-        for entry in &section.lines {
-            let number = if side == "old" && entry.kind != PatchLineKind::Added {
-                entry.old_line
-            } else if side == "new" && entry.kind != PatchLineKind::Removed {
-                entry.new_line
-            } else {
-                None
-            };
-            if let Some(number) = number {
-                source.entry(number).or_insert_with(|| entry.text.clone());
+    if let Some(saved) = custom.snapshot.source_for(path, side) {
+        for window in &saved.windows {
+            for (offset, text) in window.lines.iter().enumerate() {
+                source.insert(window.start_line + offset, text.as_str());
             }
+        }
+    }
+    let patch = &custom.snapshot.patch;
+    for (text, entry) in patch.text.lines().zip(&patch.lines) {
+        let Some(file) = entry.file.and_then(|index| patch.files.get(index)) else {
+            continue;
+        };
+        let number = match side {
+            "old"
+                if file.old_path.as_deref().unwrap_or(&file.path) == path
+                    && matches!(entry.kind, PatchLineKind::Context | PatchLineKind::Removed) =>
+            {
+                entry.old_line
+            }
+            "new"
+                if file.path == path
+                    && matches!(entry.kind, PatchLineKind::Context | PatchLineKind::Added) =>
+            {
+                entry.new_line
+            }
+            _ => None,
+        };
+        if let Some(number) = number {
+            source.entry(number).or_insert(text.get(1..).unwrap_or(""));
         }
     }
     anyhow::ensure!(!source.is_empty(), "No saved {side} source for {path}");

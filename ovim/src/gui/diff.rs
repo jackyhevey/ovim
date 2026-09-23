@@ -2,12 +2,13 @@
 //! core; this projection only replaces the terminal's width-dependent paint.
 
 use serde::{Serialize, Serializer};
+use std::collections::BTreeMap;
 use std::path::{Component, Path};
 use std::sync::Arc;
 
 use crate::buffer::Buffer;
 use crate::editor::{DiffLayout, DiffReviewState, Editor, DIFF_REVIEW_TITLE_PREFIX};
-use ovim_core::native_diff::{CustomReview, PatchLineKind, ReviewPatch};
+use ovim_core::native_diff::{ChangeRef, CustomReview, PatchLineKind, ReviewPatch};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -17,6 +18,49 @@ pub struct GuiDiffReview {
     pub managed: bool,
     pub custom: bool,
     pub files: Vec<GuiDiffFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlay: Option<GuiDiffOverlayState>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub moves: Vec<GuiDiffMove>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub guided_files: Vec<GuiDiffFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiDiffOverlayState {
+    pub mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiDiffMove {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub old: GuiDiffMoveEndpoint,
+    pub new: GuiDiffMoveEndpoint,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiDiffMoveEndpoint {
+    pub path: String,
+    pub start_line: usize,
+    pub line_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_line: Option<usize>,
+    pub context_windows: Vec<GuiDiffContextWindow>,
+    pub context_complete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiDiffContextWindow {
+    pub start_line: usize,
+    pub lines: Vec<GuiDiffLine>,
 }
 
 /// A cached projection shared by successive snapshots. Cursor movement does
@@ -94,10 +138,21 @@ pub fn project_diff(editor: &Editor, buffer: &Buffer) -> Option<GuiDiffReview> {
         .diff_review()
         .filter(|state| state.buffer_id == buffer.id())
     {
-        if let Some(custom) = review.custom() {
-            return Some(project_custom_review(&title, review, custom));
-        }
-        return Some(project_review_patch(&title, review));
+        let mut projected = if let Some(custom) = review.custom() {
+            project_custom_review(&title, review, custom)
+        } else {
+            project_review_patch(&title, review)
+        };
+        projected.overlay = editor
+            .diff_review_overlay_state()
+            .and_then(|state| match state.mode {
+                "none" => None,
+                mode => Some(GuiDiffOverlayState {
+                    mode,
+                    title: state.title,
+                }),
+            });
+        return Some(projected);
     }
     let path = title.strip_prefix(DIFF_REVIEW_TITLE_PREFIX)?;
     Some(project_standalone(&title, path, &buffer.rope().to_string()))
@@ -171,17 +226,64 @@ fn project_review_patch(title: &str, review: &DiffReviewState) -> GuiDiffReview 
         managed: true,
         custom: false,
         files,
+        overlay: None,
+        moves: Vec::new(),
+        guided_files: Vec::new(),
     }
 }
+
+const MOVE_CONTEXT_RADIUS: usize = 200;
+const MAX_MOVE_CONTEXT_LINES: usize = 500;
+const MAX_MOVE_CONTEXT_BYTES: usize = 128 * 1024;
 
 fn project_custom_review(
     title: &str,
     review: &DiffReviewState,
     custom: &CustomReview,
 ) -> GuiDiffReview {
+    // The main document always follows real files and their canonical hunks.
+    // Pairings annotate that document; they do not replace files with sections.
+    let mut projected = project_review_patch(title, review);
+    projected.custom = true;
+    projected.guided_files = project_guided_files(review, custom);
+    let review_lines = review.patch_review_lines();
+    let patch_lines = custom.snapshot.patch.text.lines().collect::<Vec<_>>();
+    projected.moves = custom
+        .pairings
+        .iter()
+        .enumerate()
+        .filter_map(|(index, pairing)| {
+            let old = project_move_endpoint(
+                review,
+                custom,
+                &review_lines,
+                &patch_lines,
+                &pairing.old,
+                PatchLineKind::Removed,
+            )?;
+            let new = project_move_endpoint(
+                review,
+                custom,
+                &review_lines,
+                &patch_lines,
+                &pairing.new,
+                PatchLineKind::Added,
+            )?;
+            Some(GuiDiffMove {
+                id: format!("pair_{index}"),
+                label: pairing.label.clone(),
+                old,
+                new,
+            })
+        })
+        .collect();
+    projected
+}
+
+fn project_guided_files(review: &DiffReviewState, custom: &CustomReview) -> Vec<GuiDiffFile> {
     let patch = review.patch();
     let review_lines = review.patch_review_lines();
-    let files = custom
+    custom
         .sections
         .iter()
         .map(|section| {
@@ -294,14 +396,167 @@ fn project_custom_review(
                 hunks,
             }
         })
-        .collect();
-    GuiDiffReview {
-        title: title.to_string(),
-        layout: layout_name(review.layout),
-        managed: true,
-        custom: true,
-        files,
+        .collect()
+}
+
+fn project_move_endpoint(
+    review: &DiffReviewState,
+    custom: &CustomReview,
+    review_lines: &[Option<usize>],
+    patch_lines: &[&str],
+    reference: &ChangeRef,
+    kind: PatchLineKind,
+) -> Option<GuiDiffMoveEndpoint> {
+    let snapshot = &custom.snapshot;
+    let block = snapshot
+        .blocks
+        .iter()
+        .find(|block| block.id == reference.block_id)?;
+    if block.kind != kind {
+        return None;
     }
+    let offset = reference.offset.unwrap_or(0);
+    let count = reference
+        .count
+        .unwrap_or(block.line_count.checked_sub(offset)?);
+    let start_line = block.start_line.checked_add(offset)?;
+    let end_line = start_line.checked_add(count)?;
+    let file = snapshot.patch.files.get(block.file)?;
+    let path = if kind == PatchLineKind::Removed {
+        file.old_path.as_deref().unwrap_or(&file.path)
+    } else {
+        &file.path
+    };
+    let first_patch_line = block.patch_line_start.checked_add(offset)?;
+    let review_line = review_lines.get(first_patch_line).copied().flatten();
+
+    // Changed rows always come from the canonical patch. Frozen source windows
+    // add only surrounding context, so a partial capture never clips a move.
+    let mut lines = BTreeMap::new();
+    for index in 0..count {
+        let patch_line = first_patch_line + index;
+        let info = snapshot.patch.lines.get(patch_line)?;
+        if info.kind != kind {
+            return None;
+        }
+        let text = patch_lines.get(patch_line)?.get(1..)?.to_string();
+        let number = start_line + index;
+        lines.insert(
+            number,
+            GuiDiffLine {
+                kind: kind_name(kind),
+                highlights: project_highlights(&text, review.patch_line_highlights(patch_line)),
+                text,
+                old_line: (kind == PatchLineKind::Removed).then_some(number),
+                new_line: (kind == PatchLineKind::Added).then_some(number),
+                review_line: review_lines.get(patch_line).copied().flatten(),
+            },
+        );
+    }
+
+    let source = snapshot.source_for(
+        path,
+        if kind == PatchLineKind::Removed {
+            "old"
+        } else {
+            "new"
+        },
+    );
+    let mut context_cut = false;
+    if let Some(source) = source {
+        let lower = start_line.saturating_sub(MOVE_CONTEXT_RADIUS).max(1);
+        let upper = end_line.saturating_add(MOVE_CONTEXT_RADIUS);
+        let mut nearby = source
+            .windows
+            .iter()
+            .flat_map(|window| {
+                window.lines.iter().enumerate().filter_map(|(index, text)| {
+                    let number = window.start_line + index;
+                    (number >= lower
+                        && number < upper
+                        && (number < start_line || number >= end_line))
+                        .then(|| {
+                            let distance = if number < start_line {
+                                start_line - number
+                            } else {
+                                number - end_line + 1
+                            };
+                            (distance, number, text)
+                        })
+                })
+            })
+            .collect::<Vec<_>>();
+        nearby.sort_by_key(|(distance, number, _)| (*distance, *number));
+        let mut remaining_lines = MAX_MOVE_CONTEXT_LINES;
+        let mut remaining_bytes = MAX_MOVE_CONTEXT_BYTES;
+        for (_, number, text) in nearby {
+            if remaining_lines == 0 || text.len() > remaining_bytes {
+                context_cut = true;
+                if remaining_lines == 0 {
+                    break;
+                }
+                continue;
+            }
+            remaining_lines -= 1;
+            remaining_bytes -= text.len();
+            lines.insert(
+                number,
+                GuiDiffLine {
+                    kind: "context",
+                    text: text.clone(),
+                    old_line: (kind == PatchLineKind::Removed).then_some(number),
+                    new_line: (kind == PatchLineKind::Added).then_some(number),
+                    review_line: None,
+                    highlights: Vec::new(),
+                },
+            );
+        }
+    }
+
+    let context_windows = context_windows_from_lines(lines);
+    let context_complete = source.is_some_and(|source| {
+        let source_end = source.windows.last().map_or(0, |window| {
+            window.start_line + window.lines.len().saturating_sub(1)
+        });
+        source.complete
+            && !context_cut
+            && context_windows
+                .first()
+                .is_some_and(|window| window.start_line == 1)
+            && context_windows.last().is_some_and(|window| {
+                window.start_line + window.lines.len().saturating_sub(1) == source_end
+            })
+            && context_windows
+                .iter()
+                .map(|window| window.lines.len())
+                .sum::<usize>()
+                == source_end
+    });
+    Some(GuiDiffMoveEndpoint {
+        path: path.to_string(),
+        start_line,
+        line_count: count,
+        review_line,
+        context_windows,
+        context_complete,
+    })
+}
+
+fn context_windows_from_lines(lines: BTreeMap<usize, GuiDiffLine>) -> Vec<GuiDiffContextWindow> {
+    let mut windows: Vec<GuiDiffContextWindow> = Vec::new();
+    for (number, line) in lines {
+        if let Some(last) = windows.last_mut() {
+            if last.start_line + last.lines.len() == number {
+                last.lines.push(line);
+                continue;
+            }
+        }
+        windows.push(GuiDiffContextWindow {
+            start_line: number,
+            lines: vec![line],
+        });
+    }
+    windows
 }
 
 fn project_standalone(title: &str, path: &str, content: &str) -> GuiDiffReview {
@@ -388,6 +643,9 @@ fn project_standalone(title: &str, path: &str, content: &str) -> GuiDiffReview {
         managed: false,
         custom: false,
         files: vec![file],
+        overlay: None,
+        moves: Vec::new(),
+        guided_files: Vec::new(),
     }
 }
 
@@ -487,6 +745,15 @@ pub fn perform_diff_action(
         "refresh" if managed => editor.refresh_diff_review(),
         "split" if managed => editor.set_diff_review_layout(DiffLayout::Split),
         "unified" if managed => editor.set_diff_review_layout(DiffLayout::Unified),
+        "toggle_overlay" if managed => editor
+            .toggle_diff_review_overlay()
+            .map_err(|error| format!("{error:#}"))?,
+        "open_saved_overlay" if managed => editor
+            .open_saved_diff_overlay()
+            .map_err(|error| format!("{error:#}"))?,
+        "return_to_live_diff" if managed => editor
+            .return_to_live_diff_review()
+            .map_err(|error| format!("{error:#}"))?,
         "close" if managed => editor.close_diff_review(),
         "close" => editor.close_current_tab(),
         _ => return Err(format!("Unsupported diff action: {action}")),
@@ -572,6 +839,7 @@ fn map_old_line(hunks: &[GuiDiffHunk], old_line: usize) -> Option<usize> {
 mod tests {
     use super::*;
     use git2::{IndexAddOption, Repository, Signature};
+    use ovim_core::native_diff::{review_snapshot, ChangeRef, DiffPairing, ReviewBase};
     use std::fs;
 
     fn commit(repo: &Repository) {
@@ -591,6 +859,182 @@ mod tests {
             &parents,
         )
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn custom_projection_keeps_real_files_and_embeds_frozen_move_context() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let repo = Repository::init(root).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        fs::write(root.join("anchor.rs"), "fn anchor() {}\n").unwrap();
+        fs::write(
+            root.join("old.rs"),
+            "fn old_parser() {\n    parse_old();\n}\n",
+        )
+        .unwrap();
+        commit(&repo);
+        fs::remove_file(root.join("old.rs")).unwrap();
+        fs::write(
+            root.join("new.rs"),
+            "fn new_parser() {\n    parse_new();\n}\n",
+        )
+        .unwrap();
+
+        let snapshot = review_snapshot(root, &ReviewBase::explicit("HEAD")).unwrap();
+        let old = snapshot
+            .blocks
+            .iter()
+            .find(|block| block.kind == PatchLineKind::Removed)
+            .unwrap();
+        let new = snapshot
+            .blocks
+            .iter()
+            .find(|block| block.kind == PatchLineKind::Added)
+            .unwrap();
+        let pairings = vec![DiffPairing {
+            label: Some("Parser moved".into()),
+            old: ChangeRef {
+                block_id: old.id.clone(),
+                offset: None,
+                count: None,
+            },
+            new: ChangeRef {
+                block_id: new.id.clone(),
+                offset: None,
+                count: None,
+            },
+        }];
+        let custom = snapshot.reassign(&pairings).unwrap();
+        let mut editor = Editor::default();
+        editor.open_file(root.join("anchor.rs")).unwrap();
+        editor
+            .open_custom_diff_review("Parser move", custom)
+            .unwrap();
+
+        let projected = project_diff(&editor, editor.buffer()).unwrap();
+        assert!(projected.custom);
+        assert_eq!(
+            projected.overlay.as_ref().map(|state| state.mode),
+            Some("saved")
+        );
+        assert!(projected.files.iter().any(|file| file.path == "old.rs"));
+        assert!(projected.files.iter().any(|file| file.path == "new.rs"));
+        assert!(projected
+            .files
+            .iter()
+            .all(|file| file.status != "reassigned"));
+        assert!(projected
+            .guided_files
+            .iter()
+            .any(|file| file.status == "reassigned"));
+        assert_eq!(projected.moves.len(), 1);
+        let moved = &projected.moves[0];
+        assert_eq!(moved.label.as_deref(), Some("Parser moved"));
+        assert_eq!(moved.old.path, "old.rs");
+        assert_eq!(moved.new.path, "new.rs");
+        assert!(moved
+            .old
+            .context_windows
+            .iter()
+            .flat_map(|window| &window.lines)
+            .any(|line| line.text.contains("parse_old")));
+        assert!(moved
+            .new
+            .context_windows
+            .iter()
+            .flat_map(|window| &window.lines)
+            .any(|line| line.text.contains("parse_new")));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn moved_endpoints_keep_all_changed_lines_when_source_capture_is_partial() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let repo = Repository::init(root).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        fs::write(root.join("anchor.rs"), "fn anchor() {}\n").unwrap();
+        let long_old = format!("old_{}", "x".repeat(140_000));
+        let long_new = format!("new_{}", "y".repeat(140_000));
+        let old_lines = (0..650)
+            .map(|index| {
+                if index == 300 {
+                    long_old.clone()
+                } else {
+                    format!("old_{index}")
+                }
+            })
+            .collect::<Vec<_>>();
+        fs::write(root.join("old.rs"), format!("{}\n", old_lines.join("\n"))).unwrap();
+        commit(&repo);
+        fs::remove_file(root.join("old.rs")).unwrap();
+        let new_lines = (0..650)
+            .map(|index| {
+                if index == 300 {
+                    long_new.clone()
+                } else {
+                    format!("new_{index}")
+                }
+            })
+            .collect::<Vec<_>>();
+        fs::write(root.join("new.rs"), format!("{}\n", new_lines.join("\n"))).unwrap();
+
+        let mut snapshot = review_snapshot(root, &ReviewBase::explicit("HEAD")).unwrap();
+        for source in &mut snapshot.sources {
+            for side in [&mut source.old, &mut source.new].into_iter().flatten() {
+                side.complete = false;
+                side.windows.truncate(1);
+                for window in &mut side.windows {
+                    window.lines.truncate(10);
+                }
+            }
+        }
+        let removed = snapshot
+            .blocks
+            .iter()
+            .find(|block| block.kind == PatchLineKind::Removed && block.line_count == 650)
+            .unwrap();
+        let added = snapshot
+            .blocks
+            .iter()
+            .find(|block| block.kind == PatchLineKind::Added && block.line_count == 650)
+            .unwrap();
+        let pairings = vec![DiffPairing {
+            label: Some("Large move".into()),
+            old: ChangeRef {
+                block_id: removed.id.clone(),
+                offset: None,
+                count: None,
+            },
+            new: ChangeRef {
+                block_id: added.id.clone(),
+                offset: None,
+                count: None,
+            },
+        }];
+        let custom = snapshot.reassign(&pairings).unwrap();
+        let mut editor = Editor::default();
+        editor.open_file(root.join("anchor.rs")).unwrap();
+        editor
+            .open_custom_diff_review("Large move", custom)
+            .unwrap();
+
+        let projected = project_diff(&editor, editor.buffer()).unwrap();
+        let moved = &projected.moves[0];
+        for (endpoint, expected_kind, expected_long) in [
+            (&moved.old, "removed", &long_old),
+            (&moved.new, "added", &long_new),
+        ] {
+            let changed = endpoint
+                .context_windows
+                .iter()
+                .flat_map(|window| &window.lines)
+                .filter(|line| line.kind == expected_kind)
+                .collect::<Vec<_>>();
+            assert_eq!(changed.len(), 650);
+            assert_eq!(changed[300].text, *expected_long);
+            assert!(!endpoint.context_complete);
+        }
     }
 
     #[test]
