@@ -17,6 +17,8 @@ pub struct GuiDiffReview {
     pub layout: &'static str,
     pub managed: bool,
     pub custom: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<GuiDiffProvenance>,
     pub files: Vec<GuiDiffFile>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub overlay: Option<GuiDiffOverlayState>,
@@ -24,6 +26,15 @@ pub struct GuiDiffReview {
     pub moves: Vec<GuiDiffMove>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub guided_files: Vec<GuiDiffFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiDiffProvenance {
+    pub base_label: String,
+    pub comparison_base_oid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -225,6 +236,11 @@ fn project_review_patch(title: &str, review: &DiffReviewState) -> GuiDiffReview 
         layout: layout_name(review.layout),
         managed: true,
         custom: false,
+        provenance: Some(GuiDiffProvenance {
+            base_label: patch.base.name.clone(),
+            comparison_base_oid: patch.comparison_base_oid.clone(),
+            snapshot_id: None,
+        }),
         files,
         overlay: None,
         moves: Vec::new(),
@@ -245,6 +261,9 @@ fn project_custom_review(
     // Pairings annotate that document; they do not replace files with sections.
     let mut projected = project_review_patch(title, review);
     projected.custom = true;
+    if let Some(provenance) = &mut projected.provenance {
+        provenance.snapshot_id = Some(custom.snapshot.id.clone());
+    }
     projected.guided_files = project_guided_files(review, custom);
     let review_lines = review.patch_review_lines();
     let patch_lines = custom.snapshot.patch.text.lines().collect::<Vec<_>>();
@@ -642,6 +661,7 @@ fn project_standalone(title: &str, path: &str, content: &str) -> GuiDiffReview {
         layout: "split",
         managed: false,
         custom: false,
+        provenance: None,
         files: vec![file],
         overlay: None,
         moves: Vec::new(),
@@ -914,6 +934,13 @@ mod tests {
 
         let projected = project_diff(&editor, editor.buffer()).unwrap();
         assert!(projected.custom);
+        let provenance = projected.provenance.as_ref().unwrap();
+        assert_eq!(provenance.base_label, "HEAD");
+        assert!(!provenance.comparison_base_oid.is_empty());
+        assert!(provenance
+            .snapshot_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("diff_")));
         assert_eq!(
             projected.overlay.as_ref().map(|state| state.mode),
             Some("saved")

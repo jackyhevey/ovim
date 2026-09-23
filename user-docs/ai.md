@@ -871,6 +871,15 @@ a time, or **Files** to return to the continuous file view. The terminal shows p
 both source paths. Old-side navigation opens a labeled snapshot excerpt.
 Older saved reviews and large files may have limited surrounding context.
 
+Use **Export image** in the GUI to save the complete **Files** or **Guided** view,
+including files and sections outside the viewport. Short reviews produce one PNG;
+longer reviews produce a ZIP of numbered PNG pages. Images include descriptions,
+source paths, line numbers, change totals, and the comparison base when available.
+Moved ranges appear with nearby saved context. The export records the selected
+review, so an outdated saved review retains its original contents. It helps reviewers
+inspect correspondence during a refactor; it does not prove semantic equivalence.
+Exports exceeding 32 pages or 64 MiB stop with an error instead of omitting changes.
+
 Agents should use the block IDs returned by `read_diff`, rather than generating
 a replacement patch. Finish edits before reading the diff; after further edits,
 read a fresh snapshot. Continue reading with `snapshot_id` and `next_cursor`

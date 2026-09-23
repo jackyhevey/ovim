@@ -2523,6 +2523,23 @@ function App() {
                     <FlowDiff
                         review={review()}
                         syntax={view().theme.syntax}
+                        onExport={
+                            native
+                                ? async (file) =>
+                                      invoke<boolean>(
+                                          "gui_save_diff_export",
+                                          new Uint8Array(
+                                              await file.blob.arrayBuffer(),
+                                          ),
+                                          {
+                                              headers: {
+                                                  "x-ovim-export-filename":
+                                                      file.filename,
+                                              },
+                                          },
+                                      )
+                                : undefined
+                        }
                         onCoreKey={(key) => {
                             inputSink.focus({ preventScroll: true });
                             void sendKey({

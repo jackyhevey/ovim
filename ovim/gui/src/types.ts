@@ -88,6 +88,11 @@ export interface GuiDiffMove {
 
 export interface GuiDiffDocument {
     title: string;
+    provenance?: {
+        baseLabel: string;
+        comparisonBaseOid: string;
+        snapshotId?: string;
+    };
     layout: "split" | "unified";
     managed: boolean;
     custom: boolean;

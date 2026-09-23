@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use base64::Engine as _;
 use serde::Serialize;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -27,6 +28,124 @@ async fn gui_diff_action(
     action: String,
 ) -> Result<(), String> {
     bridge.diff_action(pane, buffer_id, action).await
+}
+
+const MAX_DIFF_EXPORT_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiffExportKind {
+    Png,
+    Zip,
+}
+
+impl DiffExportKind {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Zip => "zip",
+        }
+    }
+
+    fn filter_name(self) -> &'static str {
+        match self {
+            Self::Png => "PNG image",
+            Self::Zip => "ZIP archive",
+        }
+    }
+}
+
+fn validate_diff_export(filename: &str, data: &[u8]) -> Result<DiffExportKind, String> {
+    if filename.is_empty()
+        || filename.len() > 128
+        || filename.starts_with('.')
+        || filename.chars().any(|character| {
+            !character.is_ascii_alphanumeric()
+                && !matches!(character, ' ' | '-' | '_' | '.' | '(' | ')')
+        })
+    {
+        return Err("Diff export filename must be a simple filename".to_string());
+    }
+    let kind = match Path::new(filename)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => DiffExportKind::Png,
+        Some("zip") => DiffExportKind::Zip,
+        _ => return Err("Diff export must be a PNG or ZIP file".to_string()),
+    };
+    if data.is_empty() || data.len() > MAX_DIFF_EXPORT_BYTES {
+        return Err("Diff export must be no larger than 64 MiB".to_string());
+    }
+    let valid_signature = match kind {
+        DiffExportKind::Png => data.starts_with(b"\x89PNG\r\n\x1a\n"),
+        DiffExportKind::Zip => data.starts_with(b"PK\x03\x04"),
+    };
+    if !valid_signature {
+        return Err(format!(
+            "Diff export is not a valid {} file",
+            kind.extension()
+        ));
+    }
+    Ok(kind)
+}
+
+fn save_diff_export_at(path: &Path, data: &[u8], kind: DiffExportKind) -> Result<(), String> {
+    if !path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case(kind.extension()))
+    {
+        return Err(format!("Choose a .{} filename", kind.extension()));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Choose a destination folder for the diff export".to_string())?;
+    let mut temporary = tempfile::Builder::new()
+        .prefix(".ovim-diff-export-")
+        .tempfile_in(parent)
+        .map_err(|error| format!("Could not prepare diff export: {error}"))?;
+    temporary
+        .write_all(data)
+        .and_then(|()| temporary.as_file().sync_all())
+        .map_err(|error| format!("Could not write diff export: {error}"))?;
+    temporary
+        .persist(path)
+        .map_err(|error| format!("Could not save diff export: {}", error.error))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn gui_save_diff_export(request: Request<'_>, window: Window) -> Result<bool, String> {
+    let data = match request.body() {
+        InvokeBody::Raw(data) if data.len() <= MAX_DIFF_EXPORT_BYTES => data.clone(),
+        InvokeBody::Raw(_) => return Err("Diff export exceeds the 64 MiB limit".to_string()),
+        InvokeBody::Json(_) => {
+            return Err("Diff export requires a binary request body".to_string());
+        }
+    };
+    let filename = request
+        .headers()
+        .get("x-ovim-export-filename")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| "Diff export filename is missing".to_string())?;
+    let kind = validate_diff_export(filename, &data)?;
+    let destination = rfd::AsyncFileDialog::new()
+        .set_parent(&window)
+        .set_title("Save diff export")
+        .set_file_name(filename)
+        .add_filter(kind.filter_name(), &[kind.extension()])
+        .save_file()
+        .await;
+    let Some(destination) = destination else {
+        return Ok(false);
+    };
+    let path = destination.path().to_path_buf();
+    tokio::task::spawn_blocking(move || save_diff_export_at(&path, &data, kind))
+        .await
+        .map_err(|error| format!("Diff export task stopped: {error}"))??;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -489,6 +608,7 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             gui_snapshot,
             gui_diff_action,
+            gui_save_diff_export,
             gui_open_diff_source,
             gui_vector_preview,
             gui_vector_feedback,
@@ -633,7 +753,7 @@ mod vector_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_external_url;
+    use super::{save_diff_export_at, validate_diff_export, validate_external_url, DiffExportKind};
 
     #[test]
     fn external_links_are_limited_to_non_executable_schemes() {
@@ -642,5 +762,44 @@ mod tests {
         assert!(validate_external_url("javascript:alert(1)").is_err());
         assert!(validate_external_url("file:///etc/passwd").is_err());
         assert!(validate_external_url("https://example.com\nfile:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn diff_export_rejects_unsafe_names_and_mismatched_content() {
+        let png = b"\x89PNG\r\n\x1a\nimage";
+        let zip = b"PK\x03\x04archive";
+        assert_eq!(
+            validate_diff_export("review.png", png).unwrap(),
+            DiffExportKind::Png
+        );
+        assert_eq!(
+            validate_diff_export("review.zip", zip).unwrap(),
+            DiffExportKind::Zip
+        );
+        for unsafe_name in [
+            "../review.png",
+            "folder/review.png",
+            "folder\\review.png",
+            ".hidden.png",
+            "review:copy.png",
+        ] {
+            assert!(validate_diff_export(unsafe_name, png).is_err());
+        }
+        assert!(validate_diff_export("review.zip", png).is_err());
+        assert!(validate_diff_export("review.png", zip).is_err());
+        assert!(validate_diff_export("review.png", &vec![0; 64 * 1024 * 1024 + 1]).is_err());
+    }
+
+    #[test]
+    fn diff_export_writes_only_to_the_selected_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("review.png");
+        let data = b"\x89PNG\r\n\x1a\nimage";
+        save_diff_export_at(&path, data, DiffExportKind::Png).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), data);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+        let wrong_extension = directory.path().join("review.zip");
+        assert!(save_diff_export_at(&wrong_extension, data, DiffExportKind::Png).is_err());
+        assert!(!wrong_extension.exists());
     }
 }

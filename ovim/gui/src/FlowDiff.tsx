@@ -10,19 +10,25 @@ import {
 import type { JSX } from "solid-js";
 import {
     mappedScrollTop,
-    replacementParts,
     sectionsForFile,
     sectionsWithMoves,
-    type FlowDiffFile,
     type FlowDiffLine,
-    type FlowDiffMove,
     type FlowDiffReview,
     type FlowSection,
     type Reconstruction,
 } from "./FlowDiffModel";
+import { FileLine, type Side } from "./FlowDiffCode";
+import { MoveOverlay, pairedMoveLine } from "./FlowDiffMove";
+import {
+    buildDiffExportPages,
+    rasterizeDiffExportPages,
+} from "./FlowDiffExport";
+import {
+    downloadDiffImages,
+    packageDiffImages,
+    type DiffImageFile,
+} from "./diffImageDownload";
 import "./FlowDiff.css";
-
-type Side = "old" | "new";
 
 export type FlowDiffProps = {
     review: FlowDiffReview;
@@ -30,6 +36,7 @@ export type FlowDiffProps = {
     onNavigateReviewLine?: (line: number) => void;
     onOpenSource?: (path: string, line: number, side: Side) => void;
     onLayoutChange?: (layout: "split" | "unified") => void;
+    onExport?: (file: DiffImageFile) => Promise<boolean>;
     onAction?: (
         key:
             | "q"
@@ -41,246 +48,10 @@ export type FlowDiffProps = {
     onCoreKey?: (key: ":" | " ") => void;
 };
 
-function lineParts(line: FlowDiffLine, counterpart: FlowDiffLine | undefined) {
-    return replacementParts(line.text, counterpart?.text);
-}
-
-function pairedMoveLine(
-    move: FlowDiffMove,
-    line: FlowDiffLine,
-    side: Side,
-): FlowDiffLine | undefined {
-    const endpoint = move[side];
-    const number = side === "old" ? line.oldLine : line.newLine;
-    if (number === undefined) return undefined;
-    const offset = number - endpoint.startLine;
-    if (offset < 0 || offset >= endpoint.lineCount) return undefined;
-    const otherSide = side === "old" ? "new" : "old";
-    if (offset >= move[otherSide].lineCount) return undefined;
-    const otherNumber = move[otherSide].startLine + offset;
-    const window = move[otherSide].contextWindows.find(
-        (item) =>
-            otherNumber >= item.startLine &&
-            otherNumber < item.startLine + item.lines.length,
-    );
-    const counterpart = window?.lines[otherNumber - window.startLine];
-    return (otherSide === "old"
-        ? counterpart?.oldLine
-        : counterpart?.newLine) === otherNumber
-        ? counterpart
-        : undefined;
-}
-
-function FileLine(props: {
-    file: FlowDiffFile;
-    pathOverride?: string;
-    line: FlowDiffLine;
-    counterpart?: FlowDiffLine;
-    side: Side;
-    syntax?: Record<string, string>;
-    onNavigateReviewLine?: (line: number) => void;
-    onOpenSource?: (path: string, line: number, side: Side) => void;
-}) {
-    const number = () =>
-        props.side === "old" ? props.line.oldLine : props.line.newLine;
-    const canOpen = () => number() !== undefined && Boolean(props.onOpenSource);
-    const open = () => {
-        if (canOpen())
-            props.onOpenSource?.(
-                props.pathOverride ||
-                    (props.side === "old"
-                        ? props.file.oldPath || props.file.path
-                        : props.file.path),
-                number()!,
-                props.side,
-            );
-        else if (props.line.reviewLine !== undefined)
-            props.onNavigateReviewLine?.(props.line.reviewLine);
-    };
-    const coloredText = () => {
-        const parts = lineParts(props.line, props.counterpart);
-        if (!props.syntax || !props.line.highlights?.length) {
-            return parts.map((part) => (
-                <span classList={{ "flow-word-change": part.changed }}>
-                    {part.text}
-                </span>
-            ));
-        }
-        const boundaries = new Set([0, props.line.text.length]);
-        for (const highlight of props.line.highlights) {
-            boundaries.add(
-                Math.max(0, Math.min(props.line.text.length, highlight.start)),
-            );
-            boundaries.add(
-                Math.max(0, Math.min(props.line.text.length, highlight.end)),
-            );
-        }
-        let offset = 0;
-        for (const part of parts) {
-            boundaries.add(offset);
-            offset += part.text.length;
-            boundaries.add(offset);
-        }
-        const edges = [...boundaries].sort((a, b) => a - b);
-        return edges.slice(0, -1).map((start, index) => {
-            const end = edges[index + 1];
-            const highlight = props.line.highlights?.find(
-                (item) => item.start <= start && item.end >= end,
-            );
-            const changed = parts.some((part, partIndex) => {
-                const before = parts
-                    .slice(0, partIndex)
-                    .reduce((sum, item) => sum + item.text.length, 0);
-                return (
-                    part.changed &&
-                    start >= before &&
-                    end <= before + part.text.length
-                );
-            });
-            return (
-                <span
-                    classList={{ "flow-word-change": changed }}
-                    style={{
-                        color: highlight
-                            ? props.syntax?.[highlight.token]
-                            : undefined,
-                    }}
-                >
-                    {props.line.text.slice(start, end)}
-                </span>
-            );
-        });
-    };
-    return (
-        <div class={`flow-code-line ${props.line.kind}`}>
-            <button
-                type="button"
-                class="flow-line-number"
-                aria-label={`${props.side === "old" ? "Before" : "After"} line ${number() ?? "unavailable"}${canOpen() ? ", open source" : ""}`}
-                disabled={
-                    !canOpen() &&
-                    (props.line.reviewLine === undefined ||
-                        !props.onNavigateReviewLine)
-                }
-                onClick={open}
-            >
-                {number() ?? ""}
-            </button>
-            <span class="flow-line-mark" aria-hidden="true">
-                {props.line.kind === "added"
-                    ? "+"
-                    : props.line.kind === "removed"
-                      ? "−"
-                      : ""}
-            </span>
-            <code class="flow-line-text">{coloredText()}</code>
-        </div>
-    );
-}
-
-function MoveOverlay(props: {
-    move: FlowDiffMove;
-    reconstruction: Reconstruction;
-    file: FlowDiffFile;
-    syntax?: Record<string, string>;
-    onOpenSource?: FlowDiffProps["onOpenSource"];
-}) {
-    const endpoint = () =>
-        props.reconstruction === "old" ? props.move.old : props.move.new;
-    let scroller: HTMLDivElement | undefined;
-    createEffect(() => {
-        endpoint();
-        queueMicrotask(() => {
-            const pairedLine =
-                scroller?.querySelector<HTMLElement>(".flow-move-paired");
-            if (scroller && pairedLine)
-                scroller.scrollTop = Math.max(0, pairedLine.offsetTop - 44);
-        });
-    });
-
-    return (
-        <aside
-            class="flow-move-overlay"
-            aria-label={`Moved segment: ${props.move.label || props.move.id}`}
-            style={{
-                "--flow-move-height": `${Math.min(12, Math.max(5, endpoint().lineCount + 3)) * 22}px`,
-            }}
-        >
-            <div class="flow-move-heading" title={props.move.label}>
-                <span>
-                    {props.reconstruction === "old" ? "Moved from" : "Moved to"}
-                </span>
-                <code title={endpoint().path}>{endpoint().path}</code>
-                <Show when={props.move.label}>
-                    <span class="flow-move-label" title={props.move.label}>
-                        {props.move.label}
-                    </span>
-                </Show>
-            </div>
-            <div
-                class="flow-move-scroll"
-                ref={scroller}
-                role="region"
-                aria-label={`${endpoint().path} context`}
-                tabindex={0}
-            >
-                <For each={endpoint().contextWindows}>
-                    {(window, index) => (
-                        <>
-                            <Show when={index() > 0}>
-                                <div class="flow-move-gap">
-                                    ··· context omitted ···
-                                </div>
-                            </Show>
-                            <For each={window.lines}>
-                                {(line) => {
-                                    const number =
-                                        props.reconstruction === "old"
-                                            ? line.oldLine
-                                            : line.newLine;
-                                    const paired =
-                                        number !== undefined &&
-                                        number >= endpoint().startLine &&
-                                        number <
-                                            endpoint().startLine +
-                                                endpoint().lineCount;
-                                    return (
-                                        <div
-                                            classList={{
-                                                "flow-move-paired": paired,
-                                            }}
-                                        >
-                                            <FileLine
-                                                file={props.file}
-                                                pathOverride={endpoint().path}
-                                                line={line}
-                                                counterpart={pairedMoveLine(
-                                                    props.move,
-                                                    line,
-                                                    props.reconstruction,
-                                                )}
-                                                side={props.reconstruction}
-                                                syntax={props.syntax}
-                                                onOpenSource={
-                                                    props.onOpenSource
-                                                }
-                                            />
-                                        </div>
-                                    );
-                                }}
-                            </For>
-                        </>
-                    )}
-                </For>
-            </div>
-            <Show when={!endpoint().contextComplete}>
-                <div class="flow-move-truncated">Showing nearby context</div>
-            </Show>
-        </aside>
-    );
-}
-
 export default function FlowDiff(props: FlowDiffProps) {
+    const [exporting, setExporting] = createSignal(false);
+    const [exportMessage, setExportMessage] = createSignal("");
+    const [exportFailed, setExportFailed] = createSignal(false);
     const [selectedId, setSelectedId] = createSignal("");
     const [view, setView] = createSignal<"files" | "guided">("files");
     const [layout, setLayout] = createSignal<"split" | "unified">(
@@ -294,6 +65,46 @@ export default function FlowDiff(props: FlowDiffProps) {
     const [reconstruction, setReconstruction] =
         createSignal<Reconstruction>("old");
     const [activeMoveId, setActiveMoveId] = createSignal("");
+    const effectiveView = createMemo<"files" | "guided">(() =>
+        view() === "guided" &&
+        props.review.custom &&
+        props.review.guidedFiles?.length
+            ? "guided"
+            : "files",
+    );
+
+    async function exportImages() {
+        if (exporting()) return;
+        const review = props.review;
+        const options = {
+            view: effectiveView(),
+            reconstruction: reconstruction(),
+        };
+        setExporting(true);
+        setExportMessage("");
+        setExportFailed(false);
+        try {
+            await document.fonts?.ready;
+            const pages = buildDiffExportPages(review, options);
+            const file = await packageDiffImages(
+                await rasterizeDiffExportPages(pages),
+            );
+            if (props.onExport) {
+                if (await props.onExport(file))
+                    setExportMessage(`Saved ${file.filename}`);
+            } else {
+                downloadDiffImages(file);
+                setExportMessage(`Download started · ${file.filename}`);
+            }
+        } catch (error) {
+            setExportFailed(true);
+            setExportMessage(
+                error instanceof Error ? error.message : String(error),
+            );
+        } finally {
+            setExporting(false);
+        }
+    }
     let reviewIdentity = "";
     let leftScroller: HTMLDivElement | undefined;
     let rightScroller: HTMLDivElement | undefined;
@@ -309,7 +120,7 @@ export default function FlowDiff(props: FlowDiffProps) {
     const unifiedSections = new Map<string, HTMLElement>();
 
     const visibleFiles = createMemo(() =>
-        view() === "guided" && props.review.guidedFiles?.length
+        effectiveView() === "guided" && props.review.guidedFiles?.length
             ? props.review.guidedFiles
             : props.review.files,
     );
@@ -321,7 +132,7 @@ export default function FlowDiff(props: FlowDiffProps) {
     const sections = createMemo(() =>
         file()
             ? props.review.custom &&
-              view() === "files" &&
+              effectiveView() === "files" &&
               props.review.moves?.length
                 ? sectionsWithMoves(
                       file()!,
@@ -334,7 +145,7 @@ export default function FlowDiff(props: FlowDiffProps) {
     const hunks = createMemo(() => file()?.hunks ?? []);
     const changes = createMemo(() =>
         visibleFiles().flatMap((item) =>
-            (props.review.moves?.length && view() === "files"
+            (props.review.moves?.length && effectiveView() === "files"
                 ? sectionsWithMoves(item, props.review.moves, reconstruction())
                 : sectionsForFile(item)
             )
@@ -829,14 +640,14 @@ export default function FlowDiff(props: FlowDiffProps) {
                         >
                             <button
                                 type="button"
-                                aria-pressed={view() === "files"}
+                                aria-pressed={effectiveView() === "files"}
                                 onClick={() => setView("files")}
                             >
                                 Files
                             </button>
                             <button
                                 type="button"
-                                aria-pressed={view() === "guided"}
+                                aria-pressed={effectiveView() === "guided"}
                                 onClick={() => setView("guided")}
                             >
                                 Guided
@@ -844,10 +655,12 @@ export default function FlowDiff(props: FlowDiffProps) {
                         </div>
                     </Show>
                     <label class="flow-file-picker">
-                        <span>{view() === "guided" ? "Section" : "File"}</span>
+                        <span>
+                            {effectiveView() === "guided" ? "Section" : "File"}
+                        </span>
                         <select
                             aria-label={
-                                view() === "guided"
+                                effectiveView() === "guided"
                                     ? "Guided section"
                                     : "Changed file"
                             }
@@ -859,7 +672,8 @@ export default function FlowDiff(props: FlowDiffProps) {
                             <For each={visibleFiles()}>
                                 {(item) => (
                                     <option value={item.id} title={item.label}>
-                                        {view() === "guided" && item.label
+                                        {effectiveView() === "guided" &&
+                                        item.label
                                             ? `${item.label} · ${item.path}`
                                             : item.path}
                                     </option>
@@ -869,7 +683,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                     </label>
                     <span class="flow-file-count">
                         {visibleFiles().length}{" "}
-                        {view() === "guided"
+                        {effectiveView() === "guided"
                             ? visibleFiles().length === 1
                                 ? "section"
                                 : "sections"
@@ -919,7 +733,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                     <Show
                         when={
                             props.review.custom &&
-                            view() === "files" &&
+                            effectiveView() === "files" &&
                             props.review.moves?.length
                         }
                     >
@@ -974,6 +788,14 @@ export default function FlowDiff(props: FlowDiffProps) {
                             Unified
                         </button>
                     </div>
+                    <button
+                        type="button"
+                        disabled={exporting() || !props.review.files.length}
+                        title="Download the complete review as PNG images. Multi-page reviews download as a ZIP."
+                        onClick={() => void exportImages()}
+                    >
+                        {exporting() ? "Exporting…" : "Export image"}
+                    </button>
                     <Show when={props.onAction}>
                         <div class="flow-action-buttons">
                             <button
@@ -1002,6 +824,14 @@ export default function FlowDiff(props: FlowDiffProps) {
                     </Show>
                 </div>
             </header>
+            <Show when={exportMessage()}>
+                <div
+                    class="flow-export-status"
+                    role={exportFailed() ? "alert" : "status"}
+                >
+                    {exportMessage()}
+                </div>
+            </Show>
             <Show when={props.review.overlay && props.onAction}>
                 <div class="flow-overlay-status" role="status">
                     <span>
@@ -1239,7 +1069,8 @@ export default function FlowDiff(props: FlowDiffProps) {
                                                     <Show
                                                         when={
                                                             section.move &&
-                                                            view() === "files"
+                                                            effectiveView() ===
+                                                                "files"
                                                         }
                                                     >
                                                         <MoveOverlay

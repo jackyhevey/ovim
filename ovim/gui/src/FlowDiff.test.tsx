@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { createSignal } from "solid-js";
 import { describe, expect, it, vi } from "vitest";
 import FlowDiff from "./FlowDiff";
 import {
@@ -551,6 +552,66 @@ describe("FlowDiff", () => {
                 "Parser moved after validation · src/uneven.ts",
             )[1],
         ).toBeTruthy();
+    });
+
+    it("exports canonical files after a guided review is replaced", async () => {
+        const guided = {
+            ...review.files[0],
+            id: "guided-parse",
+            label: "Parser moved after validation",
+        };
+        const [current, setCurrent] = createSignal<FlowDiffReview>({
+            ...review,
+            custom: true,
+            guidedFiles: [guided],
+        });
+        const result = render(() => <FlowDiff review={current()} />);
+        fireEvent.click(result.getByRole("button", { name: "Guided" }));
+        expect(
+            result.getByRole("combobox", { name: "Guided section" }),
+        ).toBeTruthy();
+
+        setCurrent(review);
+        expect(
+            result.getByRole("combobox", { name: "Changed file" }),
+        ).toBeTruthy();
+
+        const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
+            URL,
+            "createObjectURL",
+        );
+        Object.defineProperty(URL, "createObjectURL", {
+            configurable: true,
+            value: () => "blob:review-test",
+        });
+        vi.stubGlobal(
+            "Image",
+            class {
+                onerror?: () => void;
+                set src(_url: string) {
+                    queueMicrotask(() => this.onerror?.());
+                }
+            },
+        );
+        try {
+            fireEvent.click(
+                result.getByRole("button", { name: "Export image" }),
+            );
+            await waitFor(() =>
+                expect(result.getByRole("alert").textContent).toContain(
+                    "Could not render",
+                ),
+            );
+        } finally {
+            vi.unstubAllGlobals();
+            if (originalCreateObjectURL)
+                Object.defineProperty(
+                    URL,
+                    "createObjectURL",
+                    originalCreateObjectURL,
+                );
+            else Reflect.deleteProperty(URL, "createObjectURL");
+        }
     });
 
     it("navigates each custom fragment before crossing to the next file", async () => {
