@@ -10,7 +10,7 @@ import { Dynamic } from "solid-js/web";
 import { Icon } from "./Icon";
 import type { IconName } from "./icons.generated";
 
-export type ContextPanelId = "ai" | "tests" | "debug" | "diff";
+export type ContextPanelId = "ai" | "tests" | "debug" | "terminal";
 
 export interface ContextPanelDefinition {
     id: ContextPanelId;
@@ -18,6 +18,7 @@ export interface ContextPanelDefinition {
     state: string;
     icon: IconName;
     component: Component;
+    keepMounted?: boolean;
 }
 
 export default function ContextDock(props: {
@@ -77,67 +78,79 @@ export default function ContextDock(props: {
     };
 
     return (
-        <Show when={activePanel()}>
-            {(active) => (
-                <aside
-                    class="side-dock"
-                    classList={{
-                        "has-context-tabs": props.panels.length > 1,
-                    }}
-                    aria-label="Context"
-                >
-                    <Show when={props.panels.length > 1}>
-                        <div
-                            class="context-tabs"
-                            role="tablist"
-                            aria-label="Context panels"
-                        >
-                            <Index each={props.panels}>
-                                {(panel) => (
-                                    <button
-                                        id={`context-tab-${panel().id}`}
-                                        type="button"
-                                        role="tab"
-                                        aria-label={panel().label}
-                                        aria-selected={
-                                            active().id === panel().id
-                                        }
-                                        aria-controls={`context-panel-${panel().id}`}
-                                        tabIndex={
-                                            active().id === panel().id ? 0 : -1
-                                        }
-                                        onClick={() => selectPanel(panel().id)}
-                                        onKeyDown={(event) =>
-                                            moveFocus(event, panel())
-                                        }
-                                    >
-                                        <Icon name={panel().icon} size={16} />
-                                        <span>{panel().label}</span>
-                                        <small>{panel().state}</small>
-                                    </button>
-                                )}
-                            </Index>
-                        </div>
-                    </Show>
+        <Show when={activePanel()?.id}>
+            <aside
+                class="side-dock"
+                classList={{
+                    "has-context-tabs": props.panels.length > 1,
+                }}
+                aria-label="Context"
+            >
+                <Show when={props.panels.length > 1}>
                     <div
-                        id={`context-panel-${active().id}`}
-                        class="context-panel"
-                        role="tabpanel"
-                        aria-label={
-                            props.panels.length === 1
-                                ? active().label
-                                : undefined
-                        }
-                        aria-labelledby={
-                            props.panels.length > 1
-                                ? `context-tab-${active().id}`
-                                : undefined
-                        }
+                        class="context-tabs"
+                        role="tablist"
+                        aria-label="Context panels"
                     >
-                        <Dynamic component={active().component} />
+                        <Index each={props.panels}>
+                            {(panel) => (
+                                <button
+                                    id={`context-tab-${panel().id}`}
+                                    type="button"
+                                    role="tab"
+                                    aria-label={panel().label}
+                                    aria-selected={
+                                        activePanel()!.id === panel().id
+                                    }
+                                    aria-controls={`context-panel-${panel().id}`}
+                                    tabIndex={
+                                        activePanel()!.id === panel().id
+                                            ? 0
+                                            : -1
+                                    }
+                                    onClick={() => selectPanel(panel().id)}
+                                    onKeyDown={(event) =>
+                                        moveFocus(event, panel())
+                                    }
+                                >
+                                    <Icon name={panel().icon} size={16} />
+                                    <span>{panel().label}</span>
+                                    <small>{panel().state}</small>
+                                </button>
+                            )}
+                        </Index>
                     </div>
-                </aside>
-            )}
+                </Show>
+                <Index each={props.panels}>
+                    {(panel) => (
+                        <Show
+                            when={
+                                panel().keepMounted ||
+                                activePanel()!.id === panel().id
+                            }
+                        >
+                            <div
+                                id={`context-panel-${panel().id}`}
+                                class="context-panel"
+                                role="tabpanel"
+                                hidden={activePanel()!.id !== panel().id}
+                                aria-label={
+                                    props.panels.length === 1
+                                        ? panel().label
+                                        : undefined
+                                }
+                                aria-labelledby={
+                                    props.panels.length > 1
+                                        ? `context-tab-${panel().id}`
+                                        : undefined
+                                }
+                            >
+                                <Dynamic component={panel().component} />
+                            </div>
+                        </Show>
+                    )}
+                </Index>
+            </aside>
         </Show>
     );
 }

@@ -24,7 +24,7 @@ import { browserShortcutAction, type BrowserKeyEvent } from "./browserKeys";
 import FileExplorer from "./FileExplorer";
 import { EXPLORER_DEFAULT_WIDTH } from "./explorerLayout";
 import ContextDock, { type ContextPanelDefinition } from "./ContextDock";
-import NativeDiffPanel from "./DiffPanel";
+import TerminalPanel from "./TerminalPanel";
 import FlowDiff from "./FlowDiff";
 import SurfaceCommandLine from "./SurfaceCommandLine";
 import WorkbenchTabStrip from "./WorkbenchTabStrip";
@@ -51,7 +51,6 @@ import {
 import type {
     GuiAiChat,
     GuiCodeExplanation,
-    GuiDiffReview,
     GuiKeyInput,
     GuiLayoutNode,
     GuiPane,
@@ -1266,10 +1265,9 @@ function App() {
             : "explorer",
     );
     const [activeContextPanel, setActiveContextPanel] = createSignal<
-        "ai" | "tests" | "debug" | "diff"
+        "ai" | "tests" | "debug" | "terminal"
     >("ai");
-    const [diffDockOpen, setDiffDockOpen] = createSignal(false);
-    const [diffReview, setDiffReview] = createSignal<GuiDiffReview>();
+    const [terminalDockOpen, setTerminalDockOpen] = createSignal(false);
     let editorBody!: HTMLDivElement;
     let inputSink!: HTMLTextAreaElement;
     let chatInput: HTMLTextAreaElement | undefined;
@@ -1283,11 +1281,9 @@ function App() {
     const walkthrough = createMemo(() => view().aiChat?.codeExplanation);
     const hasContextDock = createMemo(() =>
         Boolean(
-            !walkthrough() &&
-            (view().aiChat ||
-                view().testPanel ||
-                view().debug ||
-                diffDockOpen()),
+            (!walkthrough() &&
+                (view().aiChat || view().testPanel || view().debug)) ||
+            terminalDockOpen(),
         ),
     );
     let hadContextDock = hasContextDock();
@@ -1295,7 +1291,7 @@ function App() {
         ai: Boolean(view().aiChat),
         tests: Boolean(view().testPanel),
         debug: Boolean(view().debug),
-        diff: diffDockOpen(),
+        terminal: terminalDockOpen(),
     };
     let layoutWorkspace = "";
     let vectorFilePath: string | undefined;
@@ -1402,8 +1398,6 @@ function App() {
         });
     });
 
-    const diffWorkspace = () => view().workspacePath || "";
-
     const [explorerWidth, setExplorerWidth] = createSignal(
         EXPLORER_DEFAULT_WIDTH,
     );
@@ -1427,7 +1421,8 @@ function App() {
         if (!preference) return;
         setActiveDock(preference.activeDock);
         setActiveContextPanel(preference.activeContextPanel);
-        if (preference.activeContextPanel === "diff") setDiffDockOpen(true);
+        if (preference.activeContextPanel === "terminal")
+            setTerminalDockOpen(true);
     });
 
     createEffect(() => {
@@ -1446,7 +1441,12 @@ function App() {
         if (hasContext && !hadContextDock) setActiveDock("context");
         else if (!hasContext && activeDock() === "context")
             setActiveDock("explorer");
-        else if (hasContext && !hasExplorer && activeDock() === "explorer")
+        else if (
+            hasContext &&
+            !hasExplorer &&
+            activeDock() === "explorer" &&
+            !(terminalDockOpen() && activeContextPanel() === "terminal")
+        )
             setActiveDock("context");
         hadContextDock = hasContext;
     });
@@ -1456,7 +1456,7 @@ function App() {
             ai: Boolean(view().aiChat),
             tests: Boolean(view().testPanel),
             debug: Boolean(view().debug),
-            diff: diffDockOpen(),
+            terminal: terminalDockOpen(),
         };
         if (next.ai && !previousContextAvailability.ai)
             setActiveContextPanel("ai");
@@ -1464,8 +1464,8 @@ function App() {
             setActiveContextPanel("tests");
         if (next.debug && !previousContextAvailability.debug)
             setActiveContextPanel("debug");
-        if (next.diff && !previousContextAvailability.diff)
-            setActiveContextPanel("diff");
+        if (next.terminal && !previousContextAvailability.terminal)
+            setActiveContextPanel("terminal");
         previousContextAvailability = next;
     });
 
@@ -1685,6 +1685,12 @@ function App() {
 
     const performMenuAction = (action: string) => {
         const active = document.activeElement;
+        if (action === "terminal.toggle") {
+            toggleTerminal();
+            return;
+        }
+        if (active?.closest(".terminal-panel") && action.startsWith("edit."))
+            return;
         const nativeEditor =
             active instanceof HTMLTextAreaElement && active !== inputSink;
         switch (action) {
@@ -1800,14 +1806,14 @@ function App() {
         void mutate("gui_open_ai_chat", {});
     };
 
-    const toggleDiff = () => {
+    const toggleTerminal = () => {
         const wasActive =
-            diffDockOpen() &&
+            terminalDockOpen() &&
             activeDock() === "context" &&
-            activeContextPanel() === "diff";
-        setDiffDockOpen(true);
-        setActiveContextPanel("diff");
-        if (compactDocks() && wasActive) {
+            activeContextPanel() === "terminal";
+        setTerminalDockOpen(true);
+        setActiveContextPanel("terminal");
+        if (wasActive) {
             setActiveDock("explorer");
             queueMicrotask(focusEditorInput);
             return;
@@ -1902,6 +1908,18 @@ function App() {
         )
             return;
         const target = event.target as Element | null;
+        if (
+            event.ctrlKey &&
+            !event.metaKey &&
+            !event.altKey &&
+            !event.shiftKey &&
+            (event.code === "Backquote" || event.key === "`")
+        ) {
+            event.preventDefault();
+            toggleTerminal();
+            return;
+        }
+        if (target?.closest?.(".terminal-panel")) return;
         const primaryModifier = macos ? event.metaKey : event.ctrlKey;
         if (primaryModifier && event.key.toLowerCase() === "s") {
             event.preventDefault();
@@ -2846,31 +2864,34 @@ function App() {
         </Show>
     );
 
-    const DiffPanel = () => (
-        <NativeDiffPanel
+    const TerminalSurface = () => (
+        <TerminalPanel
             native={native}
-            workspace={diffWorkspace()}
-            onReview={setDiffReview}
+            active={
+                activeDock() === "context" &&
+                activeContextPanel() === "terminal" &&
+                !walkthrough()
+            }
         />
     );
 
     const contextPanels = createMemo<ContextPanelDefinition[]>(
         (previous = []) => {
-            if (walkthrough()) return [];
             const panels: ContextPanelDefinition[] = [];
             const chat = view().aiChat;
             const tests = view().testPanel;
             const debug = view().debug;
-            if (diffDockOpen()) {
+            if (terminalDockOpen()) {
                 panels.push({
-                    id: "diff",
-                    label: "Diff",
-                    state: `${diffReview()?.files.length ?? 0} files`,
-                    icon: "source-control",
-                    component: DiffPanel,
+                    id: "terminal",
+                    label: "Terminal",
+                    state: "shell",
+                    icon: "terminal",
+                    component: TerminalSurface,
+                    keepMounted: true,
                 });
             }
-            if (chat) {
+            if (chat && !walkthrough()) {
                 panels.push({
                     id: "ai",
                     label: "AI chat",
@@ -2879,7 +2900,7 @@ function App() {
                     component: AiPanel,
                 });
             }
-            if (tests) {
+            if (tests && !walkthrough()) {
                 panels.push({
                     id: "tests",
                     label: "Tests",
@@ -2888,7 +2909,7 @@ function App() {
                     component: TestPanel,
                 });
             }
-            if (debug) {
+            if (debug && !walkthrough()) {
                 panels.push({
                     id: "debug",
                     label: "Debug",
@@ -3389,6 +3410,9 @@ function App() {
                 classList={{
                     "active-explorer-dock": activeDock() === "explorer",
                     "active-context-dock": activeDock() === "context",
+                    "terminal-collapsed":
+                        activeDock() === "explorer" &&
+                        activeContextPanel() === "terminal",
                 }}
             >
                 <nav class="activity-bar" aria-label="Primary navigation">
@@ -3410,15 +3434,15 @@ function App() {
                             onClick={() => runEditorShortcut(" sg")}
                         />
                         <IconButton
-                            icon="source-control"
-                            label="Diff review"
-                            shortcut="v · Space Space"
+                            icon="terminal"
+                            label="Terminal"
+                            shortcut="Ctrl+`"
                             selected={
-                                diffDockOpen() &&
+                                terminalDockOpen() &&
                                 activeDock() === "context" &&
-                                activeContextPanel() === "diff"
+                                activeContextPanel() === "terminal"
                             }
-                            onClick={toggleDiff}
+                            onClick={toggleTerminal}
                         />
                         <IconButton
                             icon="ai-spark"
@@ -3678,30 +3702,34 @@ function App() {
                                 </span>
                             )}
                         </Show>
-                        <Show
-                            when={!view().dashboard}
-                            fallback={
-                                <Dashboard
-                                    send={runEditorShortcut}
-                                    version={version}
-                                />
-                            }
+                        <div
+                            class="editor-content"
+                            classList={{
+                                "has-problems":
+                                    Boolean(view().problems) &&
+                                    !view().dashboard,
+                            }}
                         >
-                            <div
-                                class="editor-content"
-                                classList={{
-                                    "has-problems": Boolean(view().problems),
-                                }}
-                            >
-                                <div class="primary-content">
-                                    <div class="pane-tree">
+                            <div class="primary-content">
+                                <div class="pane-tree">
+                                    <Show
+                                        when={!view().dashboard}
+                                        fallback={
+                                            <Dashboard
+                                                send={runEditorShortcut}
+                                                version={version}
+                                            />
+                                        }
+                                    >
                                         <PaneTree node={view().layout} />
-                                    </div>
-                                    <SideDock />
+                                    </Show>
                                 </div>
-                                <ProblemPanel />
+                                <SideDock />
                             </div>
-                        </Show>
+                            <Show when={!view().dashboard}>
+                                <ProblemPanel />
+                            </Show>
+                        </div>
 
                         <Show when={walkthrough()}>
                             {(active) => (

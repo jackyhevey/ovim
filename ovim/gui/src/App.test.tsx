@@ -389,17 +389,72 @@ describe("Ovim Solid workbench", () => {
         }
     });
 
-    it("opens the native workspace diff panel", async () => {
+    it("opens the terminal from the activity bar", async () => {
         render(() => <App />);
 
-        const diff = screen.getByRole("button", {
-            name: "Diff review",
+        const terminal = screen.getByRole("button", {
+            name: "Terminal",
         });
-        expect(diff.hasAttribute("disabled")).toBe(false);
-        fireEvent.click(diff);
+        expect(terminal.hasAttribute("disabled")).toBe(false);
+        fireEvent.click(terminal);
 
         expect(await screen.findByRole("tabpanel")).toBeTruthy();
-        expect(screen.getByText("Changes")).toBeTruthy();
+        expect(
+            screen.getByText("Terminal is available in the desktop app."),
+        ).toBeTruthy();
+    });
+
+    it("toggles the terminal with Ctrl+Backquote while keeping its dock mounted", () => {
+        const result = render(() => <App />);
+        const shortcut = { key: "`", code: "Backquote", ctrlKey: true };
+
+        fireEvent.keyDown(window, shortcut);
+        const panel = screen.getByRole("tabpanel", { name: "Terminal" });
+        expect(
+            screen.getByText("Terminal is available in the desktop app."),
+        ).toBeTruthy();
+
+        fireEvent.keyDown(window, shortcut);
+        expect(
+            result.container.querySelector(".workbench")?.classList,
+        ).toContain("terminal-collapsed");
+        expect(result.container.querySelector(".context-panel")).toBe(panel);
+
+        fireEvent.keyDown(window, shortcut);
+        expect(
+            result.container.querySelector(".workbench")?.classList,
+        ).not.toContain("terminal-collapsed");
+        expect(screen.getByRole("tabpanel", { name: "Terminal" })).toBe(panel);
+    });
+
+    it("opens the terminal from the dashboard", () => {
+        const previousDashboard = mockSnapshot.dashboard;
+        const previousTree = mockSnapshot.fileTree;
+        mockSnapshot.dashboard = true;
+        mockSnapshot.fileTree = undefined;
+        try {
+            const result = render(() => <App />);
+            const button = screen.getByRole("button", { name: "Terminal" });
+            fireEvent.click(button);
+            expect(
+                screen.getByText("Terminal is available in the desktop app."),
+            ).toBeTruthy();
+            fireEvent.click(button);
+            expect(
+                result.container.querySelector(".workbench")?.classList,
+            ).toContain("terminal-collapsed");
+            fireEvent.keyDown(window, {
+                key: "`",
+                code: "Backquote",
+                ctrlKey: true,
+            });
+            expect(
+                result.container.querySelector(".workbench")?.classList,
+            ).not.toContain("terminal-collapsed");
+        } finally {
+            mockSnapshot.dashboard = previousDashboard;
+            mockSnapshot.fileTree = previousTree;
+        }
     });
 
     it("keeps Vector in tab navigation without a perpetual browser tab", async () => {
@@ -462,18 +517,22 @@ describe("Ovim Solid workbench", () => {
         }
     });
 
-    it("restores the persisted diff panel", async () => {
+    it("restores the persisted terminal panel", async () => {
         window.localStorage.setItem(
             "ovim.gui.layout.v1.%2Fworkspace%2Fovim",
             JSON.stringify({
                 activeDock: "context",
-                activeContextPanel: "diff",
+                activeContextPanel: "terminal",
             }),
         );
 
         render(() => <App />);
 
-        expect(await screen.findByText("Changes")).toBeTruthy();
+        expect(
+            await screen.findByText(
+                "Terminal is available in the desktop app.",
+            ),
+        ).toBeTruthy();
     });
 
     it("switches existing compact docks without toggling their core state", () => {
@@ -520,14 +579,16 @@ describe("Ovim Solid workbench", () => {
             expect(workbench.classList).toContain("active-context-dock");
             expect(mockSnapshot.aiChat).toBeTruthy();
 
-            const diff = screen.getByRole("button", {
-                name: "Diff review",
+            const terminal = screen.getByRole("button", {
+                name: "Terminal",
             });
-            fireEvent.click(diff);
+            fireEvent.click(terminal);
             expect(workbench.classList).toContain("active-context-dock");
-            expect(screen.getByText("Changes")).toBeTruthy();
+            expect(
+                screen.getByText("Terminal is available in the desktop app."),
+            ).toBeTruthy();
 
-            fireEvent.click(diff);
+            fireEvent.click(terminal);
             expect(workbench.classList).toContain("active-explorer-dock");
         } finally {
             result.unmount();

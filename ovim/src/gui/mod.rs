@@ -13,6 +13,8 @@ pub mod browser;
 mod diff;
 #[cfg(feature = "gui")]
 mod menu;
+#[cfg(feature = "gui")]
+mod terminal;
 
 use crate::cli::FileArg;
 use crate::color::Color;
@@ -837,13 +839,8 @@ enum GuiRequest {
         feedback: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
-    DiffWorkspace {
+    WorkspaceDirectory {
         reply: oneshot::Sender<Result<std::path::PathBuf, String>>,
-    },
-    OpenDiffBuffer {
-        title: String,
-        content: String,
-        reply: oneshot::Sender<Result<(), String>>,
     },
     DiffAction {
         pane: usize,
@@ -1068,23 +1065,14 @@ impl GuiBridge {
             .await
     }
 
-    pub async fn diff_workspace(&self) -> Result<std::path::PathBuf, String> {
+    pub async fn workspace_directory(&self) -> Result<std::path::PathBuf, String> {
         let (reply, response) = oneshot::channel();
         self.requests
-            .send(GuiRequest::DiffWorkspace { reply })
+            .send(GuiRequest::WorkspaceDirectory { reply })
             .map_err(|_| "The Ovim editor thread has stopped".to_string())?;
         response
             .await
             .map_err(|_| "The Ovim editor thread closed the response".to_string())?
-    }
-
-    pub async fn open_diff_buffer(&self, title: String, content: String) -> Result<(), String> {
-        self.request(|reply| GuiRequest::OpenDiffBuffer {
-            title,
-            content,
-            reply,
-        })
-        .await
     }
 
     pub async fn diff_action(
@@ -1444,7 +1432,7 @@ async fn run_editor(
                 let rejected_terminal = editor.take_pending_terminal_session().is_some();
                 let rejected_shell = editor.take_pending_shell_command().is_some();
                 if rejected_terminal || rejected_shell {
-                    editor.set_status_message("External shell sessions require the TUI frontend".to_string());
+                    editor.set_status_message("Use the Terminal icon or Ctrl+` to run shell commands in the GUI".to_string());
                 }
                 update_diff_review_geometry(&mut editor);
                 publish_if_changed(
@@ -1648,24 +1636,13 @@ async fn handle_request(
             let result = draft_vector_feedback(editor, &feedback);
             (reply, result)
         }
-        GuiRequest::DiffWorkspace { reply } => {
-            let result = projected_workspace_path(editor)
-                .ok_or_else(|| anyhow::anyhow!("Open a file in a Git worktree first"))
-                .and_then(|path| {
-                    ovim_core::native_diff::worktree_root(&path)
-                        .map_err(|error| anyhow::anyhow!("{error:#}"))
-                });
-            let response = result.map_err(|error| error.to_string());
-            let _ = reply.send(response);
+        GuiRequest::WorkspaceDirectory { reply } => {
+            let directory = projected_workspace_path(editor)
+                .map(Ok)
+                .unwrap_or_else(std::env::current_dir)
+                .map_err(|error| format!("Could not determine the workspace directory: {error}"));
+            let _ = reply.send(directory);
             return;
-        }
-        GuiRequest::OpenDiffBuffer {
-            title,
-            content,
-            reply,
-        } => {
-            editor.open_diff_buffer_in_new_tab(&title, &content);
-            (reply, Ok(()))
         }
         GuiRequest::DiffAction {
             pane,
@@ -1911,9 +1888,7 @@ async fn handle_request(
                 refresh_after_input(editor);
                 Ok(())
             } else {
-                Err(anyhow::anyhow!(
-                    "Could not select AI profile/model; stop any active turn and check the selection"
-                ))
+                Err(anyhow::anyhow!("Could not select AI profile/model; stop any active turn and check the selection"))
             };
             (reply, result)
         }

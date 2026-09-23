@@ -116,5 +116,12 @@ chat profile enables it by default. See
 [`user-docs/ai.md`](../../user-docs/ai.md#shared-embedded-browser-ovim-gui) for
 the control and security boundary.
 
-Terminal-only surfaces and exact soft-wrap/multi-split layout parity remain
-follow-up work; they do not maintain a second editor implementation in the DOM.
+The activity bar's Terminal action (also **View → Terminal** and **Ctrl+`**)
+opens a persistent workspace shell. `TerminalPanel` owns xterm rendering and
+focus; the native `TerminalHost` owns the pseudoterminal, shell process, and
+session lifecycle. Hiding the panel retains the shell and scrollback, while
+closing the application tears down the session. The browser development preview
+shows an unavailable state because it has no local PTY bridge.
+
+Exact soft-wrap/multi-split layout parity remains follow-up work; the GUI does
+not maintain a second editor implementation in the DOM.

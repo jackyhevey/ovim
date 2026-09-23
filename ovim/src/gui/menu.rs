@@ -175,7 +175,18 @@ pub fn install(app: &App) -> Result<GuiMenuState> {
         .separator()
         .item(&find)
         .build()?;
-    let view_menu = SubmenuBuilder::new(app, "View").fullscreen().build()?;
+    let terminal = MenuItem::with_id(
+        app,
+        "terminal.toggle",
+        "Terminal",
+        true,
+        Some("Ctrl+Backquote"),
+    )?;
+    let view_menu = SubmenuBuilder::new(app, "View")
+        .item(&terminal)
+        .separator()
+        .fullscreen()
+        .build()?;
     let navigation_menu = SubmenuBuilder::new(app, "Navigate")
         .item(&focus_address)
         .separator()

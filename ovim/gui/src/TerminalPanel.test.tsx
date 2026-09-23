@@ -1,0 +1,224 @@
+/** @vitest-environment jsdom */
+
+import {
+    cleanup,
+    fireEvent,
+    render,
+    screen,
+    waitFor,
+} from "@solidjs/testing-library";
+import { Channel, invoke } from "@tauri-apps/api/core";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import TerminalPanel from "./TerminalPanel";
+
+const terminal = vi.hoisted(() => ({
+    writes: [] as Uint8Array[],
+    disposed: 0,
+    input: undefined as ((data: string) => void) | undefined,
+}));
+
+vi.mock("@xterm/xterm", () => ({
+    Terminal: class {
+        cols = 80;
+        rows = 24;
+        constructor(_options: unknown) {}
+        loadAddon() {}
+        open() {}
+        reset() {}
+        focus() {}
+        dispose() {
+            terminal.disposed += 1;
+        }
+        write(data: Uint8Array, callback: () => void) {
+            terminal.writes.push(data);
+            callback();
+        }
+        onData(callback: (data: string) => void) {
+            terminal.input = callback;
+            return {
+                dispose() {
+                    terminal.input = undefined;
+                },
+            };
+        }
+    },
+}));
+
+vi.mock("@xterm/addon-fit", () => ({
+    FitAddon: class {
+        fit() {}
+    },
+}));
+vi.mock("@tauri-apps/api/core", () => ({
+    Channel: class {
+        onmessage?: (event: unknown) => void;
+    },
+    invoke: vi.fn(),
+}));
+
+class ResizeObserverMock {
+    observe() {}
+    disconnect() {}
+}
+
+beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+    vi.mocked(invoke).mockResolvedValue(1);
+    terminal.writes = [];
+    terminal.disposed = 0;
+});
+
+afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    vi.unstubAllGlobals();
+});
+
+describe("TerminalPanel", () => {
+    it("explains native availability in the web preview", () => {
+        render(() => <TerminalPanel native={false} active />);
+        expect(
+            screen.getByText("Terminal is available in the desktop app."),
+        ).toBeTruthy();
+        expect(invoke).not.toHaveBeenCalled();
+    });
+
+    it("streams output with backpressure, restarts, and closes its session", async () => {
+        const result = render(() => <TerminalPanel native active />);
+        await waitFor(() =>
+            expect(invoke).toHaveBeenCalledWith(
+                "gui_terminal_open",
+                expect.any(Object),
+            ),
+        );
+        const open = vi
+            .mocked(invoke)
+            .mock.calls.find(([command]) => command === "gui_terminal_open")!;
+        const channel = (open[1] as { onEvent: Channel<unknown> }).onEvent;
+
+        channel.onmessage?.({ type: "data", id: 1, data: [65, 66] });
+        expect([...terminal.writes[0]]).toEqual([65, 66]);
+        expect(invoke).toHaveBeenCalledWith("gui_terminal_ack", {
+            id: 1,
+            bytes: 2,
+        });
+
+        await waitFor(() => expect(screen.getByText("running")).toBeTruthy());
+        terminal.input?.("echo hello\r");
+        await waitFor(() =>
+            expect(invoke).toHaveBeenCalledWith("gui_terminal_write", {
+                id: 1,
+                data: "echo hello\r",
+            }),
+        );
+
+        channel.onmessage?.({ type: "exit", id: 1, code: 0 });
+        expect(screen.getByText("Process exited with code 0.")).toBeTruthy();
+        fireEvent.click(
+            screen.getByRole("button", { name: "Restart terminal" }),
+        );
+        await waitFor(() =>
+            expect(
+                vi
+                    .mocked(invoke)
+                    .mock.calls.filter(
+                        ([command]) => command === "gui_terminal_open",
+                    ),
+            ).toHaveLength(2),
+        );
+
+        result.unmount();
+        expect(invoke).toHaveBeenCalledWith("gui_terminal_close", { id: 1 });
+        expect(terminal.disposed).toBe(1);
+    });
+
+    it("paces large Unicode pastes without splitting characters", async () => {
+        let releaseWrite!: () => void;
+        vi.mocked(invoke).mockImplementation((command) =>
+            command === "gui_terminal_write"
+                ? new Promise<void>((resolve) => {
+                      releaseWrite = resolve;
+                  })
+                : Promise.resolve(1),
+        );
+        render(() => <TerminalPanel native active />);
+        await waitFor(() => expect(screen.getByText("running")).toBeTruthy());
+        const paste = "漢".repeat(16 * 1024 - 1) + "🙂終";
+        terminal.input?.(paste);
+        const writes = () =>
+            vi
+                .mocked(invoke)
+                .mock.calls.filter(
+                    ([command]) => command === "gui_terminal_write",
+                );
+        await waitFor(() => expect(writes()).toHaveLength(1));
+        expect((writes()[0][1] as { data: string }).data).toBe(
+            "漢".repeat(16 * 1024 - 1),
+        );
+        releaseWrite();
+        await waitFor(() => expect(writes()).toHaveLength(2));
+        expect((writes()[1][1] as { data: string }).data).toBe("🙂終");
+        releaseWrite();
+    });
+
+    it("keeps an exit received before open resolves and releases its session", async () => {
+        let resolveOpen!: (id: number) => void;
+        vi.mocked(invoke).mockImplementation((command) =>
+            command === "gui_terminal_open"
+                ? new Promise<number>((resolve) => {
+                      resolveOpen = resolve;
+                  })
+                : Promise.resolve(),
+        );
+        render(() => <TerminalPanel native active />);
+        await waitFor(() =>
+            expect(invoke).toHaveBeenCalledWith(
+                "gui_terminal_open",
+                expect.any(Object),
+            ),
+        );
+        const open = vi
+            .mocked(invoke)
+            .mock.calls.find(([command]) => command === "gui_terminal_open")!;
+        (open[1] as { onEvent: Channel<unknown> }).onEvent.onmessage?.({
+            type: "exit",
+            id: 7,
+            code: 2,
+        });
+        resolveOpen(7);
+
+        await waitFor(() =>
+            expect(invoke).toHaveBeenCalledWith("gui_terminal_close", {
+                id: 7,
+            }),
+        );
+        expect(screen.getByText("Process exited with code 2.")).toBeTruthy();
+        expect(screen.getByText("exited")).toBeTruthy();
+    });
+
+    it("closes a shell whose open response arrives after unmount", async () => {
+        let resolveOpen!: (id: number) => void;
+        vi.mocked(invoke).mockImplementation((command) =>
+            command === "gui_terminal_open"
+                ? new Promise<number>((resolve) => {
+                      resolveOpen = resolve;
+                  })
+                : Promise.resolve(),
+        );
+        const result = render(() => <TerminalPanel native active />);
+        await waitFor(() =>
+            expect(invoke).toHaveBeenCalledWith(
+                "gui_terminal_open",
+                expect.any(Object),
+            ),
+        );
+        result.unmount();
+        resolveOpen(9);
+        await waitFor(() =>
+            expect(invoke).toHaveBeenCalledWith("gui_terminal_close", {
+                id: 9,
+            }),
+        );
+        expect(terminal.disposed).toBe(1);
+    });
+});

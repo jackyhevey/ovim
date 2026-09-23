@@ -182,6 +182,7 @@ test("native diff controls carry the pane and buffer identity", async ({
                 let listener;
                 export const invoke = async (command, args) => {
                     window.diffCommands.push({command, args});
+                    if (command === 'gui_terminal_open') return 1;
                     if (command === 'gui_subscribe') {
                         listener = args.onEvent;
                         listener.onmessage(mockSnapshot);
@@ -204,6 +205,56 @@ test("native diff controls carry the pane and buffer identity", async ({
                 .evaluate((element) => element.scrollTop),
         )
         .toBeGreaterThan(0);
+    const scrollBeforeTerminal = await page
+        .locator(".flow-scroll.old")
+        .evaluate((element) => element.scrollTop);
+    await page.keyboard.press("Control+Backquote");
+    const shellInput = page.locator(".terminal-panel .xterm-helper-textarea");
+    await expect(shellInput).toBeFocused();
+    const toolbarFits = await page
+        .locator(".flow-toolbar")
+        .evaluate((toolbar) => {
+            const bounds = toolbar.getBoundingClientRect();
+            return Array.from(toolbar.querySelectorAll("button, select")).every(
+                (control) => {
+                    const rect = control.getBoundingClientRect();
+                    return (
+                        rect.left >= bounds.left && rect.right <= bounds.right
+                    );
+                },
+            );
+        });
+    expect(toolbarFits).toBe(true);
+    await page.keyboard.type("pwd");
+    await expect
+        .poll(() =>
+            page.evaluate(() =>
+                (window as any).diffCommands
+                    .filter(
+                        (item: any) => item.command === "gui_terminal_write",
+                    )
+                    .map((item: any) => item.args.data)
+                    .join(""),
+            ),
+        )
+        .toBe("pwd");
+    expect(
+        await page.evaluate(() =>
+            (window as any).diffCommands.some(
+                (item: any) => item.command === "gui_key",
+            ),
+        ),
+    ).toBe(false);
+    await page.screenshot({
+        path: test.info().outputPath("diff-with-terminal.png"),
+    });
+    await page.keyboard.press("Control+Backquote");
+    await expect(page.locator(".flow-diff")).toBeFocused();
+    expect(
+        await page
+            .locator(".flow-scroll.old")
+            .evaluate((element) => element.scrollTop),
+    ).toBe(scrollBeforeTerminal);
     await page.keyboard.press(":");
     await expect(
         page.getByRole("textbox", { name: "Ovim editor input" }),

@@ -277,20 +277,6 @@ export interface GuiDebugPanel {
     output: string[];
 }
 
-export interface GuiDiffReview {
-    root: string;
-    spec: string;
-    displaySpec: string;
-    files: Array<{
-        path: string;
-        oldPath?: string;
-        status: string;
-        additions: number;
-        deletions: number;
-        binary: boolean;
-    }>;
-}
-
 export interface GuiTheme {
     name: string;
     background: string;

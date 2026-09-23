@@ -4,7 +4,7 @@ import { EXPLORER_MIN_WIDTH, EXPLORER_MAX_WIDTH } from "./explorerLayout";
 export type WorkbenchLayoutPreference = {
     explorerWidth?: number;
     activeDock: "explorer" | "context";
-    activeContextPanel: "ai" | "tests" | "debug" | "diff";
+    activeContextPanel: "ai" | "tests" | "debug" | "terminal";
 };
 
 export const workspaceLayoutIdentity = (
@@ -33,20 +33,36 @@ export const readWorkbenchLayout = (
 ): WorkbenchLayoutPreference | undefined => {
     if (!storage) return undefined;
     try {
-        const parsed = JSON.parse(
+        const stored = JSON.parse(
             storage.getItem(storageKey(workspace)) ?? "",
-        ) as Partial<WorkbenchLayoutPreference> | undefined;
+        ) as
+            | (Omit<
+                  Partial<WorkbenchLayoutPreference>,
+                  "activeContextPanel"
+              > & {
+                  activeContextPanel?: string;
+              })
+            | undefined;
+        const parsed: typeof stored =
+            stored?.activeContextPanel === "diff"
+                ? {
+                      ...stored,
+                      activeDock: "explorer",
+                      activeContextPanel: "ai",
+                  }
+                : stored;
         if (
             !parsed ||
             !["explorer", "context"].includes(parsed.activeDock ?? "") ||
-            !["ai", "tests", "debug", "diff"].includes(
+            !["ai", "tests", "debug", "terminal"].includes(
                 parsed.activeContextPanel ?? "",
             )
         )
             return undefined;
         return {
             activeDock: parsed.activeDock!,
-            activeContextPanel: parsed.activeContextPanel!,
+            activeContextPanel:
+                parsed.activeContextPanel as WorkbenchLayoutPreference["activeContextPanel"],
             ...(typeof parsed.explorerWidth === "number" &&
             Number.isFinite(parsed.explorerWidth) &&
             parsed.explorerWidth >= EXPLORER_MIN_WIDTH &&

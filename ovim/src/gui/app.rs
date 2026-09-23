@@ -44,39 +44,6 @@ async fn gui_open_diff_source(
 }
 
 #[tauri::command]
-async fn gui_diff_state(
-    bridge: State<'_, GuiBridge>,
-    spec: Option<String>,
-) -> Result<ovim_core::native_diff::DiffReview, String> {
-    let workspace = bridge.diff_workspace().await?;
-    tauri::async_runtime::spawn_blocking(move || {
-        ovim_core::native_diff::review(&workspace, spec.as_deref())
-    })
-    .await
-    .map_err(|error| format!("Diff state task failed: {error}"))?
-    .map_err(|error| format!("Could not read diff: {error:#}"))
-}
-
-#[tauri::command]
-async fn gui_diff_open_file(
-    bridge: State<'_, GuiBridge>,
-    spec: Option<String>,
-    path: String,
-) -> Result<(), String> {
-    let workspace = bridge.diff_workspace().await?;
-    let selected_path = path.clone();
-    let content = tauri::async_runtime::spawn_blocking(move || {
-        ovim_core::native_diff::file_patch(&workspace, spec.as_deref(), &selected_path)
-    })
-    .await
-    .map_err(|error| format!("Diff file task failed: {error}"))?
-    .map_err(|error| format!("Could not open diff: {error:#}"))?;
-    bridge
-        .open_diff_buffer(format!("Diff · {path}"), content)
-        .await
-}
-
-#[tauri::command]
 async fn gui_snapshot(
     bridge: State<'_, GuiBridge>,
     columns: u16,
@@ -509,6 +476,7 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
     let application = tauri::Builder::default()
         .manage(bridge)
         .manage(browser_host)
+        .manage(super::terminal::TerminalHost::new())
         .manage(exit_gate)
         .invoke_handler(tauri::generate_handler![
             gui_snapshot,
@@ -544,8 +512,11 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
             gui_select_debug_frame,
             gui_window_action,
             gui_open_external,
-            gui_diff_state,
-            gui_diff_open_file,
+            super::terminal::gui_terminal_open,
+            super::terminal::gui_terminal_write,
+            super::terminal::gui_terminal_ack,
+            super::terminal::gui_terminal_resize,
+            super::terminal::gui_terminal_close,
             super::menu::gui_set_menu_surface,
             super::browser::gui_browser_open,
             super::browser::gui_browser_state,
@@ -625,7 +596,10 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
                 let _ = window.emit("ovim://close-requested", "quit");
             }
         }
-        RunEvent::Exit => shutdown_bridge.shutdown(),
+        RunEvent::Exit => {
+            handle.state::<super::terminal::TerminalHost>().shutdown();
+            shutdown_bridge.shutdown();
+        }
         _ => {}
     });
     Ok(())

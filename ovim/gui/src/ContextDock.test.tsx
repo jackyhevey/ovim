@@ -128,4 +128,34 @@ describe("ContextDock", () => {
         expect(screen.getByRole("tab", { name: "AI chat" })).toBe(tab);
         expect(mounts).toBe(1);
     });
+
+    it("keeps a terminal surface mounted while another context panel is active", () => {
+        let mounts = 0;
+        const Terminal = () => {
+            onMount(() => mounts++);
+            return <input aria-label="Shell input" />;
+        };
+        render(() => (
+            <ContextDock
+                panels={[
+                    {
+                        ...panel("terminal", "Terminal"),
+                        component: Terminal,
+                        keepMounted: true,
+                    },
+                    panel("ai", "AI chat"),
+                ]}
+            />
+        ));
+        const input = screen.getByRole("textbox", { name: "Shell input" });
+
+        fireEvent.click(screen.getByRole("tab", { name: "AI chat" }));
+        expect(input.isConnected).toBe(true);
+        expect(input.closest("[hidden]")).toBeTruthy();
+        fireEvent.click(screen.getByRole("tab", { name: "Terminal" }));
+        expect(screen.getByRole("textbox", { name: "Shell input" })).toBe(
+            input,
+        );
+        expect(mounts).toBe(1);
+    });
 });
