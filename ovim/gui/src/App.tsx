@@ -25,6 +25,7 @@ import FileExplorer from "./FileExplorer";
 import { EXPLORER_DEFAULT_WIDTH } from "./explorerLayout";
 import ContextDock, { type ContextPanelDefinition } from "./ContextDock";
 import NativeDiffPanel from "./DiffPanel";
+import FlowDiff from "./FlowDiff";
 import SurfaceCommandLine from "./SurfaceCommandLine";
 import WorkbenchTabStrip from "./WorkbenchTabStrip";
 import { BROWSER_COMMAND_NAMES } from "./browserCommands";
@@ -1561,7 +1562,27 @@ function App() {
         }
     };
 
-    const focusEditorInput = () => inputSink?.focus({ preventScroll: true });
+    const focusEditorInput = () => {
+        const diff =
+            view().mode === "NORMAL"
+                ? editorBody?.querySelector<HTMLElement>(
+                      ".editor-pane.focused .flow-diff",
+                  )
+                : undefined;
+        (diff || inputSink)?.focus({ preventScroll: true });
+    };
+    createEffect(() => {
+        const mode = view().mode;
+        const pane = view().panes.find((item) => item.focused);
+        if (mode !== "NORMAL" || !pane?.diffReview) return;
+        queueMicrotask(() => {
+            if (
+                document.activeElement === inputSink ||
+                document.activeElement === document.body
+            )
+                focusEditorInput();
+        });
+    });
     const focusChatInput = () => {
         if (chatInput?.isConnected) chatInput.focus({ preventScroll: true });
         else focusEditorInput();
@@ -1955,7 +1976,9 @@ function App() {
         const nativeTextOwner =
             target !== inputSink &&
             Boolean(
-                target?.closest?.("input, textarea, [contenteditable='true']"),
+                target?.closest?.(
+                    "input, textarea, [contenteditable='true'], .flow-diff",
+                ),
             );
         const image =
             Array.from(event.clipboardData?.items ?? [])
@@ -2002,7 +2025,9 @@ function App() {
         const target = event.target as Element | null;
         if (
             target !== inputSink &&
-            target?.closest?.("input, textarea, [contenteditable='true']")
+            target?.closest?.(
+                "input, textarea, [contenteditable='true'], .flow-diff",
+            )
         )
             return;
         const text = view().selectionText;
@@ -2021,7 +2046,9 @@ function App() {
         const target = event.target as Element | null;
         if (
             target !== inputSink &&
-            target?.closest?.("input, textarea, [contenteditable='true']")
+            target?.closest?.(
+                "input, textarea, [contenteditable='true'], .flow-diff",
+            )
         )
             return;
         const text = view().selectionText;
@@ -2073,7 +2100,9 @@ function App() {
         );
         if (
             !pane ||
-            (event.target as Element | null)?.closest(".markdown-document")
+            (event.target as Element | null)?.closest(
+                ".markdown-document, .flow-diff",
+            )
         )
             return;
         event.preventDefault();
@@ -2249,7 +2278,14 @@ function App() {
                 single: view().panes.length === 1,
                 "insert-mode": view().mode === "INSERT",
             }}
-            onMouseDown={() => {
+            onMouseDown={(event) => {
+                if ((event.target as Element)?.closest(".flow-diff")) {
+                    if (!props.pane.focused)
+                        void mutate("gui_focus_pane", {
+                            index: props.pane.index,
+                        });
+                    return;
+                }
                 inputSink.focus({ preventScroll: true });
                 if (!props.pane.focused)
                     void mutate("gui_focus_pane", { index: props.pane.index });
@@ -2268,151 +2304,222 @@ function App() {
                 </header>
             </Show>
             <Show
-                when={props.pane.markdown}
+                when={props.pane.diffReview}
                 fallback={
-                    <>
-                        <div class="code-viewport">
-                            <For each={props.pane.lines}>
-                                {(line) => (
-                                    <div
-                                        class="code-line"
-                                        classList={{
-                                            [`diff-${line.diff}`]: Boolean(
-                                                line.diff,
-                                            ),
-                                            current:
-                                                line.current &&
-                                                props.pane.focused,
-                                            walkthrough: lineIsInWalkthrough(
-                                                line.number,
-                                                props.pane.focused,
-                                            ),
-                                        }}
-                                    >
-                                        <span
-                                            class={`change-mark ${line.git || ""}`}
-                                        />
-                                        <span
-                                            class={`diagnostic-mark ${line.diagnostic || ""}`}
-                                        >
-                                            <Show when={line.diagnostic}>
-                                                {(severity) => {
-                                                    const status =
-                                                        diagnosticIcon(
-                                                            severity(),
-                                                        );
-                                                    return (
-                                                        <Icon
-                                                            name={status.name}
-                                                            tone={status.tone}
-                                                            size={16}
-                                                        />
-                                                    );
+                    <Show
+                        when={props.pane.markdown}
+                        fallback={
+                            <>
+                                <div class="code-viewport">
+                                    <For each={props.pane.lines}>
+                                        {(line) => (
+                                            <div
+                                                class="code-line"
+                                                classList={{
+                                                    [`diff-${line.diff}`]:
+                                                        Boolean(line.diff),
+                                                    current:
+                                                        line.current &&
+                                                        props.pane.focused,
+                                                    walkthrough:
+                                                        lineIsInWalkthrough(
+                                                            line.number,
+                                                            props.pane.focused,
+                                                        ),
                                                 }}
-                                            </Show>
-                                        </span>
-                                        <span class="line-number">
-                                            {line.continuation
-                                                ? ""
-                                                : line.number}
-                                        </span>
-                                        <span
-                                            class="line-content"
-                                            style={{
-                                                transform: `translateX(-${Math.max(0, props.pane.horizontalOffset - line.displayStart) * cellWidth()}px)`,
-                                            }}
-                                            onMouseDown={(event) =>
-                                                setCursor(
-                                                    event,
-                                                    props.pane.index,
-                                                    line.number,
-                                                    line.displayStart,
-                                                )
-                                            }
-                                        >
-                                            <For each={line.segments}>
-                                                {(segment) => (
-                                                    <span
-                                                        class="code-segment"
-                                                        classList={{
-                                                            cursor:
-                                                                segment.cursor &&
-                                                                props.pane
-                                                                    .focused,
-                                                            selected:
-                                                                segment.selected,
-                                                            "search-match":
-                                                                segment.searchMatch,
-                                                        }}
-                                                        style={{
-                                                            color: segment.token
-                                                                ? view().theme
-                                                                      .syntax[
-                                                                      segment
-                                                                          .token
-                                                                  ]
-                                                                : undefined,
-                                                            width: `${segment.cells * cellWidth()}px`,
-                                                        }}
+                                            >
+                                                <span
+                                                    class={`change-mark ${line.git || ""}`}
+                                                />
+                                                <span
+                                                    class={`diagnostic-mark ${line.diagnostic || ""}`}
+                                                >
+                                                    <Show
+                                                        when={line.diagnostic}
                                                     >
-                                                        {segment.text}
-                                                    </span>
-                                                )}
-                                            </For>
-                                        </span>
-                                    </div>
-                                )}
-                            </For>
-                        </div>
-                        <InlineSelectionComposer pane={props.pane} />
-                        <div class="overview-ruler" aria-hidden="true">
-                            <For each={props.pane.lines}>
-                                {(line) => (
-                                    <Show
-                                        when={
-                                            (line.current &&
-                                                props.pane.focused) ||
-                                            line.diagnostic ||
-                                            line.git
-                                        }
-                                    >
-                                        <span
-                                            classList={{
-                                                current:
-                                                    line.current &&
-                                                    props.pane.focused,
-                                                diagnostic: Boolean(
-                                                    line.diagnostic,
-                                                ),
-                                                changed: Boolean(line.git),
-                                            }}
-                                            style={{
-                                                top: `${props.pane.totalLines <= 1 ? 0 : ((line.number - 1) / (props.pane.totalLines - 1)) * 100}%`,
-                                            }}
-                                        />
-                                    </Show>
-                                )}
-                            </For>
-                        </div>
-                    </>
+                                                        {(severity) => {
+                                                            const status =
+                                                                diagnosticIcon(
+                                                                    severity(),
+                                                                );
+                                                            return (
+                                                                <Icon
+                                                                    name={
+                                                                        status.name
+                                                                    }
+                                                                    tone={
+                                                                        status.tone
+                                                                    }
+                                                                    size={16}
+                                                                />
+                                                            );
+                                                        }}
+                                                    </Show>
+                                                </span>
+                                                <span class="line-number">
+                                                    {line.continuation
+                                                        ? ""
+                                                        : line.number}
+                                                </span>
+                                                <span
+                                                    class="line-content"
+                                                    style={{
+                                                        transform: `translateX(-${Math.max(0, props.pane.horizontalOffset - line.displayStart) * cellWidth()}px)`,
+                                                    }}
+                                                    onMouseDown={(event) =>
+                                                        setCursor(
+                                                            event,
+                                                            props.pane.index,
+                                                            line.number,
+                                                            line.displayStart,
+                                                        )
+                                                    }
+                                                >
+                                                    <For each={line.segments}>
+                                                        {(segment) => (
+                                                            <span
+                                                                class="code-segment"
+                                                                classList={{
+                                                                    cursor:
+                                                                        segment.cursor &&
+                                                                        props
+                                                                            .pane
+                                                                            .focused,
+                                                                    selected:
+                                                                        segment.selected,
+                                                                    "search-match":
+                                                                        segment.searchMatch,
+                                                                }}
+                                                                style={{
+                                                                    color: segment.token
+                                                                        ? view()
+                                                                              .theme
+                                                                              .syntax[
+                                                                              segment
+                                                                                  .token
+                                                                          ]
+                                                                        : undefined,
+                                                                    width: `${segment.cells * cellWidth()}px`,
+                                                                }}
+                                                            >
+                                                                {segment.text}
+                                                            </span>
+                                                        )}
+                                                    </For>
+                                                </span>
+                                            </div>
+                                        )}
+                                    </For>
+                                </div>
+                                <InlineSelectionComposer pane={props.pane} />
+                                <div class="overview-ruler" aria-hidden="true">
+                                    <For each={props.pane.lines}>
+                                        {(line) => (
+                                            <Show
+                                                when={
+                                                    (line.current &&
+                                                        props.pane.focused) ||
+                                                    line.diagnostic ||
+                                                    line.git
+                                                }
+                                            >
+                                                <span
+                                                    classList={{
+                                                        current:
+                                                            line.current &&
+                                                            props.pane.focused,
+                                                        diagnostic: Boolean(
+                                                            line.diagnostic,
+                                                        ),
+                                                        changed: Boolean(
+                                                            line.git,
+                                                        ),
+                                                    }}
+                                                    style={{
+                                                        top: `${props.pane.totalLines <= 1 ? 0 : ((line.number - 1) / (props.pane.totalLines - 1)) * 100}%`,
+                                                    }}
+                                                />
+                                            </Show>
+                                        )}
+                                    </For>
+                                </div>
+                            </>
+                        }
+                    >
+                        {(document) => (
+                            <MarkdownDocument
+                                document={document()}
+                                firstLine={props.pane.firstLine}
+                                syntax={view().theme.syntax}
+                                cursorLine={props.pane.cursor.line}
+                                focused={props.pane.focused}
+                                onSelect={(line) => {
+                                    focusEditorInput();
+                                    void mutate("gui_set_cursor", {
+                                        pane: props.pane.index,
+                                        line,
+                                        displayColumn: 0,
+                                    });
+                                }}
+                                onOpenLink={openExternalLink}
+                            />
+                        )}
+                    </Show>
                 }
             >
-                {(document) => (
-                    <MarkdownDocument
-                        document={document()}
-                        firstLine={props.pane.firstLine}
+                {(review) => (
+                    <FlowDiff
+                        review={review()}
                         syntax={view().theme.syntax}
-                        cursorLine={props.pane.cursor.line}
-                        focused={props.pane.focused}
-                        onSelect={(line) => {
-                            focusEditorInput();
+                        onCoreKey={(key) => {
+                            inputSink.focus({ preventScroll: true });
+                            void sendKey({
+                                key,
+                                shift: false,
+                                control: false,
+                                alt: false,
+                                meta: false,
+                            });
+                        }}
+                        onNavigateReviewLine={(line) => {
                             void mutate("gui_set_cursor", {
                                 pane: props.pane.index,
                                 line,
                                 displayColumn: 0,
                             });
                         }}
-                        onOpenLink={openExternalLink}
+                        onOpenSource={(path, line, side) => {
+                            void mutate("gui_open_diff_source", {
+                                pane: props.pane.index,
+                                bufferId: props.pane.bufferId,
+                                path,
+                                line,
+                                side,
+                            });
+                        }}
+                        onLayoutChange={
+                            review().managed
+                                ? (layout) => {
+                                      void mutate("gui_diff_action", {
+                                          pane: props.pane.index,
+                                          bufferId: props.pane.bufferId,
+                                          action: layout,
+                                      });
+                                  }
+                                : undefined
+                        }
+                        onAction={
+                            review().managed
+                                ? (key) => {
+                                      void mutate("gui_diff_action", {
+                                          pane: props.pane.index,
+                                          bufferId: props.pane.bufferId,
+                                          action:
+                                              key === "q" ? "close" : "refresh",
+                                      });
+                                  }
+                                : undefined
+                        }
                     />
                 )}
             </Show>

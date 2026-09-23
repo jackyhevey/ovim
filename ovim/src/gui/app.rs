@@ -20,6 +20,30 @@ use tauri::{DragDropEvent, Emitter, EventTarget, Manager, RunEvent, State, Windo
 struct GuiExitGate(Arc<AtomicBool>);
 
 #[tauri::command]
+async fn gui_diff_action(
+    bridge: State<'_, GuiBridge>,
+    pane: usize,
+    buffer_id: u64,
+    action: String,
+) -> Result<(), String> {
+    bridge.diff_action(pane, buffer_id, action).await
+}
+
+#[tauri::command]
+async fn gui_open_diff_source(
+    bridge: State<'_, GuiBridge>,
+    pane: usize,
+    buffer_id: u64,
+    path: String,
+    line: usize,
+    side: String,
+) -> Result<(), String> {
+    bridge
+        .open_diff_source(pane, buffer_id, path, line, side)
+        .await
+}
+
+#[tauri::command]
 async fn gui_diff_state(
     bridge: State<'_, GuiBridge>,
     spec: Option<String>,
@@ -488,6 +512,8 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
         .manage(exit_gate)
         .invoke_handler(tauri::generate_handler![
             gui_snapshot,
+            gui_diff_action,
+            gui_open_diff_source,
             gui_vector_preview,
             gui_vector_feedback,
             gui_subscribe,

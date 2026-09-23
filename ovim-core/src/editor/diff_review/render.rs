@@ -176,6 +176,7 @@ pub struct Rendered {
     pub file_lines: Vec<usize>,
     pub toolbar: Toolbar,
     pub highlights: Vec<Vec<(Range<usize>, HighlightGroup)>>,
+    pub code_highlights: Vec<Vec<(Range<usize>, HighlightGroup)>>,
 }
 
 /// One rendered grapheme of a patch line body.
@@ -493,6 +494,7 @@ pub fn render(
         file_lines,
         toolbar,
         highlights: builder.highlights,
+        code_highlights: code.into_lines(),
     }
 }
 

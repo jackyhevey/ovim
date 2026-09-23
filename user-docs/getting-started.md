@@ -55,6 +55,19 @@ The toolbar above the patch switches between two layouts. Click a button, press
   source line numbers on both sides. Long lines wrap inside their column, and
   the view re-flows when the window changes width.
 
+In the GUI, side-by-side review uses two compact code panes. Curved ribbons
+connect matching change sections, so a short replacement does not leave a tall
+blank space beside a long removal. Scrolling follows corresponding sections;
+long lines scroll horizontally within each pane. Stronger highlights mark the
+changed text within replacement lines. Use the file selector and change arrows
+to navigate, click a ribbon to bring its section into view, or click a source
+line number to open the working file. Old-side lines map to their corresponding
+location in the current file; deleted files stay read-only.
+
+The GUI also supports `n` / `N` (next / previous hunk), `j` / `k` to scroll,
+and the review keys below. `:` and `<Space>` return to Ovim's command input.
+Text can be selected and copied directly from either pane.
+
 | Key | Action |
 |---|---|
 | `<Space>gd` | Open the review, return to it from a file, or leave it |

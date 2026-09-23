@@ -20,12 +20,14 @@
 mod highlight;
 mod render;
 
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 
 use super::{Editor, ToastLevel, ToastRequest, ToastSource};
 use crate::buffer::{Buffer, BufferId};
 use crate::native_diff::{self, PatchLineKind, ReviewBase, ReviewPatch};
+use crate::syntax::HighlightGroup;
 use crate::unicode::{grapheme_index_for_byte, GraphemeCol};
 
 pub use render::{DiffLayout, DIFF_REVIEW_TITLE_PREFIX};
@@ -74,9 +76,35 @@ pub struct DiffReviewState {
     /// cursor column back to a column in the source file. Ranges rather than
     /// owned lines: a review can hold a hundred thousand of them.
     patch_line_ranges: Vec<(usize, usize)>,
+    code_highlights: Vec<Vec<(Range<usize>, HighlightGroup)>>,
 }
 
 impl DiffReviewState {
+    /// The source patch retained by the review, independent of terminal layout.
+    pub fn patch(&self) -> &ReviewPatch {
+        &self.patch
+    }
+
+    /// First rendered row for each patch line, including both sides of a split.
+    pub fn patch_review_lines(&self) -> Vec<Option<usize>> {
+        let mut result = vec![None; self.patch.lines.len()];
+        for (row_index, row) in self.rows.iter().enumerate() {
+            for cell in [row.left, row.right].into_iter().flatten() {
+                if let Some(line) = result.get_mut(cell.patch_line) {
+                    line.get_or_insert(row_index);
+                }
+            }
+        }
+        result
+    }
+
+    pub fn patch_line_highlights(&self, patch_line: usize) -> &[(Range<usize>, HighlightGroup)] {
+        self.code_highlights
+            .get(patch_line)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     pub fn root(&self) -> &Path {
         &self.patch.root
     }
@@ -317,6 +345,7 @@ impl Editor {
             layout_width: width,
             layout_area_width: area_width,
             patch_line_ranges: patch_line_ranges(&patch),
+            code_highlights: Vec::new(),
             patch,
             rows: Vec::new(),
             stat_rows: Vec::new(),
@@ -550,6 +579,68 @@ impl Editor {
         self.mark_dirty();
     }
 
+    /// Opens a projected GUI review line by source identity. This avoids
+    /// depending on the terminal row geometry when the GUI flows hunks itself.
+    pub fn diff_review_open_source(
+        &mut self,
+        path: &str,
+        line: usize,
+        side: &str,
+    ) -> anyhow::Result<()> {
+        let state = self
+            .ui_panels
+            .diff_review
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No branch review is open"))?;
+        let file = state
+            .patch
+            .files
+            .iter()
+            .find(|file| {
+                file.path == path || (side == "old" && file.old_path.as_deref() == Some(path))
+            })
+            .ok_or_else(|| anyhow::anyhow!("File is not in this review: {path}"))?;
+        anyhow::ensure!(
+            file.status != "deleted",
+            "{path} was deleted on this branch"
+        );
+        let file_index = state
+            .patch
+            .files
+            .iter()
+            .position(|entry| std::ptr::eq(entry, file))
+            .expect("validated review file");
+        let new_line = match side {
+            "new" => line,
+            "old" => state
+                .patch
+                .lines
+                .iter()
+                .find(|entry| {
+                    entry.file == Some(file_index)
+                        && entry.old_line == Some(line)
+                        && matches!(entry.kind, PatchLineKind::Context | PatchLineKind::Removed)
+                })
+                .and_then(|entry| entry.new_line)
+                .ok_or_else(|| anyhow::anyhow!("Old line is not in this review: {path}:{line}"))?,
+            _ => anyhow::bail!("Unknown diff side: {side}"),
+        }
+        .max(1);
+        let target = state.patch.root.join(&file.path);
+        self.go_to_review_origin();
+        self.open_file(&target)?;
+        self.buffer_mut()
+            .cursor_mut()
+            .set_position(new_line - 1, GraphemeCol(0));
+        self.buffer_mut().validate_cursor_position();
+        self.center_cursor_in_viewport();
+        self.set_status_message(format!(
+            "{path}:{new_line} · <Space>gd returns to the review"
+        ));
+        self.mark_dirty();
+        Ok(())
+    }
+
     /// `]c` / `[c`: next or previous hunk in the review, or next changed
     /// region (git gutter) in an ordinary file.
     pub fn goto_change(&mut self, forward: bool) {
@@ -781,6 +872,7 @@ impl Editor {
         state.file_lines = rendered.file_lines;
         state.toolbar = rendered.toolbar;
         state.text_lines = rendered.text.lines().map(str::to_string).collect();
+        state.code_highlights = rendered.code_highlights;
     }
 
     /// `(buffer area width, text width)` the review lays out against.

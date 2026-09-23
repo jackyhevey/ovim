@@ -548,7 +548,10 @@ async fn split_review_uses_its_source_numbers_instead_of_an_outer_gutter() {
     );
     let changed = line_containing(&test, "let x = 1;");
     let row = test.editor.buffer().line_text(changed).unwrap();
-    assert!(row.contains('│'), "source line numbers remain in the split row");
+    assert!(
+        row.contains('│'),
+        "source line numbers remain in the split row"
+    );
 
     test.keys("s");
     ovim::ui::render_editor_to_ansi(&mut test.editor, 120, 30).unwrap();

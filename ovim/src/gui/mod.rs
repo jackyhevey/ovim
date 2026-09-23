@@ -10,6 +10,7 @@
 pub mod app;
 #[cfg(feature = "gui")]
 pub mod browser;
+mod diff;
 #[cfg(feature = "gui")]
 mod menu;
 
@@ -55,15 +56,36 @@ struct GuiProjectionCache {
         std::sync::Arc<ovim_core::line_layout::IndexedLineLayout>,
     >,
     used: std::collections::HashSet<GuiLayoutCacheKey>,
+    diff_reviews: std::collections::HashMap<(u64, usize), diff::GuiDiffDocument>,
+    used_diff_reviews: std::collections::HashSet<(u64, usize)>,
 }
 
 impl GuiProjectionCache {
     fn begin_snapshot(&mut self) {
         self.used.clear();
+        self.used_diff_reviews.clear();
     }
 
     fn finish_snapshot(&mut self) {
         self.layouts.retain(|key, _| self.used.contains(key));
+        self.diff_reviews
+            .retain(|key, _| self.used_diff_reviews.contains(key));
+    }
+
+    fn diff_review(
+        &mut self,
+        editor: &Editor,
+        buffer: &crate::buffer::Buffer,
+    ) -> Option<diff::GuiDiffDocument> {
+        let key = (buffer.id(), buffer.version());
+        self.used_diff_reviews.insert(key);
+        if let Some(review) = self.diff_reviews.get(&key) {
+            return Some(review.clone());
+        }
+        let review =
+            diff::GuiDiffDocument(std::sync::Arc::new(diff::project_diff(editor, buffer)?));
+        self.diff_reviews.insert(key, review.clone());
+        Some(review)
     }
 
     fn layout(
@@ -421,6 +443,7 @@ pub struct GuiPane {
     pub total_lines: usize,
     pub lines: Vec<GuiLine>,
     pub markdown: Option<GuiMarkdownDocument>,
+    pub diff_review: Option<diff::GuiDiffDocument>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -822,6 +845,20 @@ enum GuiRequest {
         content: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    DiffAction {
+        pane: usize,
+        buffer_id: u64,
+        action: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    OpenDiffSource {
+        pane: usize,
+        buffer_id: u64,
+        path: String,
+        line: usize,
+        side: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     Key {
         input: GuiKeyInput,
         reply: oneshot::Sender<Result<(), String>>,
@@ -1045,6 +1082,40 @@ impl GuiBridge {
         self.request(|reply| GuiRequest::OpenDiffBuffer {
             title,
             content,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn diff_action(
+        &self,
+        pane: usize,
+        buffer_id: u64,
+        action: String,
+    ) -> Result<(), String> {
+        self.request(|reply| GuiRequest::DiffAction {
+            pane,
+            buffer_id,
+            action,
+            reply,
+        })
+        .await
+    }
+
+    pub async fn open_diff_source(
+        &self,
+        pane: usize,
+        buffer_id: u64,
+        path: String,
+        line: usize,
+        side: String,
+    ) -> Result<(), String> {
+        self.request(|reply| GuiRequest::OpenDiffSource {
+            pane,
+            buffer_id,
+            path,
+            line,
+            side,
             reply,
         })
         .await
@@ -1595,6 +1666,28 @@ async fn handle_request(
         } => {
             editor.open_diff_buffer_in_new_tab(&title, &content);
             (reply, Ok(()))
+        }
+        GuiRequest::DiffAction {
+            pane,
+            buffer_id,
+            action,
+            reply,
+        } => {
+            let result = diff::perform_diff_action(editor, pane, buffer_id, &action)
+                .map_err(anyhow::Error::msg);
+            (reply, result)
+        }
+        GuiRequest::OpenDiffSource {
+            pane,
+            buffer_id,
+            path,
+            line,
+            side,
+            reply,
+        } => {
+            let result = diff::open_diff_source(editor, pane, buffer_id, &path, line, &side)
+                .map_err(anyhow::Error::msg);
+            (reply, result)
         }
         GuiRequest::Key { input, reply } => {
             let result = input
@@ -2499,6 +2592,7 @@ fn project_panes(
                 total_lines: editor.buffer().line_count(),
                 lines: active_lines.to_vec(),
                 markdown: project_markdown(editor, editor.buffer().id()),
+                diff_review: projection_cache.diff_review(editor, editor.buffer()),
             }],
         );
     };
@@ -2585,6 +2679,7 @@ fn project_panes(
                 total_lines: buffer.line_count(),
                 lines,
                 markdown: project_markdown(editor, buffer.id()),
+                diff_review: projection_cache.diff_review(editor, buffer),
             })
         })
         .collect();
@@ -3721,6 +3816,53 @@ mod tests {
             assert_eq!(
                 editor.render_cache.last_text_width,
                 compute_text_width(&editor, pane.width())
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn gui_split_review_separator_tracks_pane_resizes() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = git2::Repository::init(directory.path()).unwrap();
+        repository.set_head("refs/heads/main").unwrap();
+        let path = directory.path().join("sample.rs");
+        std::fs::write(&path, "fn main() {\n    let value = 1;\n}\n").unwrap();
+        let mut index = repository.index().unwrap();
+        index.add_path(Path::new("sample.rs")).unwrap();
+        index.write().unwrap();
+        let tree = repository.find_tree(index.write_tree().unwrap()).unwrap();
+        let signature = git2::Signature::now("Ovim", "ovim@example.com").unwrap();
+        repository
+            .commit(Some("HEAD"), &signature, &signature, "base", &tree, &[])
+            .unwrap();
+        std::fs::write(&path, "fn main() {\n    let value = 2;\n}\n").unwrap();
+
+        let mut editor = Editor::default();
+        editor.options.textwidth = None;
+        editor.open_file(&path).unwrap();
+        handle_viewport_resize(&mut editor, 180, 40);
+        update_diff_review_geometry(&mut editor);
+        editor.open_diff_review(None).unwrap();
+        editor.set_diff_review_layout(crate::editor::DiffLayout::Split);
+
+        for columns in [180, 240] {
+            handle_viewport_resize(&mut editor, columns, 40);
+            update_diff_review_geometry(&mut editor);
+            let separator = editor
+                .buffer()
+                .rope()
+                .lines()
+                .find_map(|line| {
+                    let text = line.to_string();
+                    text.contains("let value = 1;")
+                        .then(|| text.chars().position(|character| character == '│'))
+                        .flatten()
+                })
+                .unwrap();
+            let center = (editor.render_cache.last_text_width - 1) / 2;
+            assert!(
+                separator.abs_diff(center) <= 1,
+                "{columns}-column pane has separator at {separator}, expected {center}"
             );
         }
     }

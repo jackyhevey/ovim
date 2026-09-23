@@ -48,6 +48,40 @@ export interface GuiMarkdownDocument {
     highlights?: GuiMarkdownHighlight[][];
 }
 
+export interface GuiDiffLine {
+    kind: "context" | "added" | "removed";
+    text: string;
+    oldLine?: number;
+    newLine?: number;
+    reviewLine?: number;
+    highlights?: GuiMarkdownHighlight[];
+}
+
+export interface GuiDiffHunk {
+    header: string;
+    oldStart: number;
+    oldCount: number;
+    newStart: number;
+    newCount: number;
+    reviewLine?: number;
+    lines: GuiDiffLine[];
+}
+
+export interface GuiDiffDocument {
+    title: string;
+    layout: "split" | "unified";
+    managed: boolean;
+    files: Array<{
+        path: string;
+        oldPath?: string;
+        status: string;
+        additions: number;
+        deletions: number;
+        binary: boolean;
+        hunks: GuiDiffHunk[];
+    }>;
+}
+
 export interface GuiPane {
     index: number;
     bufferId: number;
@@ -61,6 +95,7 @@ export interface GuiPane {
     totalLines: number;
     lines: GuiLine[];
     markdown?: GuiMarkdownDocument | null;
+    diffReview?: GuiDiffDocument | null;
 }
 
 export interface GuiAiProfileOption {
