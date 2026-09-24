@@ -58,7 +58,7 @@ pub(crate) const PERMISSION_CAPABILITY: super::AiPermissionModes = super::AiPerm
     options: PERMISSION_MODES,
 };
 
-// Curated defaults verified against Anthropic's model reference on 2026-09-21:
+// Curated defaults verified against Anthropic's model reference on 2026-09-24:
 // https://platform.claude.com/docs/en/models/overview
 // These are choices, not account entitlements. The installed CLI enforces access.
 // Other IDs/aliases remain available through /model or the profile configuration.
@@ -83,10 +83,10 @@ pub(crate) const MODEL_PRESETS: &[ModelPreset] = &[
         default_effort: Some("high"),
     },
     ModelPreset {
-        id: "claude-opus-5",
+        id: "claude-opus-5-5",
         alias: "opus",
         supports_effort: true,
-        default_effort: Some("high"),
+        default_effort: Some("medium"),
     },
     ModelPreset {
         id: "claude-fable-5-1",

@@ -40,7 +40,7 @@ let chat = {
     reasoningEffortDefault: 'high', reasoningEfforts: ['default', 'low', 'medium', 'high'],
     profiles: [
         {id:'claude_code', label:'Claude Agent', provider:'claude_code', model:'opus'},
-        {id:'codex_sol', label:'Codex', provider:'codex', model:'gpt-5.6-sol'},
+        {id:'codex_sol', label:'Codex', provider:'codex', model:'gpt-6-sol'},
         ...Array.from({length: 12}, (_, index) => ({id:'custom-' + index, label:'Custom ' + index, provider:'ollama', model:'local-' + index})),
     ],
     permissionMode: 'auto',
@@ -59,7 +59,7 @@ export const invoke = async (command, args) => {
     if (command === 'gui_subscribe') { emit = args.onEvent.onmessage; publish(); }
     if (command === 'gui_select_permission_mode') { chat = {...chat, permissionMode: args.mode}; publish(); }
     if (command === 'gui_select_ai_profile' && args.profile === 'codex_sol') {
-        chat = {...chat, profile: 'codex_sol', model: 'gpt-5.6-sol', externalAgent: false,
+        chat = {...chat, profile: 'codex_sol', model: 'gpt-6-sol', externalAgent: false,
             permissionMode: undefined, permissionModes: []};
         publish();
     }

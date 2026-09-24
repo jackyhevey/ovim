@@ -11,7 +11,7 @@ describe("chat model catalog", () => {
             id: "codex_sol",
             label: "Sol",
             provider: "codex",
-            model: "gpt-5.6-sol",
+            model: "gpt-6-sol",
         },
         {
             id: "codex_terra",
@@ -29,7 +29,7 @@ describe("chat model catalog", () => {
             id: "claude_code",
             label: "Claude Agent",
             provider: "claude_code",
-            model: "claude-opus-5",
+            model: "claude-opus-5-5",
         },
     ]);
 
@@ -39,7 +39,7 @@ describe("chat model catalog", () => {
             { id: "claude_code", label: "Claude Code" },
         ]);
         expect(providers[0].models).toMatchObject([
-            { profileId: "codex_sol", model: "gpt-5.6-sol" },
+            { profileId: "codex_sol", model: "gpt-6-sol" },
             { profileId: "codex_terra", model: "gpt-5.6-terra" },
         ]);
     });

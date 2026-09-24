@@ -442,7 +442,7 @@ mod chat_preference_tests {
             let (mut editor, dir) = configured_editor(source);
             assert_eq!(editor.ai_chat_effective_profile(), "codex_sol", "{source}");
             editor.open_ai_chat(ChatOpts::default()).unwrap();
-            assert_eq!(editor.ai_chat_selected_model(), "gpt-5.6-sol", "{source}");
+            assert_eq!(editor.ai_chat_selected_model(), "gpt-6-sol", "{source}");
             // A live picker change works, but does not rewrite authored config.
             assert!(editor.ai_select_chat_model("claude_code", "sonnet"));
             editor.execute_lua(source).unwrap();

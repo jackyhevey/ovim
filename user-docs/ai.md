@@ -39,13 +39,19 @@ signed in separately, but it is not required for Ovim.
 Select `/model codex_astra` to use `gpt-6-astra` at medium reasoning effort.
 The profile supports low, medium, high, xhigh, and max effort.
 
-The built-in defaults use `gpt-5.6-sol` at medium effort for chat and
+The built-in defaults use `gpt-6-sol` at medium effort for chat and
 `gpt-5.6-terra` at low effort for read-only queries. With
 the default `codex` provider, Ovim—not Codex app-server—is the agent harness.
 Ovim sends its own tool schemas, records tool intent, applies auto-mode policy,
 executes approved effects in the repository, and returns results for the next
 inference round. Codex's read-only workspace sandbox is therefore not involved
 in repository reads or writes.
+
+For direct OpenAI API profiles, `openai_fast` uses `gpt-6-luna` and `openai`
+uses `gpt-6-sol`. Both use `none` reasoning effort for tool calls through
+Chat Completions. `openai_frontier` remains on `gpt-5.2` until Ovim supports
+GPT-6 Astra tool calls through the Responses API; `codex_astra` provides Astra
+through the Codex route.
 
 When Ovim starts outside Git, an editable chat asks before treating the current
 folder as its project boundary. Approving creates a durable, folder-scoped chat
@@ -280,7 +286,7 @@ turn ends.
 Every spawn names an exact catalog model and reasoning effort. Ovim derives the
 catalog from configured provider profiles and rejects invalid pairs before
 allocating durable state. The catalog ID is `profile/model`, for example
-`codex_sol/gpt-5.6-sol`. `codex_app_server` profiles are excluded because their
+`codex_sol/gpt-6-sol`. `codex_app_server` profiles are excluded because their
 nested provider session cannot be safely reconstructed in the child harness.
 
 The built-in harness allows explorer and reviewer trees to depth two, with at
@@ -445,7 +451,7 @@ the explicit settings. A profile passed to `vim.ai.open_chat` applies only to th
 chat and does not replace the saved preference.
 
 The model picker in both the GUI and terminal offers Claude Agent entries for
-`default`, `claude-sonnet-5`, `claude-opus-5`, `claude-fable-5-1`, and
+`default`, `claude-sonnet-5`, `claude-opus-5-5`, `claude-fable-5-1`, and
 `claude-haiku-4-5-20251001`. Select a row to change the model within
 the same profile. In terminal Ovim, `/model` opens the picker; arrow keys select
 and Enter returns to the composer. With the Claude profile active, `/model opus`
@@ -453,14 +459,14 @@ and Enter returns to the composer. With the Claude profile active, `/model opus`
 precedence, so `/model codex_sol` still switches providers.
 
 These exact IDs were checked against [Anthropic's model reference](https://platform.claude.com/docs/en/models/overview)
-on 2026-09-21. They are not a list of your account's entitlements. Other aliases,
+on 2026-09-24. They are not a list of your account's entitlements. Other aliases,
 such as `fable`, and deployment-specific IDs can be entered with `/model`.
 Claude enforces model availability. Haiku does not expose reasoning effort;
 Ovim omits any previously selected effort when using it. `default` leaves the model unset, using your usual Claude
 configuration. Ovim remembers the last selected profile/model pair. Selecting
 a profile by name uses its configured model. Stop an active turn before changing
 the selection.
-Ovim's model defaults are Medium for Fable 5.1 and High for Opus 5 and Sonnet 5,
+Ovim's model defaults are Medium for Fable 5.1 and Opus 5.5, and High for Sonnet 5,
 following [Anthropic's effort guidance](https://platform.claude.com/docs/en/build-with-claude/effort)
 for Opus/Sonnet and choosing Medium for Fable's interactive use. An explicit
 `/effort` selection overrides the profile's `reasoning_effort`, which in turn
@@ -555,13 +561,13 @@ vim.ai.setup({
   profiles = {
     codex_sol = {
       provider = "codex",
-      model = "gpt-5.6-sol",
+      model = "gpt-6-sol",
       reasoning_effort = "medium",
       scope_network = true,
     },
     codex_luna = {
       provider = "codex",
-      model = "gpt-5.6-luna",
+      model = "gpt-6-luna",
       reasoning_effort = "max",
     },
     codex_terra = {
@@ -816,8 +822,9 @@ vim.ai.setup({
   profiles = {
     openai = {
       provider = "openai",
-      model = "gpt-4.1-mini",
+      model = "gpt-6-luna",
       api_key_env = "OPENAI_API_KEY",
+      reasoning_effort = "none",
       temperature = 0.2,
       max_tokens = 2048,
       edit_mode = "format",
@@ -901,8 +908,9 @@ default_profile = "openai"
 
 [profiles.openai]
 provider = "open_ai"
-model = "gpt-4.1-mini"
+model = "gpt-6-luna"
 api_key_env = "OPENAI_API_KEY"
+reasoning_effort = "none"
 temperature = 0.2
 max_tokens = 2048
 extraction = "json"

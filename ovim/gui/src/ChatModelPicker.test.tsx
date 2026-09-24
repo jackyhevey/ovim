@@ -11,7 +11,7 @@ const profiles = [
         id: "codex_sol",
         label: "Sol",
         provider: "codex",
-        model: "gpt-5.6-sol",
+        model: "gpt-6-sol",
     },
     {
         id: "codex_terra",
@@ -22,7 +22,7 @@ const profiles = [
     ...[
         "default",
         "claude-sonnet-5",
-        "claude-opus-5",
+        "claude-opus-5-5",
         "claude-haiku-4-5-20251001",
     ].map((model) => ({
         id: "claude_code",
@@ -86,9 +86,9 @@ it("selects provider, model, effort, and permissions through separate controls",
     fireEvent.change(screen.getByLabelText("AI provider"), {
         target: { value: "codex" },
     });
-    expect(onProfile).toHaveBeenCalledWith("codex_sol", "gpt-5.6-sol");
+    expect(onProfile).toHaveBeenCalledWith("codex_sol", "gpt-6-sol");
     expect((screen.getByLabelText("AI model") as HTMLSelectElement).value).toBe(
-        JSON.stringify(["codex_sol", "gpt-5.6-sol"]),
+        JSON.stringify(["codex_sol", "gpt-6-sol"]),
     );
 
     fireEvent.change(screen.getByLabelText("AI model"), {

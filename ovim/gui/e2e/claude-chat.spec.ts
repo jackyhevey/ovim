@@ -17,7 +17,7 @@ Object.assign(mockSnapshot.aiChat, {
     profile: "claude_code", externalAgent: true, externalQuestion: ${state === "question"},
     profiles: [
         {id: "claude_code", label: "Claude Agent", provider: "claude_code", model: "default"},
-        {id: "codex_sol", provider: "codex", model: "gpt-5.6-sol"}
+        {id: "codex_sol", provider: "codex", model: "gpt-6-sol"}
     ],
     reasoningEffort: "default", reasoningEfforts: ["default", "low", "medium", "high", "xhigh", "max"],
     activity: "waiting_tool_approval", waiting: true,
@@ -131,7 +131,7 @@ test("Claude model presets are selectable in a narrow chat window", async ({
                 `
 Object.assign(mockSnapshot.aiChat, {
     profile:"claude_code", model:"claude-fable-5-1", externalAgent:true, externalQuestion:false,
-    profiles:["default","claude-sonnet-5","claude-opus-5","claude-fable-5-1","claude-haiku-4-5-20251001"].map(model => ({id:"claude_code",label:"Claude Agent",provider:"claude_code",model})),
+    profiles:["default","claude-sonnet-5","claude-opus-5-5","claude-fable-5-1","claude-haiku-4-5-20251001"].map(model => ({id:"claude_code",label:"Claude Agent",provider:"claude_code",model})),
     activity:"idle", waiting:false, approval:undefined, codeExplanation:undefined,
     reasoningEffort:"medium", reasoningEffortSelection:"default", reasoningEffortDefault:"medium",
     reasoningEfforts:["default","low","medium","high","xhigh","max"]
@@ -150,7 +150,7 @@ Object.assign(mockSnapshot.aiChat, {
     for (const model of [
         "default",
         "claude-sonnet-5",
-        "claude-opus-5",
+        "claude-opus-5-5",
         "claude-fable-5-1",
         "claude-haiku-4-5-20251001",
     ])

@@ -348,11 +348,12 @@ fn apply_optional_params(body: &mut Value, profile: &AiProfileConfig, tools: Opt
         };
         body[key] = json!(max_tokens);
     }
-    // OpenAI reasoning_effort: enable extended thinking and strip incompatible params.
+    // Chat Completions requires a top-level effort, including explicit `none`
+    // for GPT-6 Sol/Luna tool calls. Reasoning modes reject sampling parameters.
     if profile.provider == AiProviderKind::OpenAi {
         if let Some(ref effort) = profile.reasoning_effort {
+            body["reasoning_effort"] = json!(effort);
             if effort != "none" {
-                body["reasoning"] = json!({ "effort": effort });
                 body.as_object_mut().unwrap().remove("temperature");
                 body.as_object_mut().unwrap().remove("top_p");
             }
@@ -1697,16 +1698,18 @@ mod tests {
         profile.reasoning_effort = Some("low".to_string());
         let mut body = json!({ "model": "o3" });
         apply_optional_params(&mut body, &profile, None);
-        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["reasoning_effort"], "low");
+        assert!(body.get("reasoning").is_none());
         assert!(body.get("temperature").is_none());
     }
 
     #[test]
-    fn reasoning_effort_none_is_noop() {
+    fn reasoning_effort_none_is_explicit() {
         let mut profile = test_profile(AiProviderKind::OpenAi);
         profile.reasoning_effort = Some("none".to_string());
-        let mut body = json!({ "model": "o3" });
+        let mut body = json!({ "model": "gpt-6-sol" });
         apply_optional_params(&mut body, &profile, None);
+        assert_eq!(body["reasoning_effort"], "none");
         assert!(body.get("reasoning").is_none());
         // temperature should still be present
         assert!(body.get("temperature").is_some());
@@ -1719,6 +1722,7 @@ mod tests {
         let mut body = json!({ "model": "claude" });
         apply_optional_params(&mut body, &profile, None);
         assert!(body.get("reasoning").is_none());
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
