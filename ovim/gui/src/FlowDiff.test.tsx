@@ -320,10 +320,13 @@ describe("FlowDiff", () => {
         const result = render(() => (
             <FlowDiff review={moved} onOpenSource={open} />
         ));
-        const picker = result.getByRole("combobox", { name: "Changed file" });
         expect(result.getByText("2 files")).toBeTruthy();
-        fireEvent.change(picker, { target: { value: "src/parser.ts" } });
-        expect(result.getByText("new mode 100644")).toBeTruthy();
+        expect(
+            result.container.querySelectorAll(
+                ".flow-scroll.old .flow-file-group",
+            ),
+        ).toHaveLength(2);
+        expect(result.getAllByText("new mode 100644")).toHaveLength(2);
         expect(result.getByText("Possible moved code")).toBeTruthy();
         expect(
             result.queryByRole("region", { name: "src/main.ts context" }),
@@ -338,15 +341,23 @@ describe("FlowDiff", () => {
             result.getByRole("region", { name: "src/main.ts context" }),
         ).toBeTruthy();
         fireEvent.click(
-            result.getByRole("button", { name: "Before line 20, open source" }),
+            result.getAllByRole("button", {
+                name: "Before line 20, open source",
+            })[0],
         );
         fireEvent.click(result.getByRole("button", { name: "After context" }));
-        expect((picker as HTMLSelectElement).value).toBe("src/main.ts");
+        expect(
+            result.container.querySelector(
+                ".flow-section.change[data-file-id='src/main.ts'][data-active='true']",
+            ),
+        ).toBeTruthy();
         expect(
             result.getByText("After context · matched lines highlighted"),
         ).toBeTruthy();
         fireEvent.click(
-            result.getByRole("button", { name: "After line 3, open source" }),
+            result.getAllByRole("button", {
+                name: "After line 3, open source",
+            })[0],
         );
         expect(open.mock.calls).toEqual([
             ["src/main.ts", 20, "old"],
@@ -354,7 +365,7 @@ describe("FlowDiff", () => {
         ]);
     });
 
-    it("shows independent compact streams and navigates source and hunks", () => {
+    it("shows independent compact streams and navigates source and changes", async () => {
         const navigate = vi.fn();
         const open = vi.fn();
         const result = render(() => (
@@ -379,7 +390,7 @@ describe("FlowDiff", () => {
         );
         expect(open).toHaveBeenCalledWith("src/uneven.ts", 5, "old");
         fireEvent.click(result.getByRole("button", { name: "Next change" }));
-        expect(navigate).toHaveBeenCalledWith(40);
+        await waitFor(() => expect(navigate).toHaveBeenCalledWith(23));
     });
 
     it("switches layout and handles binary files", () => {
@@ -390,12 +401,10 @@ describe("FlowDiff", () => {
         fireEvent.click(result.getByRole("button", { name: "Unified" }));
         expect(layout).toHaveBeenCalledWith("unified");
         expect(
-            result.container.querySelectorAll(".flow-unified-hunk"),
+            result.container.querySelectorAll(
+                ".flow-unified-scroll .flow-file-group",
+            ),
         ).toHaveLength(2);
-        fireEvent.change(
-            result.getByRole("combobox", { name: "Changed file" }),
-            { target: { value: "asset.png" } },
-        );
         expect(
             result.getByText("Binary file — no text diff to display."),
         ).toBeTruthy();
@@ -500,17 +509,42 @@ describe("FlowDiff", () => {
         expect(navigate).toHaveBeenCalledWith(29);
     });
 
-    it("tracks the visible hunk while either pane scrolls", () => {
-        const result = render(() => <FlowDiff review={review} />);
+    it("tracks the visible change while either pane scrolls", () => {
+        const file = review.files[0];
+        const result = render(() => (
+            <FlowDiff
+                review={{
+                    ...review,
+                    files: [
+                        {
+                            ...file,
+                            hunks: [
+                                file.hunks[0],
+                                {
+                                    ...file.hunks[1],
+                                    lines: [
+                                        {
+                                            kind: "added",
+                                            text: "another change",
+                                            newLine: 18,
+                                        },
+                                    ],
+                                },
+                            ],
+                        },
+                    ],
+                }}
+            />
+        ));
         const before = result.getByRole("region", { name: "Before changes" });
         const secondHunk = before.querySelector<HTMLElement>(
-            "[data-section='h1-s4']",
+            ".flow-file-group .flow-section.change:last-child",
         )!;
         Object.defineProperties(secondHunk, {
             offsetTop: { configurable: true, value: 100 },
             offsetHeight: { configurable: true, value: 22 },
         });
-        before.scrollTop = 90;
+        before.scrollTop = 100;
         fireEvent.scroll(before);
         expect(result.getByText("2 / 2")).toBeTruthy();
     });
@@ -550,19 +584,23 @@ describe("FlowDiff", () => {
             />
         ));
         expect(
-            result.getByRole("combobox", { name: "Changed file" }),
-        ).toBeTruthy();
+            result.container.querySelectorAll(
+                ".flow-scroll.old .flow-file-group",
+            ),
+        ).toHaveLength(2);
         fireEvent.click(result.getByRole("button", { name: "Guided" }));
         expect(
-            result.getByRole("combobox", { name: "Guided section" }),
-        ).toBeTruthy();
+            result.container.querySelectorAll(
+                ".flow-scroll.old .flow-file-group",
+            ),
+        ).toHaveLength(1);
         expect(result.getByText("1 section")).toBeTruthy();
         expect(result.getByText("1 / 1")).toBeTruthy();
         expect(
             result.getAllByText(
                 "Parser moved after validation · src/uneven.ts",
-            )[1],
-        ).toBeTruthy();
+            ),
+        ).toHaveLength(2);
     });
 
     it("exports canonical files after a guided review is replaced", async () => {
@@ -579,13 +617,17 @@ describe("FlowDiff", () => {
         const result = render(() => <FlowDiff review={current()} />);
         fireEvent.click(result.getByRole("button", { name: "Guided" }));
         expect(
-            result.getByRole("combobox", { name: "Guided section" }),
-        ).toBeTruthy();
+            result.container.querySelectorAll(
+                ".flow-scroll.old .flow-file-group",
+            ),
+        ).toHaveLength(1);
 
         setCurrent(review);
         expect(
-            result.getByRole("combobox", { name: "Changed file" }),
-        ).toBeTruthy();
+            result.container.querySelectorAll(
+                ".flow-scroll.old .flow-file-group",
+            ),
+        ).toHaveLength(2);
 
         const originalCreateObjectURL = Object.getOwnPropertyDescriptor(
             URL,
@@ -686,12 +728,10 @@ describe("FlowDiff", () => {
         fireEvent.keyDown(next, { key: "n" });
         await waitFor(() =>
             expect(
-                (
-                    result.getByRole("combobox", {
-                        name: "Changed file",
-                    }) as HTMLSelectElement
-                ).value,
-            ).toBe("src/next.ts"),
+                result.container.querySelector(
+                    ".flow-section.change[data-file-id='src/next.ts'][data-active='true']",
+                ),
+            ).toBeTruthy(),
         );
         expect(result.getByText("3 / 3")).toBeTruthy();
     });

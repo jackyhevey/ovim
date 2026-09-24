@@ -13,6 +13,7 @@ import {
     sectionsForFile,
     sectionsWithMoves,
     type FlowDiffLine,
+    type FlowDiffFile,
     type FlowDiffReview,
     type FlowSection,
     type Reconstruction,
@@ -112,13 +113,12 @@ export default function FlowDiff(props: FlowDiffProps) {
     let rightScroller: HTMLDivElement | undefined;
     let bridge: HTMLDivElement | undefined;
     let unifiedScroller: HTMLDivElement | undefined;
-    let lock = false;
+    const expectedScrolls = new WeakMap<HTMLElement, number>();
     let pendingBracket = "";
     let pendingGo = false;
     let resizeObserver: ResizeObserver | undefined;
     const leftSections = new Map<string, HTMLElement>();
     const rightSections = new Map<string, HTMLElement>();
-    const unifiedHunks = new Map<number, HTMLElement>();
     const unifiedSections = new Map<string, HTMLElement>();
 
     const visibleFiles = createMemo(() =>
@@ -126,34 +126,29 @@ export default function FlowDiff(props: FlowDiffProps) {
             ? props.review.guidedFiles
             : props.review.files,
     );
+    const sectionKey = (fileId: string, sectionId: string) =>
+        `${fileId}\0${sectionId}`;
+    const fileSections = (item: FlowDiffFile) =>
+        props.review.custom &&
+        effectiveView() === "files" &&
+        traceMoves() &&
+        props.review.moves?.length
+            ? sectionsWithMoves(item, props.review.moves, reconstruction())
+            : sectionsForFile(item);
+    const allSections = createMemo(() =>
+        visibleFiles().flatMap((item) =>
+            fileSections(item).map((section) => ({ file: item, section })),
+        ),
+    );
     const file = createMemo(
         () =>
             visibleFiles().find((item) => item.id === selectedId()) ||
             visibleFiles()[0],
     );
-    const sections = createMemo(() =>
-        file()
-            ? props.review.custom &&
-              effectiveView() === "files" &&
-              traceMoves() &&
-              props.review.moves?.length
-                ? sectionsWithMoves(
-                      file()!,
-                      props.review.moves,
-                      reconstruction(),
-                  )
-                : sectionsForFile(file()!)
-            : [],
-    );
-    const hunks = createMemo(() => file()?.hunks ?? []);
+    const sections = createMemo(() => (file() ? fileSections(file()!) : []));
     const changes = createMemo(() =>
         visibleFiles().flatMap((item) =>
-            (traceMoves() &&
-            props.review.moves?.length &&
-            effectiveView() === "files"
-                ? sectionsWithMoves(item, props.review.moves, reconstruction())
-                : sectionsForFile(item)
-            )
+            fileSections(item)
                 .filter((section) => section.kind === "change")
                 .map((section) => ({
                     fileId: item.id,
@@ -172,51 +167,90 @@ export default function FlowDiff(props: FlowDiffProps) {
 
     createEffect(() => setLayout(props.review.layout));
     createEffect(() => {
-        const identity = `${props.review.title}\0${visibleFiles()
-            .map((item) => item.id)
-            .join("\0")}`;
+        const identity = props.review.title;
         if (reviewIdentity && identity !== reviewIdentity) {
             setSelectedId("");
+            setActiveSectionId("");
+            setActiveHunk(0);
         }
         reviewIdentity = identity;
     });
     createEffect(() => {
-        file()?.path;
-        setActiveHunk(0);
-        setActiveSectionId(
-            sections().find((section) => section.kind === "change")?.id ?? "",
-        );
-        setActiveMoveId(
-            sections().find((section) => section.move)?.move?.id ?? "",
-        );
-        queueMicrotask(() => {
-            if (leftScroller) leftScroller.scrollTop = 0;
-            if (rightScroller) rightScroller.scrollTop = 0;
-            measure();
-        });
+        const first = changes()[0];
+        if (!visibleFiles().some((item) => item.id === selectedId())) {
+            setSelectedId(first?.fileId ?? visibleFiles()[0]?.id ?? "");
+        }
+        if (
+            !changes().some(
+                (change) =>
+                    change.fileId === selectedId() &&
+                    change.sectionId === activeSectionId(),
+            )
+        ) {
+            const next =
+                changes().find((change) => change.fileId === selectedId()) ??
+                first;
+            setActiveSectionId(next?.sectionId ?? "");
+            setActiveHunk(next?.hunkIndex ?? 0);
+        }
     });
 
     function boxes(side: Side) {
         const scroller = side === "old" ? leftScroller : rightScroller;
+        if (!scroller) return [];
+        return Array.from(
+            scroller.querySelectorAll<HTMLElement>(
+                ".flow-file-heading, .flow-file-metadata, .flow-section, .flow-empty",
+            ),
+        ).map((element) => ({
+            top: elementTop(element, scroller),
+            height: element.offsetHeight || 1,
+            viewportTop: elementTop(element, scroller) - scroller.scrollTop,
+        }));
+    }
+
+    function sectionBoxes(side: Side) {
+        const scroller = side === "old" ? leftScroller : rightScroller;
         const elements = side === "old" ? leftSections : rightSections;
-        return sections().map((section) => {
-            const element = elements.get(section.id);
+        return allSections().map(({ file: item, section }) => {
+            const element = elements.get(sectionKey(item.id, section.id));
             return {
-                top: element?.offsetTop ?? 0,
+                top: element && scroller ? elementTop(element, scroller) : 0,
                 height: element?.offsetHeight ?? 1,
                 viewportTop:
-                    (element?.offsetTop ?? 0) - (scroller?.scrollTop ?? 0),
+                    (element && scroller ? elementTop(element, scroller) : 0) -
+                    (scroller?.scrollTop ?? 0),
             };
         });
     }
 
+    function elementTop(element: HTMLElement, scroller: HTMLElement) {
+        const elementRect = element.getBoundingClientRect();
+        const scrollerRect = scroller.getBoundingClientRect();
+        if (!elementRect.top && !scrollerRect.top && element.offsetTop)
+            return element.offsetTop;
+        return elementRect.top - scrollerRect.top + scroller.scrollTop;
+    }
+
+    function setScrollTop(scroller: HTMLElement, top: number) {
+        scroller.scrollTop = top;
+        expectedScrolls.set(scroller, scroller.scrollTop);
+    }
+
+    function consumeExpectedScroll(scroller: HTMLElement) {
+        const expected = expectedScrolls.get(scroller);
+        if (expected === undefined) return false;
+        expectedScrolls.delete(scroller);
+        return Math.abs(scroller.scrollTop - expected) < 1;
+    }
+
     function measure() {
         if (!bridge || layout() !== "split") return;
-        const left = boxes("old");
-        const right = boxes("new");
+        const left = sectionBoxes("old");
+        const right = sectionBoxes("new");
         const height = bridge.clientHeight;
         setRibbons(
-            sections().flatMap((section, index) => {
+            allSections().flatMap(({ file: item, section }, index) => {
                 if (section.kind !== "change") return [];
                 const a = left[index];
                 const b = right[index];
@@ -236,7 +270,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                 const curve = width * 0.48;
                 return [
                     {
-                        id: section.id,
+                        id: sectionKey(item.id, section.id),
                         kind:
                             section.left.length && section.right.length
                                 ? "replace"
@@ -251,50 +285,68 @@ export default function FlowDiff(props: FlowDiffProps) {
     }
 
     function syncScroll(source: Side) {
-        if (lock || !leftScroller || !rightScroller) return;
-        lock = true;
+        if (!leftScroller || !rightScroller) return;
         const from = source === "old" ? leftScroller : rightScroller;
         const to = source === "old" ? rightScroller : leftScroller;
-        const visible = sections().find((section) => {
-            const element = (
-                source === "old" ? leftSections : rightSections
-            ).get(section.id);
-            return (
-                element &&
-                element.offsetTop + element.offsetHeight > from.scrollTop + 8
-            );
-        });
+        if (consumeExpectedScroll(from)) return;
+        const elements = source === "old" ? leftSections : rightSections;
+        const entries = allSections().filter(
+            ({ section }) => section.kind === "change",
+        );
+        const visible =
+            [...entries].reverse().find(({ file: item, section }) => {
+                const element = elements.get(sectionKey(item.id, section.id));
+                return (
+                    element && elementTop(element, from) <= from.scrollTop + 8
+                );
+            }) ?? entries[0];
         if (visible) {
-            setActiveHunk(visible.hunkIndex);
-            if (visible.kind === "change") setActiveSectionId(visible.id);
-            if (visible.move) setActiveMoveId(visible.move.id);
+            setSelectedId(visible.file.id);
+            setActiveHunk(visible.section.hunkIndex);
+            setActiveSectionId(visible.section.id);
+            if (visible.section.move) setActiveMoveId(visible.section.move.id);
         }
-        to.scrollTop = mappedScrollTop(
-            from.scrollTop,
-            boxes(source),
-            boxes(source === "old" ? "new" : "old"),
+        setScrollTop(
+            to,
+            mappedScrollTop(
+                from.scrollTop,
+                boxes(source),
+                boxes(source === "old" ? "new" : "old"),
+            ),
         );
         measure();
-        requestAnimationFrame(() => {
-            lock = false;
-        });
     }
 
-    function goToSection(id: string, navigate = true) {
-        const section = sections().find((item) => item.id === id);
-        if (!section) return;
+    function goToSection(id: string, navigate = true, fileId = file()?.id) {
+        const entry = allSections().find(
+            ({ file: item, section }) =>
+                item.id === fileId && section.id === id,
+        );
+        if (!entry) return;
+        const section = entry.section;
+        setSelectedId(entry.file.id);
         setActiveHunk(section.hunkIndex);
         if (section.kind === "change") setActiveSectionId(section.id);
         if (section.move) setActiveMoveId(section.move.id);
-        const left = leftSections.get(id);
-        const right = rightSections.get(id);
-        const unified = unifiedSections.get(id);
+        const key = sectionKey(entry.file.id, id);
+        const left = leftSections.get(key);
+        const right = rightSections.get(key);
+        const unified = unifiedSections.get(key);
         if (leftScroller && left)
-            leftScroller.scrollTop = Math.max(0, left.offsetTop - 8);
+            setScrollTop(
+                leftScroller,
+                Math.max(0, elementTop(left, leftScroller) - 8),
+            );
         if (rightScroller && right)
-            rightScroller.scrollTop = Math.max(0, right.offsetTop - 8);
+            setScrollTop(
+                rightScroller,
+                Math.max(0, elementTop(right, rightScroller) - 8),
+            );
         if (unifiedScroller && unified)
-            unifiedScroller.scrollTop = Math.max(0, unified.offsetTop - 8);
+            setScrollTop(
+                unifiedScroller,
+                Math.max(0, elementTop(unified, unifiedScroller) - 8),
+            );
         measure();
         const reviewLine = [...section.left, ...section.right].find(
             (line) => line.reviewLine !== undefined,
@@ -303,29 +355,24 @@ export default function FlowDiff(props: FlowDiffProps) {
             props.onNavigateReviewLine?.(reviewLine);
     }
 
-    function goToHunk(index: number) {
-        const count = hunks().length;
-        if (!count) return;
-        const next = (index + count) % count;
-        setActiveHunk(next);
-        if (layout() === "unified") {
-            const target = unifiedHunks.get(next);
-            if (target && unifiedScroller)
-                unifiedScroller.scrollTop = target.offsetTop;
-        }
-        const section = sections().find(
-            (item) => item.hunkIndex === next && item.kind !== "gap",
-        );
-        if (section) goToSection(section.id, false);
-        const reviewLine = hunks()[next]?.reviewLine;
-        if (reviewLine !== undefined) props.onNavigateReviewLine?.(reviewLine);
+    function goToFile(id: string) {
+        if (!visibleFiles().some((item) => item.id === id)) return;
+        setSelectedId(id);
+        const scrollToHeading = (scroller?: HTMLElement) => {
+            const group = Array.from(
+                scroller?.querySelectorAll<HTMLElement>(".flow-file-group") ??
+                    [],
+            ).find((element) => element.dataset.fileId === id);
+            if (scroller && group)
+                setScrollTop(scroller, elementTop(group, scroller));
+        };
+        scrollToHeading(leftScroller);
+        scrollToHeading(rightScroller);
+        scrollToHeading(unifiedScroller);
+        measure();
     }
 
     function stepChange(direction: number) {
-        if (!props.review.custom) {
-            goToHunk(activeHunk() + direction);
-            return;
-        }
         const entries = changes();
         if (!entries.length) return;
         const current = activeChange();
@@ -340,7 +387,7 @@ export default function FlowDiff(props: FlowDiffProps) {
         setSelectedId(next.fileId);
         setActiveHunk(next.hunkIndex);
         setActiveSectionId(next.sectionId);
-        queueMicrotask(() => goToSection(next.sectionId));
+        queueMicrotask(() => goToSection(next.sectionId, true, next.fileId));
     }
 
     function changeReconstruction(next: Reconstruction) {
@@ -373,42 +420,46 @@ export default function FlowDiff(props: FlowDiffProps) {
     }
 
     function updateUnifiedActive() {
-        if (!unifiedScroller) return;
+        if (!unifiedScroller || consumeExpectedScroll(unifiedScroller)) return;
         const threshold = unifiedScroller.scrollTop + 8;
-        if (props.review.custom) {
-            const visible = [...sections()]
-                .reverse()
-                .filter((section) => section.kind === "change")
-                .find((section) => {
-                    const element = unifiedSections.get(section.id);
-                    return element && element.offsetTop <= threshold;
-                });
-            if (visible) {
-                setActiveSectionId(visible.id);
-                setActiveHunk(visible.hunkIndex);
-                if (visible.move) setActiveMoveId(visible.move.id);
-            }
-            return;
-        }
-        for (let index = hunks().length - 1; index >= 0; index--) {
-            const element = unifiedHunks.get(index);
-            if (element && element.offsetTop <= threshold) {
-                setActiveHunk(index);
-                return;
-            }
+        const visible = [...allSections()]
+            .reverse()
+            .filter(({ section }) => section.kind === "change")
+            .find(({ file: item, section }) => {
+                const element = unifiedSections.get(
+                    sectionKey(item.id, section.id),
+                );
+                return (
+                    element &&
+                    elementTop(element, unifiedScroller!) <= threshold
+                );
+            });
+        if (visible) {
+            setSelectedId(visible.file.id);
+            setActiveSectionId(visible.section.id);
+            setActiveHunk(visible.section.hunkIndex);
+            if (visible.section.move) setActiveMoveId(visible.section.move.id);
         }
     }
 
-    const sectionView = (section: FlowSection, side: Side) => {
+    const sectionView = (
+        section: FlowSection,
+        side: Side,
+        item: FlowDiffFile,
+    ) => {
         const lines = side === "old" ? section.left : section.right;
         const other = side === "old" ? section.right : section.left;
         return (
             <div
                 class={`flow-section ${section.kind}${section.move && side !== reconstruction() ? " flow-move-anchor" : ""}`}
                 data-section={section.id}
+                data-file-id={item.id}
+                data-active={
+                    item.id === file()?.id && section.id === activeSectionId()
+                }
                 ref={(element) =>
                     (side === "old" ? leftSections : rightSections).set(
-                        section.id,
+                        sectionKey(item.id, section.id),
                         element,
                     )
                 }
@@ -422,7 +473,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                 <For each={lines}>
                     {(line, index) => (
                         <FileLine
-                            file={file()!}
+                            file={item}
                             line={line}
                             counterpart={
                                 section.move && side !== reconstruction()
@@ -448,7 +499,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                     <MoveOverlay
                         move={section.move!}
                         reconstruction={reconstruction()}
-                        file={file()!}
+                        file={item}
                         syntax={props.syntax}
                         onOpenSource={props.onOpenSource}
                     />
@@ -474,10 +525,11 @@ export default function FlowDiff(props: FlowDiffProps) {
     const unifiedLine = (
         line: FlowDiffLine,
         side: Side,
+        item: FlowDiffFile,
         counterpart?: FlowDiffLine,
     ) => (
         <FileLine
-            file={file()!}
+            file={item}
             line={line}
             side={side}
             counterpart={counterpart}
@@ -485,6 +537,32 @@ export default function FlowDiff(props: FlowDiffProps) {
             onNavigateReviewLine={props.onNavigateReviewLine}
             onOpenSource={props.onOpenSource}
         />
+    );
+
+    const fileHeading = (item: FlowDiffFile) => (
+        <div class="flow-file-heading" data-file-id={item.id}>
+            <div>
+                <span class={`flow-status ${item.status}`}>{item.status}</span>
+                <strong>
+                    {item.label ? `${item.label} · ${item.path}` : item.path}
+                </strong>
+                <Show when={item.oldPath && item.oldPath !== item.path}>
+                    <span class="flow-renamed">from {item.oldPath}</span>
+                </Show>
+            </div>
+            <span class="flow-file-stats">
+                <b>+{item.additions}</b>
+                <i>−{item.deletions}</i>
+            </span>
+        </div>
+    );
+
+    const fileMetadata = (item: FlowDiffFile) => (
+        <Show when={item.metadata?.length}>
+            <div class="flow-file-metadata" aria-label="File metadata">
+                <For each={item.metadata}>{(line) => <code>{line}</code>}</For>
+            </div>
+        </Show>
     );
 
     onMount(() => {
@@ -509,9 +587,10 @@ export default function FlowDiff(props: FlowDiffProps) {
         const activeSection = sections().find(
             (section) => section.id === activeSectionId(),
         );
-        const lines = props.review.custom
-            ? [...(activeSection?.right ?? []), ...(activeSection?.left ?? [])]
-            : hunks()[activeHunk()]?.lines;
+        const lines = [
+            ...(activeSection?.right ?? []),
+            ...(activeSection?.left ?? []),
+        ];
         const line =
             lines?.find((item) => item.kind === "added") ??
             lines?.find((item) => item.kind === "removed") ??
@@ -539,6 +618,25 @@ export default function FlowDiff(props: FlowDiffProps) {
         )
             return;
         if (event.metaKey || event.ctrlKey || event.altKey) return;
+        if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+            event.preventDefault();
+            stepChange(event.key === "ArrowRight" ? 1 : -1);
+            return;
+        }
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            const scroller =
+                event.target instanceof Element
+                    ? event.target.closest<HTMLElement>(
+                          ".flow-scroll, .flow-unified-scroll",
+                      )
+                    : null;
+            const target =
+                scroller ??
+                (layout() === "unified" ? unifiedScroller : rightScroller);
+            target?.scrollBy?.({ top: event.key === "ArrowDown" ? 48 : -48 });
+            return;
+        }
         if (event.key === "g") {
             pendingGo = true;
             return;
@@ -568,7 +666,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                         (pendingBracket === "]" ? 1 : -1) +
                         visibleFiles().length) %
                     visibleFiles().length;
-                setSelectedId(visibleFiles()[next]?.id ?? "");
+                goToFile(visibleFiles()[next]?.id ?? "");
             }
             pendingBracket = "";
             return;
@@ -659,33 +757,6 @@ export default function FlowDiff(props: FlowDiffProps) {
                             </button>
                         </div>
                     </Show>
-                    <label class="flow-file-picker">
-                        <span>
-                            {effectiveView() === "guided" ? "Section" : "File"}
-                        </span>
-                        <select
-                            aria-label={
-                                effectiveView() === "guided"
-                                    ? "Guided section"
-                                    : "Changed file"
-                            }
-                            value={file()?.id ?? ""}
-                            onChange={(event) =>
-                                setSelectedId(event.currentTarget.value)
-                            }
-                        >
-                            <For each={visibleFiles()}>
-                                {(item) => (
-                                    <option value={item.id} title={item.label}>
-                                        {effectiveView() === "guided" &&
-                                        item.label
-                                            ? `${item.label} · ${item.path}`
-                                            : item.path}
-                                    </option>
-                                )}
-                            </For>
-                        </select>
-                    </label>
                     <span class="flow-file-count">
                         {visibleFiles().length}{" "}
                         {effectiveView() === "guided"
@@ -696,43 +767,31 @@ export default function FlowDiff(props: FlowDiffProps) {
                               ? "file"
                               : "files"}
                     </span>
+                    <span class="flow-navigation-hint">
+                        ↑↓ scroll · ←→ changes
+                    </span>
                     <div class="flow-hunk-nav" aria-label="Change navigation">
                         <button
                             type="button"
                             aria-label="Previous change"
-                            title="Previous change (Shift+N)"
-                            disabled={
-                                props.review.custom
-                                    ? !changes().length
-                                    : !hunks().length
-                            }
+                            title="Previous change (← or Shift+N)"
+                            disabled={!changes().length}
                             onClick={() => stepChange(-1)}
                         >
-                            ↑
+                            ←
                         </button>
                         <span>
-                            {props.review.custom
-                                ? activeChange() + 1
-                                : hunks().length
-                                  ? activeHunk() + 1
-                                  : 0}{" "}
-                            /{" "}
-                            {props.review.custom
-                                ? changes().length
-                                : hunks().length}
+                            {changes().length ? activeChange() + 1 : 0} /{" "}
+                            {changes().length}
                         </span>
                         <button
                             type="button"
                             aria-label="Next change"
-                            title="Next change (F7 or N)"
-                            disabled={
-                                props.review.custom
-                                    ? !changes().length
-                                    : !hunks().length
-                            }
+                            title="Next change (→ or F7)"
+                            disabled={!changes().length}
                             onClick={() => stepChange(1)}
                         >
-                            ↓
+                            →
                         </button>
                     </div>
                     <div
@@ -746,7 +805,13 @@ export default function FlowDiff(props: FlowDiffProps) {
                             onClick={() => {
                                 setLayout("split");
                                 props.onLayoutChange?.("split");
-                                queueMicrotask(measure);
+                                queueMicrotask(() =>
+                                    goToSection(
+                                        activeSectionId(),
+                                        false,
+                                        file()?.id,
+                                    ),
+                                );
                             }}
                         >
                             Side by side
@@ -757,6 +822,13 @@ export default function FlowDiff(props: FlowDiffProps) {
                             onClick={() => {
                                 setLayout("unified");
                                 props.onLayoutChange?.("unified");
+                                queueMicrotask(() =>
+                                    goToSection(
+                                        activeSectionId(),
+                                        false,
+                                        file()?.id,
+                                    ),
+                                );
                             }}
                         >
                             Unified
@@ -909,298 +981,340 @@ export default function FlowDiff(props: FlowDiffProps) {
                 </div>
             </Show>
             <Show
-                when={file()}
+                when={visibleFiles().length}
                 fallback={
                     <div class="flow-empty">
                         No changed files in this comparison.
                     </div>
                 }
             >
-                <div class="flow-file-heading">
-                    <div>
-                        <span class={`flow-status ${file()!.status}`}>
-                            {file()!.status}
-                        </span>
-                        <strong title={file()!.label || file()!.path}>
-                            {file()!.label
-                                ? `${file()!.label} · ${file()!.path}`
-                                : file()!.path}
-                        </strong>
-                        <Show
-                            when={
-                                file()!.oldPath &&
-                                file()!.oldPath !== file()!.path
-                            }
-                        >
-                            <span class="flow-renamed">
-                                from {file()!.oldPath}
-                            </span>
-                        </Show>
-                    </div>
-                    <span class="flow-file-stats">
-                        <b>+{file()!.additions}</b>
-                        <i>−{file()!.deletions}</i>
-                    </span>
-                </div>
-                <Show when={file()!.metadata?.length}>
-                    <div class="flow-file-metadata" aria-label="File metadata">
-                        <For each={file()!.metadata}>
-                            {(line) => <code>{line}</code>}
-                        </For>
-                    </div>
-                </Show>
                 <Show
-                    when={!file()!.binary}
+                    when={layout() === "split"}
                     fallback={
-                        <div class="flow-empty">
-                            Binary file — no text diff to display.
+                        <div
+                            class="flow-unified-scroll"
+                            ref={unifiedScroller}
+                            onScroll={updateUnifiedActive}
+                            role="region"
+                            aria-label="Unified changes"
+                            tabindex={0}
+                        >
+                            <For each={visibleFiles()}>
+                                {(item) => (
+                                    <div
+                                        class="flow-file-group"
+                                        data-file-id={item.id}
+                                    >
+                                        {fileHeading(item)}
+                                        {fileMetadata(item)}
+                                        <Show
+                                            when={!item.binary}
+                                            fallback={
+                                                <div class="flow-empty compact">
+                                                    Binary file — no text diff
+                                                    to display.
+                                                </div>
+                                            }
+                                        >
+                                            <Show
+                                                when={item.hunks.length}
+                                                fallback={
+                                                    <div class="flow-empty compact">
+                                                        No text changes in this
+                                                        file.
+                                                    </div>
+                                                }
+                                            >
+                                                <For each={fileSections(item)}>
+                                                    {(section) => (
+                                                        <div
+                                                            class={`flow-unified-section ${section.kind}`}
+                                                            data-file-id={
+                                                                item.id
+                                                            }
+                                                            data-section={
+                                                                section.id
+                                                            }
+                                                            data-active={
+                                                                item.id ===
+                                                                    file()
+                                                                        ?.id &&
+                                                                section.id ===
+                                                                    activeSectionId()
+                                                            }
+                                                            ref={(element) =>
+                                                                unifiedSections.set(
+                                                                    sectionKey(
+                                                                        item.id,
+                                                                        section.id,
+                                                                    ),
+                                                                    element,
+                                                                )
+                                                            }
+                                                        >
+                                                            <Show
+                                                                when={
+                                                                    section.kind ===
+                                                                    "gap"
+                                                                }
+                                                            >
+                                                                <div class="flow-gap">
+                                                                    <span>
+                                                                        ···
+                                                                    </span>
+                                                                    {
+                                                                        section.label
+                                                                    }
+                                                                </div>
+                                                            </Show>
+                                                            <Show
+                                                                when={
+                                                                    section.kind ===
+                                                                    "change"
+                                                                }
+                                                            >
+                                                                <div class="flow-unified-heading">
+                                                                    Change{" "}
+                                                                    {changes().findIndex(
+                                                                        (
+                                                                            change,
+                                                                        ) =>
+                                                                            change.fileId ===
+                                                                                item.id &&
+                                                                            change.sectionId ===
+                                                                                section.id,
+                                                                    ) + 1}
+                                                                </div>
+                                                            </Show>
+                                                            <For
+                                                                each={
+                                                                    section.kind ===
+                                                                    "context"
+                                                                        ? []
+                                                                        : section.left
+                                                                }
+                                                            >
+                                                                {(
+                                                                    line,
+                                                                    index,
+                                                                ) =>
+                                                                    unifiedLine(
+                                                                        line,
+                                                                        "old",
+                                                                        item,
+                                                                        section.move &&
+                                                                            reconstruction() ===
+                                                                                "new"
+                                                                            ? pairedMoveLine(
+                                                                                  section.move,
+                                                                                  line,
+                                                                                  "old",
+                                                                              )
+                                                                            : section
+                                                                                  .right[
+                                                                                  index()
+                                                                              ],
+                                                                    )
+                                                                }
+                                                            </For>
+                                                            <For
+                                                                each={
+                                                                    section.right
+                                                                }
+                                                            >
+                                                                {(
+                                                                    line,
+                                                                    index,
+                                                                ) =>
+                                                                    unifiedLine(
+                                                                        line,
+                                                                        "new",
+                                                                        item,
+                                                                        section.move &&
+                                                                            reconstruction() ===
+                                                                                "old"
+                                                                            ? pairedMoveLine(
+                                                                                  section.move,
+                                                                                  line,
+                                                                                  "new",
+                                                                              )
+                                                                            : section
+                                                                                  .left[
+                                                                                  index()
+                                                                              ],
+                                                                    )
+                                                                }
+                                                            </For>
+                                                            <Show
+                                                                when={
+                                                                    section.move &&
+                                                                    effectiveView() ===
+                                                                        "files"
+                                                                }
+                                                            >
+                                                                <MoveOverlay
+                                                                    move={
+                                                                        section.move!
+                                                                    }
+                                                                    reconstruction={reconstruction()}
+                                                                    file={item}
+                                                                    syntax={
+                                                                        props.syntax
+                                                                    }
+                                                                    onOpenSource={
+                                                                        props.onOpenSource
+                                                                    }
+                                                                />
+                                                            </Show>
+                                                        </div>
+                                                    )}
+                                                </For>
+                                            </Show>
+                                        </Show>
+                                    </div>
+                                )}
+                            </For>
                         </div>
                     }
                 >
-                    <Show
-                        when={hunks().length}
-                        fallback={
-                            <div class="flow-empty">
-                                No text changes in this file.
-                            </div>
-                        }
-                    >
-                        <Show
-                            when={layout() === "split"}
-                            fallback={
-                                <div
-                                    class="flow-unified-scroll"
-                                    ref={unifiedScroller}
-                                    onScroll={updateUnifiedActive}
-                                    role="region"
-                                    aria-label="Unified changes"
-                                    tabindex={0}
-                                >
-                                    <Show
-                                        when={props.review.custom}
-                                        fallback={
-                                            <For each={file()!.hunks}>
-                                                {(hunk, hunkIndex) => (
-                                                    <div
-                                                        class="flow-unified-hunk"
-                                                        ref={(element) =>
-                                                            unifiedHunks.set(
-                                                                hunkIndex(),
-                                                                element,
-                                                            )
-                                                        }
-                                                    >
-                                                        <div class="flow-unified-heading">
-                                                            <span>
-                                                                Change{" "}
-                                                                {hunkIndex() +
-                                                                    1}
-                                                            </span>
-                                                            <code>
-                                                                {hunk.header}
-                                                            </code>
-                                                        </div>
-                                                        <For each={hunk.lines}>
-                                                            {(line) =>
-                                                                unifiedLine(
-                                                                    line,
-                                                                    line.kind ===
-                                                                        "removed"
-                                                                        ? "old"
-                                                                        : "new",
-                                                                )
-                                                            }
-                                                        </For>
-                                                    </div>
-                                                )}
-                                            </For>
-                                        }
+                    <div class="flow-columns">
+                        <div class="flow-side-heading">
+                            <span>Before</span>
+                        </div>
+                        <div class="flow-bridge-heading" aria-hidden="true">
+                            ↝
+                        </div>
+                        <div class="flow-side-heading">
+                            <span>After</span>
+                        </div>
+                        <div
+                            class="flow-scroll old"
+                            ref={leftScroller}
+                            onScroll={() => syncScroll("old")}
+                            role="region"
+                            aria-label="Before changes"
+                            tabindex={0}
+                        >
+                            <For each={visibleFiles()}>
+                                {(item) => (
+                                    <div
+                                        class="flow-file-group"
+                                        data-file-id={item.id}
                                     >
-                                        <For each={sections()}>
-                                            {(section) => (
-                                                <div
-                                                    class={`flow-unified-section ${section.kind}`}
-                                                    data-section={section.id}
-                                                    ref={(element) =>
-                                                        unifiedSections.set(
-                                                            section.id,
-                                                            element,
+                                        {fileHeading(item)}
+                                        {fileMetadata(item)}
+                                        <Show
+                                            when={!item.binary}
+                                            fallback={
+                                                <div class="flow-empty compact">
+                                                    Binary file — no text diff
+                                                    to display.
+                                                </div>
+                                            }
+                                        >
+                                            <Show
+                                                when={item.hunks.length}
+                                                fallback={
+                                                    <div class="flow-empty compact">
+                                                        No text changes in this
+                                                        file.
+                                                    </div>
+                                                }
+                                            >
+                                                <For each={fileSections(item)}>
+                                                    {(section) =>
+                                                        sectionView(
+                                                            section,
+                                                            "old",
+                                                            item,
                                                         )
                                                     }
-                                                >
-                                                    <Show
-                                                        when={
-                                                            section.kind ===
-                                                            "gap"
-                                                        }
-                                                    >
-                                                        <div class="flow-gap">
-                                                            <span>···</span>
-                                                            {section.label}
-                                                        </div>
-                                                    </Show>
-                                                    <Show
-                                                        when={
-                                                            section.kind ===
-                                                            "change"
-                                                        }
-                                                    >
-                                                        <div class="flow-unified-heading">
-                                                            Change{" "}
-                                                            {changes().findIndex(
-                                                                (change) =>
-                                                                    change.fileId ===
-                                                                        file()
-                                                                            ?.id &&
-                                                                    change.sectionId ===
-                                                                        section.id,
-                                                            ) + 1}
-                                                        </div>
-                                                    </Show>
-                                                    <For
-                                                        each={
-                                                            section.kind ===
-                                                            "context"
-                                                                ? []
-                                                                : section.left
-                                                        }
-                                                    >
-                                                        {(line, index) =>
-                                                            unifiedLine(
-                                                                line,
-                                                                "old",
-                                                                section.move &&
-                                                                    reconstruction() ===
-                                                                        "new"
-                                                                    ? pairedMoveLine(
-                                                                          section.move,
-                                                                          line,
-                                                                          "old",
-                                                                      )
-                                                                    : section
-                                                                          .right[
-                                                                          index()
-                                                                      ],
-                                                            )
-                                                        }
-                                                    </For>
-                                                    <For each={section.right}>
-                                                        {(line, index) =>
-                                                            unifiedLine(
-                                                                line,
-                                                                "new",
-                                                                section.move &&
-                                                                    reconstruction() ===
-                                                                        "old"
-                                                                    ? pairedMoveLine(
-                                                                          section.move,
-                                                                          line,
-                                                                          "new",
-                                                                      )
-                                                                    : section
-                                                                          .left[
-                                                                          index()
-                                                                      ],
-                                                            )
-                                                        }
-                                                    </For>
-                                                    <Show
-                                                        when={
-                                                            section.move &&
-                                                            effectiveView() ===
-                                                                "files"
-                                                        }
-                                                    >
-                                                        <MoveOverlay
-                                                            move={section.move!}
-                                                            reconstruction={reconstruction()}
-                                                            file={file()!}
-                                                            syntax={
-                                                                props.syntax
-                                                            }
-                                                            onOpenSource={
-                                                                props.onOpenSource
-                                                            }
-                                                        />
-                                                    </Show>
-                                                </div>
-                                            )}
-                                        </For>
-                                    </Show>
-                                </div>
-                            }
+                                                </For>
+                                            </Show>
+                                        </Show>
+                                    </div>
+                                )}
+                            </For>
+                        </div>
+                        <div
+                            class="flow-bridge"
+                            ref={bridge}
+                            aria-hidden="true"
                         >
-                            <div class="flow-columns">
-                                <div class="flow-side-heading">
-                                    <span>Before</span>
-                                    <small>
-                                        {file()!.oldPath || file()!.path}
-                                    </small>
-                                </div>
-                                <div
-                                    class="flow-bridge-heading"
-                                    aria-hidden="true"
-                                >
-                                    ↝
-                                </div>
-                                <div class="flow-side-heading">
-                                    <span>After</span>
-                                    <small>{file()!.path}</small>
-                                </div>
-                                <div
-                                    class="flow-scroll old"
-                                    ref={leftScroller}
-                                    onScroll={() => syncScroll("old")}
-                                    role="region"
-                                    aria-label="Before changes"
-                                    tabindex={0}
-                                >
-                                    <For each={sections()}>
-                                        {(section) =>
-                                            sectionView(section, "old")
-                                        }
-                                    </For>
-                                </div>
-                                <div
-                                    class="flow-bridge"
-                                    ref={bridge}
-                                    aria-hidden="true"
-                                >
-                                    <svg
-                                        width="42"
-                                        height="100%"
-                                        preserveAspectRatio="none"
+                            <svg
+                                width="42"
+                                height="100%"
+                                preserveAspectRatio="none"
+                            >
+                                <For each={ribbons()}>
+                                    {(ribbon) => (
+                                        <path
+                                            class={`flow-ribbon ${ribbon.kind}`}
+                                            d={ribbon.path}
+                                            onClick={() => {
+                                                const [fileId, sectionId] =
+                                                    ribbon.id.split("\0");
+                                                goToSection(
+                                                    sectionId,
+                                                    true,
+                                                    fileId,
+                                                );
+                                            }}
+                                        />
+                                    )}
+                                </For>
+                            </svg>
+                        </div>
+                        <div
+                            class="flow-scroll new"
+                            ref={rightScroller}
+                            onScroll={() => syncScroll("new")}
+                            role="region"
+                            aria-label="After changes"
+                            tabindex={0}
+                        >
+                            <For each={visibleFiles()}>
+                                {(item) => (
+                                    <div
+                                        class="flow-file-group"
+                                        data-file-id={item.id}
                                     >
-                                        <For each={ribbons()}>
-                                            {(ribbon) => (
-                                                <path
-                                                    class={`flow-ribbon ${ribbon.kind}`}
-                                                    d={ribbon.path}
-                                                    onClick={() =>
-                                                        goToSection(ribbon.id)
+                                        {fileHeading(item)}
+                                        {fileMetadata(item)}
+                                        <Show
+                                            when={!item.binary}
+                                            fallback={
+                                                <div class="flow-empty compact">
+                                                    Binary file — no text diff
+                                                    to display.
+                                                </div>
+                                            }
+                                        >
+                                            <Show
+                                                when={item.hunks.length}
+                                                fallback={
+                                                    <div class="flow-empty compact">
+                                                        No text changes in this
+                                                        file.
+                                                    </div>
+                                                }
+                                            >
+                                                <For each={fileSections(item)}>
+                                                    {(section) =>
+                                                        sectionView(
+                                                            section,
+                                                            "new",
+                                                            item,
+                                                        )
                                                     }
-                                                />
-                                            )}
-                                        </For>
-                                    </svg>
-                                </div>
-                                <div
-                                    class="flow-scroll new"
-                                    ref={rightScroller}
-                                    onScroll={() => syncScroll("new")}
-                                    role="region"
-                                    aria-label="After changes"
-                                    tabindex={0}
-                                >
-                                    <For each={sections()}>
-                                        {(section) =>
-                                            sectionView(section, "new")
-                                        }
-                                    </For>
-                                </div>
-                            </div>
-                        </Show>
-                    </Show>
+                                                </For>
+                                            </Show>
+                                        </Show>
+                                    </div>
+                                )}
+                            </For>
+                        </div>
+                    </div>
                 </Show>
             </Show>
         </section>

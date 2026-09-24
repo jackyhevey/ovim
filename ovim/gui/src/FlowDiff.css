@@ -18,8 +18,7 @@
     outline-offset: -1px;
 }
 
-.flow-diff button,
-.flow-diff select {
+.flow-diff button {
     font: inherit;
 }
 
@@ -65,25 +64,10 @@
     min-width: 0;
 }
 
-.flow-file-picker {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
+.flow-navigation-hint {
     color: var(--text-secondary);
-    font-size: 11px;
-}
-
-.flow-file-picker select {
-    width: clamp(130px, 20vw, 280px);
-    min-width: 0;
-    height: 27px;
-    padding: 0 7px;
-    border: 1px solid var(--border);
-    border-radius: var(--radius-2);
-    background: var(--surface-1);
-    color: var(--text-primary);
-    font: 11px var(--editor-font);
+    font: 10px var(--editor-font);
+    white-space: nowrap;
 }
 
 .flow-file-count {
@@ -221,13 +205,30 @@
     align-items: center;
     gap: 9px;
     min-width: 0;
+    flex-wrap: wrap;
 }
 
 .flow-file-heading strong {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
     font: 600 11px var(--editor-font);
+}
+
+.flow-file-group {
+    border-bottom: 1px solid var(--border);
+}
+
+.flow-file-group > .flow-file-heading {
+    position: relative;
+    min-height: 42px;
+}
+
+.flow-file-group > .flow-empty.compact {
+    min-height: 64px;
+}
+
+.flow-section.change[data-active="true"],
+.flow-unified-section.change[data-active="true"] {
+    box-shadow: inset 3px 0 var(--accent);
 }
 
 .flow-file-metadata {
@@ -346,8 +347,7 @@
     grid-row: 2;
 }
 
-.flow-scroll .flow-section,
-.flow-unified-hunk {
+.flow-scroll .flow-section {
     position: relative;
     min-width: max-content;
 }
@@ -615,10 +615,6 @@
 .flow-unified-scroll {
     flex: 1;
 }
-.flow-unified-hunk {
-    margin-bottom: 10px;
-}
-
 .flow-unified-section {
     position: relative;
     min-width: max-content;
@@ -667,14 +663,10 @@
         justify-content: space-between;
         gap: 5px 8px;
     }
-    .flow-file-picker {
-        flex: 1 1 180px;
-        min-width: min(180px, 100%);
-    }
-    .flow-file-picker select {
-        width: 100%;
-    }
     .flow-file-count {
+        display: none;
+    }
+    .flow-navigation-hint {
         display: none;
     }
 }

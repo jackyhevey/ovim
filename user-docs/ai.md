@@ -867,15 +867,20 @@ available. Undoing back to the original comparison makes it usable again on
 refresh or reopening. In the terminal, `o` toggles the overlay (or returns from a
 saved view), and `O` opens the saved review.
 
-In the GUI, custom reviews first show ordinary file changes. When similar lines
+In the GUI, every file is part of one continuous diff. Scroll with the mouse or
+Up/Down arrows; use Left/Right arrows to jump to the previous or next change
+fragment, including changes in another file. The same navigation works in
+side-by-side and unified layouts. `n` / `N` and `]c` / `[c` also jump between
+changes; `]f` / `[f` jump to file or section boundaries.
+
+Custom reviews first show ordinary file changes. When similar lines
 are matched at different before and after locations, **Show moved-code matches**
 adds an embedded comparison with both paths and line ranges. A match can include
 edits; it does not mean the lines are identical. Switch between **Before context**
 and **After context** to choose which saved surrounding code appears beside the
-change. Scroll inside the comparison to inspect it. Use `n` / `N` or `]c` / `[c`
-to move between changes, and `]f` / `[f` to change files. Switch to
-**Guided** to step through the agent's pairings and explanations one section at
-a time, or **Files** to return to the continuous file view. The terminal shows paired sections with
+change. Scroll inside the comparison to inspect it. Switch to **Guided** to read
+all the agent's paired sections, explanations, and remaining changes in one
+continuous review, or **Files** to see changes in file order. The terminal shows paired sections with
 both source paths. Old-side navigation opens a labeled snapshot excerpt.
 Older saved reviews and large files may have limited surrounding context.
 

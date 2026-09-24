@@ -311,14 +311,190 @@ const movedReview: GuiDiffDocument = {
     ],
 };
 
+test("normal diffs scroll through all files and arrow keys step across fragments", async ({
+    page,
+}) => {
+    const document = structuredClone(review);
+    document.files = Array.from({ length: 4 }, (_, index) => ({
+        ...structuredClone(review.files[0]),
+        id: `file-${index}`,
+        path: `src/file-${index}.ts`,
+        additions: 1,
+        deletions: 1,
+        hunks: [
+            {
+                header: "@@ -1,51 +1,51 @@",
+                oldStart: 1,
+                oldCount: 51,
+                newStart: 1,
+                newCount: 51,
+                lines: [
+                    {
+                        kind: "removed" as const,
+                        oldLine: 1,
+                        text: `old fragment ${index}`,
+                    },
+                    {
+                        kind: "added" as const,
+                        newLine: 1,
+                        text: `new fragment ${index}`,
+                    },
+                    ...context(50, 2, 2),
+                ],
+            },
+        ],
+    }));
+    await setup(page, document);
+    await expect(page.getByRole("combobox")).toHaveCount(0);
+    const left = page.locator(".flow-scroll.old");
+    const right = page.locator(".flow-scroll.new");
+    await expect(left).toHaveCount(1);
+    await expect(right.locator(".flow-file-heading")).toHaveCount(4);
+    await expect(right).toContainText("new fragment 3");
+
+    await right.focus();
+    const before = await right.evaluate((element) => element.scrollTop);
+    await page.keyboard.press("ArrowDown");
+    await expect
+        .poll(() => right.evaluate((element) => element.scrollTop))
+        .toBeGreaterThan(before);
+    await page.keyboard.press("ArrowUp");
+    await expect
+        .poll(() => right.evaluate((element) => element.scrollTop))
+        .toBe(before);
+    await page.keyboard.press("ArrowRight");
+    await expect(
+        right.getByText("new fragment 1", { exact: true }),
+    ).toBeInViewport();
+    await page.keyboard.press("ArrowRight");
+    await expect(
+        right.getByText("new fragment 2", { exact: true }),
+    ).toBeInViewport();
+    await page.keyboard.press("ArrowLeft");
+    await expect(
+        right.getByText("new fragment 1", { exact: true }),
+    ).toBeInViewport();
+    await right.evaluate((element) => {
+        const context = element.querySelector<HTMLElement>(
+            '[data-file-id="file-2"].flow-file-group .flow-section.context',
+        )!;
+        element.scrollTop +=
+            context.getBoundingClientRect().top -
+            element.getBoundingClientRect().top +
+            200;
+    });
+    await expect(page.locator(".flow-hunk-nav span")).toHaveText("3 / 4");
+    await page.keyboard.press("ArrowRight");
+    await expect(
+        right.getByText("new fragment 3", { exact: true }),
+    ).toBeInViewport();
+    await right.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+    });
+    await expect(right.locator(".flow-file-heading").last()).toBeAttached();
+    await expect
+        .poll(() => left.evaluate((element) => element.scrollTop))
+        .toBeGreaterThan(3000);
+
+    await page.getByRole("button", { name: "Unified", exact: true }).click();
+    const unified = page.locator(".flow-unified-scroll");
+    await expect(unified.locator(".flow-file-heading")).toHaveCount(4);
+    await unified.focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(
+        unified.getByText("new fragment 2", { exact: true }),
+    ).toBeInViewport();
+    await page.screenshot({
+        path: test.info().outputPath("continuous-review-unified.png"),
+    });
+});
+
+test("custom review keeps every paired section and explanation in the scrollable diff", async ({
+    page,
+}) => {
+    const document = structuredClone(movedReview);
+    document.guidedFiles = Array.from({ length: 12 }, (_, index) => ({
+        ...structuredClone(movedReview.guidedFiles![0]),
+        id: `fragment-${index}`,
+        label: `Section ${index + 1}: Extract parsing and validate the incoming request before processing`,
+        path: "src/features/payments/processing/validation/request-parser.ts",
+    }));
+    await page.setViewportSize({ width: 760, height: 720 });
+    await setup(page, document);
+    await page.getByRole("button", { name: "Guided", exact: true }).click();
+    const right = page.locator(".flow-scroll.new");
+    await expect(page.getByRole("combobox")).toHaveCount(0);
+    await expect(right.locator(".flow-file-heading")).toHaveCount(12);
+    await right.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(
+        right.locator('[data-file-id="fragment-1"][data-section]').first(),
+    ).toBeInViewport();
+    await page.keyboard.press("ArrowLeft");
+    await expect(
+        right.locator('[data-file-id="fragment-0"][data-section]').first(),
+    ).toBeInViewport();
+    await right.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+    });
+    await expect(right.locator(".flow-file-heading").last()).toBeInViewport();
+    expect(
+        await page
+            .locator(".flow-diff")
+            .evaluate((element) => element.getBoundingClientRect().right),
+    ).toBeLessThanOrEqual(760);
+    await page.screenshot({
+        path: test.info().outputPath("continuous-custom-review-narrow.png"),
+    });
+});
+
+test("fragment navigation reaches separate edits within one hunk", async ({
+    page,
+}) => {
+    const document = structuredClone(review);
+    document.files = [document.files[0]];
+    document.files[0].hunks = [
+        {
+            header: "@@ -1,52 +1,52 @@",
+            oldStart: 1,
+            oldCount: 52,
+            newStart: 1,
+            newCount: 52,
+            lines: [
+                { kind: "removed", oldLine: 1, text: "first old edit" },
+                { kind: "added", newLine: 1, text: "first new edit" },
+                ...context(50, 2, 2),
+                { kind: "removed", oldLine: 52, text: "second old edit" },
+                { kind: "added", newLine: 52, text: "second new edit" },
+            ],
+        },
+    ];
+    await setup(page, document);
+    const right = page.locator(".flow-scroll.new");
+    await right.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(
+        right.getByText("second new edit", { exact: true }),
+    ).toBeInViewport();
+    await page.getByRole("button", { name: "Unified", exact: true }).click();
+    const unified = page.locator(".flow-unified-scroll");
+    await unified.focus();
+    await page.keyboard.press("ArrowLeft");
+    await expect(
+        unified.getByText("first new edit", { exact: true }),
+    ).toBeInViewport();
+});
+
 test("moved matches can be traced across files with independent context scrolling", async ({
     page,
 }) => {
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
     await setup(page, movedReview);
-    const picker = page.getByRole("combobox", { name: "Changed file" });
-    await expect(picker.locator("option")).toHaveCount(2);
+    await expect(page.getByRole("combobox")).toHaveCount(0);
+    await expect(
+        page.locator(".flow-scroll.new .flow-file-heading"),
+    ).toHaveCount(2);
     await expect(
         page
             .locator(".flow-scroll.new")
@@ -378,7 +554,6 @@ test("moved matches can be traced across files with independent context scrollin
     await scroller.focus();
     await page.keyboard.press("n");
     await page.getByRole("button", { name: "After context" }).click();
-    await expect(picker).toHaveValue("src/main.ts");
     await expect(
         page.locator(".flow-scroll.new .flow-move-overlay"),
     ).toBeVisible();
@@ -400,11 +575,6 @@ test("moved matches can be traced across files with independent context scrollin
         return card.left >= pane.left && card.right <= pane.right;
     });
     expect(overlayFits).toBe(true);
-    expect(
-        await picker.evaluate(
-            (element) => element.getBoundingClientRect().width,
-        ),
-    ).toBeGreaterThanOrEqual(140);
     await expect(overlay.locator(".flow-move-label")).toHaveAttribute(
         "title",
         /Parser moved and simplified/,
@@ -420,11 +590,10 @@ test("guided view keeps explanations visible and supports stepping through secti
 }) => {
     await setup(page, movedReview);
     await page.getByRole("button", { name: "Guided", exact: true }).click();
-    const picker = page.getByRole("combobox", { name: "Guided section" });
-    await expect(picker).toHaveValue("pair_0");
-    await expect(page.locator(".flow-file-heading strong")).toContainText(
-        "Parser moved and simplified",
-    );
+    await expect(page.getByRole("combobox")).toHaveCount(0);
+    await expect(
+        page.locator(".flow-scroll.new .flow-file-heading strong").first(),
+    ).toContainText("Parser moved and simplified");
     await expect(
         page
             .locator(".flow-scroll.old")
@@ -432,16 +601,16 @@ test("guided view keeps explanations visible and supports stepping through secti
     ).toBeVisible();
     // Clicking Guided leaves a native button focused; review shortcuts still work.
     await page.keyboard.press("n");
-    await expect(picker).toHaveValue("residual_0");
+    await expect(page.locator(".flow-hunk-nav span")).toContainText("2");
     await page.keyboard.press("N");
-    await expect(picker).toHaveValue("pair_0");
+    await expect(page.locator(".flow-hunk-nav span")).toContainText("1");
     await page.screenshot({
         path: test.info().outputPath("custom-diff-guided.png"),
     });
     await page.getByRole("button", { name: "Files", exact: true }).click();
     await expect(
-        page.getByRole("combobox", { name: "Changed file" }),
-    ).toHaveValue("src/parser.ts");
+        page.locator(".flow-scroll.new .flow-file-heading"),
+    ).toHaveCount(2);
     await expect(page.locator(".flow-move-overlay")).toHaveCount(0);
     await page.getByRole("button", { name: "Show moved-code matches" }).click();
     await expect(page.locator(".flow-move-overlay")).toBeVisible();
@@ -586,12 +755,26 @@ test("compact diff panes stay centered and draw unequal change connectors", asyn
         .getByRole("button", { name: "Side by side", exact: true })
         .click();
     await expect(page.locator(".flow-diff svg path").first()).toBeVisible();
-    await page
-        .getByRole("combobox", { name: "Changed file" })
-        .selectOption("assets/receipt.png");
+    await page.locator(".flow-scroll.new").evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+    });
     await expect(
-        page.getByText("Binary file — no text diff to display."),
-    ).toBeVisible();
+        page
+            .locator(".flow-scroll.new")
+            .getByText("Binary file — no text diff to display."),
+    ).toBeInViewport();
+    await expect(
+        page
+            .locator(".flow-scroll.old")
+            .getByText("Binary file — no text diff to display."),
+    ).toBeInViewport();
+    await right.focus();
+    await page.keyboard.press("]");
+    await page.keyboard.press("f");
+    await expect(right.locator(".flow-file-heading").last()).toBeInViewport();
+    await page.keyboard.press("[");
+    await page.keyboard.press("f");
+    await expect(right.locator(".flow-file-heading").first()).toBeInViewport();
     expect(errors).toEqual([]);
 });
 
