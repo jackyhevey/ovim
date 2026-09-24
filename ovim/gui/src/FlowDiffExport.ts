@@ -2,6 +2,7 @@ import {
     replacementParts,
     sectionsForFile,
     sectionsWithMoves,
+    moveLocation,
     type FlowDiffFile,
     type FlowDiffLine,
     type FlowDiffMove,
@@ -15,6 +16,7 @@ export type DiffExportView = "files" | "guided";
 export type DiffExportOptions = {
     view: DiffExportView;
     reconstruction: Reconstruction;
+    traceMoves?: boolean;
 };
 
 export type DiffExportPage = {
@@ -38,9 +40,6 @@ export class DiffExportTooLargeError extends Error {
 
 const PAGE_WIDTH = 1600;
 const PAGE_HEIGHT = 2000;
-const MAX_PAGES = 32;
-const MAX_PIXELS = PAGE_WIDTH * PAGE_HEIGHT * MAX_PAGES;
-const MAX_PNG_BYTES = 64 * 1024 * 1024;
 const MARGIN = 54;
 const COLUMN_GAP = 24;
 const COLUMN_WIDTH = (PAGE_WIDTH - MARGIN * 2 - COLUMN_GAP) / 2;
@@ -211,8 +210,7 @@ function moveRows(
     const side = reconstruction;
     const anchorSide = side === "old" ? "new" : "old";
     const anchor = move[anchorSide];
-    const relation = side === "old" ? "Moved from" : "Moved to";
-    const title = `${relation} ${endpoint.path}${move.label ? ` · ${move.label}` : ""}`;
+    const title = `Possible moved-code match · Before ${moveLocation(move.old)} → After ${moveLocation(move.new)}${move.label ? ` · ${move.label}` : ""}`;
     const rows: ExportRow[] = wrapWords(title, CODE_CHARS + 3).map((text) => ({
         kind: "overlayHeading",
         height: 30,
@@ -369,7 +367,7 @@ function fileBlock(
         return { file, header, rows };
     }
     const sections =
-        options.view === "files" && moves.length
+        options.view === "files" && options.traceMoves && moves.length
             ? sectionsWithMoves(file, moves, options.reconstruction)
             : sectionsForFile(file);
     if (!sections.length)
@@ -569,42 +567,6 @@ function assertGuidedCoverage(
     }
 }
 
-function assertInputBudget(
-    files: FlowDiffFile[],
-    moves: FlowDiffMove[],
-    reconstruction: Reconstruction,
-): void {
-    let units = 0;
-    const add = (text: string) => {
-        units += Math.max(1, Math.ceil(text.length / CODE_CHARS));
-        if (units > 5000)
-            throw new DiffExportTooLargeError(
-                "This review contains too much text for a bounded image export. Export a smaller review.",
-            );
-    };
-    for (const file of files) {
-        add(file.path);
-        if (file.label) add(file.label);
-        for (const metadata of file.metadata) add(metadata);
-        for (const hunk of file.hunks)
-            for (const line of hunk.lines) add(line.text);
-    }
-    for (const move of moves) {
-        const endpoint = move[reconstruction];
-        if (move.label) add(move.label);
-        for (const window of endpoint.contextWindows)
-            for (const line of window.lines) {
-                const number = lineNumber(line, reconstruction);
-                if (
-                    number !== undefined &&
-                    number >= endpoint.startLine - 3 &&
-                    number < endpoint.startLine + endpoint.lineCount + 3
-                )
-                    add(line.text);
-            }
-    }
-}
-
 /** Lay out every selected canonical line before creating any raster image. */
 export function buildDiffExportPages(
     review: FlowDiffReview,
@@ -614,8 +576,10 @@ export function buildDiffExportPages(
     if (!files)
         throw new Error("Guided review is unavailable for this comparison.");
     if (options.view === "guided") assertGuidedCoverage(review.files, files);
-    const moves = options.view === "files" ? review.moves || [] : [];
-    assertInputBudget(files, moves, options.reconstruction);
+    const moves =
+        options.view === "files" && options.traceMoves
+            ? review.moves || []
+            : [];
     const titleLines = wrapWords(review.title, 116);
     const bodyTop = 151 + titleLines.length * 24;
     if (bodyTop > PAGE_HEIGHT / 2)
@@ -681,10 +645,6 @@ export function buildDiffExportPages(
         current.rows.push({ row, y: current.bottom });
         current.bottom += row.height;
         current.file = block.file;
-        if (drafts.length > MAX_PAGES)
-            throw new DiffExportTooLargeError(
-                `This review needs more than ${MAX_PAGES} image pages. Export a smaller review.`,
-            );
     };
     for (const file of files) {
         const block = fileBlock(file, moves, options);
@@ -699,7 +659,8 @@ export function buildDiffExportPages(
         (sum, file) => sum + file.deletions,
         0,
     );
-    const coverage = `${review.files.length} canonical files · ${moves.length} moved segments · +${additions} −${deletions}`;
+    const moveCount = review.moves?.length ?? 0;
+    const coverage = `${review.files.length} files · ${moveCount} possible moved-code matches · +${additions} −${deletions}`;
     const scope = options.view === "guided" ? "Guided sections" : "Files";
     const stem = safeStem(review.title);
     const pageCount = drafts.length;
@@ -721,12 +682,18 @@ export function buildDiffExportPages(
                     `<text x="${MARGIN}" y="${height - footerSpace + 32 + lineIndex * 18}" fill="#607087" font-family="${MONO}" font-size="12">${xml(line)}</text>`,
             )
             .join("");
-        const reconstructionLabel =
-            options.reconstruction === "old" ? "BEFORE" : "AFTER";
+        const viewLabel =
+            options.view === "guided"
+                ? "GUIDED SECTIONS"
+                : options.traceMoves
+                  ? options.reconstruction === "old"
+                      ? "MOVED CODE · BEFORE CONTEXT"
+                      : "MOVED CODE · AFTER CONTEXT"
+                  : "FILE CHANGES";
         const svg = [
             `<svg xmlns="http://www.w3.org/2000/svg" width="${PAGE_WIDTH}" height="${height}" viewBox="0 0 ${PAGE_WIDTH} ${height}">`,
             `<rect width="${PAGE_WIDTH}" height="${height}" fill="#f8fafc"/>`,
-            `<text x="${MARGIN}" y="38" fill="#547ba6" font-family="${MONO}" font-size="14" font-weight="700">DIFF REVIEW · ${xml(scope.toUpperCase())} · ${reconstructionLabel} RECONSTRUCTION</text>`,
+            `<text x="${MARGIN}" y="38" fill="#547ba6" font-family="${MONO}" font-size="14" font-weight="700">DIFF REVIEW · ${xml(scope.toUpperCase())} · ${viewLabel}</text>`,
             header,
             `<text x="${MARGIN}" y="${bodyTop - 55}" fill="#607087" font-family="${MONO}" font-size="13">${xml(coverage)}</text>`,
             `<line x1="${MARGIN}" x2="${PAGE_WIDTH - MARGIN}" y1="${bodyTop - 44}" y2="${bodyTop - 44}" stroke="#d7dfe8"/>`,
@@ -745,13 +712,6 @@ export function buildDiffExportPages(
             height,
         };
     });
-    if (
-        pages.reduce((sum, page) => sum + page.width * page.height, 0) >
-        MAX_PIXELS
-    )
-        throw new DiffExportTooLargeError(
-            "This review exceeds the image export pixel budget. Export a smaller review.",
-        );
     return pages;
 }
 
@@ -759,16 +719,7 @@ export function buildDiffExportPages(
 export async function rasterizeDiffExportPages(
     pages: DiffExportPage[],
 ): Promise<RasterizedDiffExportPage[]> {
-    const pixels = pages.reduce(
-        (sum, page) => sum + page.width * page.height,
-        0,
-    );
-    if (pages.length > MAX_PAGES || pixels > MAX_PIXELS)
-        throw new DiffExportTooLargeError(
-            "This review exceeds the image export pixel budget.",
-        );
     const output: RasterizedDiffExportPage[] = [];
-    let totalBytes = 0;
     for (const page of pages) {
         const url = URL.createObjectURL(
             new Blob([page.svg], { type: "image/svg+xml;charset=utf-8" }),
@@ -784,29 +735,31 @@ export async function rasterizeDiffExportPages(
             const canvas = document.createElement("canvas");
             canvas.width = page.width;
             canvas.height = page.height;
-            const context = canvas.getContext("2d");
-            if (!context)
-                throw new Error("Image export is unavailable in this browser.");
-            context.drawImage(image, 0, 0);
-            const blob = await new Promise<Blob>((resolve, reject) =>
-                canvas.toBlob(
-                    (value) =>
-                        value
-                            ? resolve(value)
-                            : reject(
-                                  new Error(
-                                      `Could not encode ${page.filename}.`,
+            try {
+                const context = canvas.getContext("2d");
+                if (!context)
+                    throw new Error(
+                        "Image export is unavailable in this browser.",
+                    );
+                context.drawImage(image, 0, 0);
+                const blob = await new Promise<Blob>((resolve, reject) =>
+                    canvas.toBlob(
+                        (value) =>
+                            value
+                                ? resolve(value)
+                                : reject(
+                                      new Error(
+                                          `Could not encode ${page.filename}.`,
+                                      ),
                                   ),
-                              ),
-                    "image/png",
-                ),
-            );
-            totalBytes += blob.size;
-            if (totalBytes > MAX_PNG_BYTES)
-                throw new DiffExportTooLargeError(
-                    "The image export exceeds the 64 MiB download limit. Export a smaller review.",
+                        "image/png",
+                    ),
                 );
-            output.push({ filename: page.filename, blob });
+                output.push({ filename: page.filename, blob });
+            } finally {
+                canvas.width = 0;
+                canvas.height = 0;
+            }
         } finally {
             URL.revokeObjectURL(url);
         }

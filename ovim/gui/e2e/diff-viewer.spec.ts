@@ -311,7 +311,7 @@ const movedReview: GuiDiffDocument = {
     ],
 };
 
-test("moved segments stay with file changes, scroll independently and switch reconstruction side", async ({
+test("moved matches can be traced across files with independent context scrolling", async ({
     page,
 }) => {
     const errors: string[] = [];
@@ -326,19 +326,33 @@ test("moved segments stay with file changes, scroll independently and switch rec
                 exact: true,
             }),
     ).toBeVisible();
+    await expect(page.locator(".flow-move-overlay")).toHaveCount(0);
+    await page.screenshot({
+        path: test.info().outputPath("custom-diff-file-changes.png"),
+    });
+    await page.getByRole("button", { name: "Show moved-code matches" }).click();
     const overlay = page.getByRole("complementary", {
-        name: "Moved segment: Parser moved and simplified",
+        name: "Possible moved-code match: Parser moved and simplified",
     });
     await expect(
         page.locator(".flow-scroll.old").locator(".flow-move-overlay"),
     ).toBeVisible();
-    await expect(
-        overlay.getByText("src/main.ts", { exact: true }),
-    ).toBeVisible();
+    await expect(overlay.getByText(/src\/main\.ts:\d+/)).toBeVisible();
     const scroller = overlay.locator(".flow-move-scroll");
     await expect
         .poll(() => scroller.evaluate((element) => element.scrollTop))
         .toBeGreaterThan(0);
+    await expect
+        .poll(() =>
+            scroller.evaluate((element) => {
+                const first = element.querySelector(".flow-move-paired");
+                return (
+                    first!.getBoundingClientRect().top -
+                    element.getBoundingClientRect().top
+                );
+            }),
+        )
+        .toBeGreaterThanOrEqual(0);
     await page.screenshot({
         path: test.info().outputPath("custom-diff-overlay-initial.png"),
     });
@@ -363,14 +377,12 @@ test("moved segments stay with file changes, scroll independently and switch rec
     });
     await scroller.focus();
     await page.keyboard.press("n");
-    await page.getByRole("button", { name: "After", exact: true }).click();
+    await page.getByRole("button", { name: "After context" }).click();
     await expect(picker).toHaveValue("src/main.ts");
     await expect(
         page.locator(".flow-scroll.new .flow-move-overlay"),
     ).toBeVisible();
-    await expect(
-        overlay.getByText("src/parser.ts", { exact: true }),
-    ).toBeVisible();
+    await expect(overlay.getByText(/src\/parser\.ts:\d+/)).toBeVisible();
     await page.screenshot({
         path: test.info().outputPath("custom-diff-overlay-new.png"),
     });
@@ -393,7 +405,7 @@ test("moved segments stay with file changes, scroll independently and switch rec
             (element) => element.getBoundingClientRect().width,
         ),
     ).toBeGreaterThanOrEqual(140);
-    await expect(overlay.locator(".flow-move-heading")).toHaveAttribute(
+    await expect(overlay.locator(".flow-move-label")).toHaveAttribute(
         "title",
         /Parser moved and simplified/,
     );
@@ -430,6 +442,8 @@ test("guided view keeps explanations visible and supports stepping through secti
     await expect(
         page.getByRole("combobox", { name: "Changed file" }),
     ).toHaveValue("src/parser.ts");
+    await expect(page.locator(".flow-move-overlay")).toHaveCount(0);
+    await page.getByRole("button", { name: "Show moved-code matches" }).click();
     await expect(page.locator(".flow-move-overlay")).toBeVisible();
 });
 
@@ -493,6 +507,8 @@ test("stale restructuring can be recovered through native diff actions", async (
     });
     await expect(page.locator(".flow-move-overlay")).toHaveCount(0);
     await page.getByRole("button", { name: "View saved review" }).click();
+    await expect(page.locator(".flow-move-overlay")).toHaveCount(0);
+    await page.getByRole("button", { name: "Show moved-code matches" }).click();
     await expect(page.locator(".flow-move-overlay")).toBeVisible();
     await expect(
         page.getByRole("button", { name: "Return to live diff" }),
@@ -642,7 +658,12 @@ test("native diff controls carry the pane and buffer identity", async ({
     const scrollBeforeTerminal = await page
         .locator(".flow-scroll.old")
         .evaluate((element) => element.scrollTop);
-    await page.keyboard.press("Control+Backquote");
+    const terminalShortcut = await page.evaluate(() =>
+        /Mac|iPhone|iPad/.test(navigator.platform)
+            ? "Meta+Shift+T"
+            : "Control+Shift+T",
+    );
+    await page.keyboard.press(terminalShortcut);
     const shellInput = page.locator(".terminal-panel .xterm-helper-textarea");
     await expect(shellInput).toBeFocused();
     const toolbarFits = await page
@@ -682,7 +703,7 @@ test("native diff controls carry the pane and buffer identity", async ({
     await page.screenshot({
         path: test.info().outputPath("diff-with-terminal.png"),
     });
-    await page.keyboard.press("Control+Backquote");
+    await page.keyboard.press(terminalShortcut);
     await expect(page.locator(".flow-diff")).toBeFocused();
     expect(
         await page
@@ -769,18 +790,19 @@ for (const view of ["Files", "Guided"]) {
 test("exports long reviews as one ZIP containing every numbered PNG page", async ({
     page,
 }, testInfo) => {
+    test.setTimeout(120_000);
     const longReview = structuredClone(review);
     const file = longReview.files[0];
-    file.additions = 300;
+    file.additions = 2500;
     file.deletions = 0;
     file.hunks = [
         {
             oldStart: 0,
             oldCount: 0,
             newStart: 1,
-            newCount: 300,
-            header: "@@ -0,0 +1,300 @@",
-            lines: Array.from({ length: 300 }, (_, i) => ({
+            newCount: 2500,
+            header: "@@ -0,0 +1,2500 @@",
+            lines: Array.from({ length: 2500 }, (_, i) => ({
                 kind: "added",
                 text: `export const value${i} = ${i};`,
                 newLine: i + 1,
@@ -797,7 +819,7 @@ test("exports long reviews as one ZIP containing every numbered PNG page", async
     const destination = testInfo.outputPath("review.zip");
     await download.saveAs(destination);
     const entries = Object.entries(unzipSync(await readFile(destination)));
-    expect(entries.length).toBeGreaterThan(4);
+    expect(entries.length).toBeGreaterThan(32);
     for (const [name, bytes] of entries) {
         expect(name).toMatch(/-\d+-of-\d+\.png$/);
         expect([...bytes.subarray(0, 8)]).toEqual([

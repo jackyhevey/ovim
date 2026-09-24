@@ -6,6 +6,7 @@ import type {
     FlowDiffMove,
     Reconstruction,
 } from "./FlowDiffModel";
+import { moveLocation } from "./FlowDiffModel";
 
 export function pairedMoveLine(
     move: FlowDiffMove,
@@ -48,29 +49,52 @@ export function MoveOverlay(props: {
         queueMicrotask(() => {
             const pairedLine =
                 scroller?.querySelector<HTMLElement>(".flow-move-paired");
-            if (scroller && pairedLine)
-                scroller.scrollTop = Math.max(0, pairedLine.offsetTop - 44);
+            if (scroller && pairedLine) {
+                const position =
+                    pairedLine.getBoundingClientRect().top -
+                    scroller.getBoundingClientRect().top;
+                scroller.scrollTop = Math.max(
+                    0,
+                    scroller.scrollTop + position - 22,
+                );
+            }
         });
     });
 
     return (
         <aside
             class="flow-move-overlay"
-            aria-label={`Moved segment: ${props.move.label || props.move.id}`}
+            aria-label={`Possible moved-code match: ${props.move.label || props.move.id}`}
             style={{
                 "--flow-move-height": `${Math.min(12, Math.max(5, endpoint().lineCount + 3)) * 22}px`,
             }}
         >
-            <div class="flow-move-heading" title={props.move.label}>
-                <span>
-                    {props.reconstruction === "old" ? "Moved from" : "Moved to"}
-                </span>
-                <code title={endpoint().path}>{endpoint().path}</code>
+            <div class="flow-move-heading">
+                <strong>Possible match</strong>
                 <Show when={props.move.label}>
                     <span class="flow-move-label" title={props.move.label}>
                         {props.move.label}
                     </span>
                 </Show>
+            </div>
+            <div class="flow-move-route">
+                <span>
+                    Before{" "}
+                    <code title={moveLocation(props.move.old)}>
+                        {moveLocation(props.move.old)}
+                    </code>
+                </span>
+                <span aria-hidden="true">→</span>
+                <span>
+                    After{" "}
+                    <code title={moveLocation(props.move.new)}>
+                        {moveLocation(props.move.new)}
+                    </code>
+                </span>
+            </div>
+            <div class="flow-move-context-label">
+                {props.reconstruction === "old" ? "Before" : "After"} context ·
+                matched lines highlighted
             </div>
             <div
                 class="flow-move-scroll"

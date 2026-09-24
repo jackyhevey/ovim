@@ -113,9 +113,17 @@ describe("diff image export", () => {
                 },
             },
         ];
+        const plainSvg = buildDiffExportPages(document, {
+            view: "files",
+            reconstruction: "old",
+        })[0].svg;
+        expect(plainSvg).toContain("FILE CHANGES");
+        expect(plainSvg).not.toContain("SOURCE 10");
+
         const pages = buildDiffExportPages(document, {
             view: "files",
             reconstruction: "old",
+            traceMoves: true,
         });
         expect(pages).toHaveLength(1);
         expect(pages[0].height).toBeLessThan(2000);
@@ -141,6 +149,7 @@ describe("diff image export", () => {
         const newSvg = buildDiffExportPages(document, {
             view: "files",
             reconstruction: "new",
+            traceMoves: true,
         })[0].svg;
         expect(textY(newSvg, "DEST 3")).toBe(
             textY(newSvg, "DELETE &lt;one&gt;"),
@@ -229,39 +238,29 @@ describe("diff image export", () => {
         expect(pages[1].svg).toContain("continued");
     });
 
-    it("stops an excessive review before allocating canvases", () => {
+    it("exports reviews beyond the former page and text limits", () => {
         const source = file("src/huge.ts");
-        source.additions = 3000;
+        source.additions = 5100;
         source.hunks = [
             {
-                header: "@@ -0,0 +1,3000 @@",
+                header: "@@ -0,0 +1,5100 @@",
                 oldStart: 0,
                 oldCount: 0,
                 newStart: 1,
-                newCount: 3000,
-                lines: Array.from({ length: 3000 }, (_, index) => ({
+                newCount: 5100,
+                lines: Array.from({ length: 5100 }, (_, index) => ({
                     kind: "added" as const,
                     text: `LINE-${index + 1}`,
                     newLine: index + 1,
                 })),
             },
         ];
-        expect(() =>
-            buildDiffExportPages(review([source]), {
-                view: "files",
-                reconstruction: "old",
-            }),
-        ).toThrow(DiffExportTooLargeError);
-
-        source.hunks[0].lines = [
-            { kind: "added", text: "x".repeat(5001 * 65), newLine: 1 },
-        ];
-        expect(() =>
-            buildDiffExportPages(review([source]), {
-                view: "files",
-                reconstruction: "old",
-            }),
-        ).toThrow(/too much text/);
+        const pages = buildDiffExportPages(review([source]), {
+            view: "files",
+            reconstruction: "old",
+        });
+        expect(pages.length).toBeGreaterThan(32);
+        expect(pages.map((page) => page.svg).join(" ")).toContain("LINE-5100");
     });
 
     it("wraps Unicode code points without losing characters", () => {

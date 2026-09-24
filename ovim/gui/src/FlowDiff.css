@@ -107,6 +107,27 @@
     white-space: nowrap;
 }
 
+.flow-move-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.flow-move-explanation {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 9px;
+    padding: 7px 12px;
+    border-bottom: 1px solid var(--border);
+    background: color-mix(in srgb, var(--info) 7%, var(--canvas));
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.flow-move-explanation strong {
+    color: var(--info);
+}
+
 .flow-hunk-nav button,
 .flow-view-switch button,
 .flow-reconstruction-switch button,
@@ -463,6 +484,32 @@
     background: color-mix(in srgb, var(--info) 10%, var(--surface-1));
     color: var(--info);
     font: 650 10px var(--ui-font);
+}
+
+.flow-move-route {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 8px;
+    padding: 6px 9px 3px;
+    color: var(--text-secondary);
+    font-size: 10px;
+}
+
+.flow-move-route span {
+    min-width: 0;
+}
+
+.flow-move-route code {
+    color: var(--text-primary);
+    font: 10px var(--editor-font);
+    overflow-wrap: anywhere;
+}
+
+.flow-move-context-label {
+    padding: 3px 9px 5px;
+    color: var(--text-secondary);
+    font-size: 10px;
 }
 
 .flow-move-heading code {

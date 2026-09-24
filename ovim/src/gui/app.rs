@@ -30,8 +30,6 @@ async fn gui_diff_action(
     bridge.diff_action(pane, buffer_id, action).await
 }
 
-const MAX_DIFF_EXPORT_BYTES: usize = 64 * 1024 * 1024;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DiffExportKind {
     Png,
@@ -75,8 +73,8 @@ fn validate_diff_export(filename: &str, data: &[u8]) -> Result<DiffExportKind, S
         Some("zip") => DiffExportKind::Zip,
         _ => return Err("Diff export must be a PNG or ZIP file".to_string()),
     };
-    if data.is_empty() || data.len() > MAX_DIFF_EXPORT_BYTES {
-        return Err("Diff export must be no larger than 64 MiB".to_string());
+    if data.is_empty() {
+        return Err("Diff export must not be empty".to_string());
     }
     let valid_signature = match kind {
         DiffExportKind::Png => data.starts_with(b"\x89PNG\r\n\x1a\n"),
@@ -119,8 +117,7 @@ fn save_diff_export_at(path: &Path, data: &[u8], kind: DiffExportKind) -> Result
 #[tauri::command]
 async fn gui_save_diff_export(request: Request<'_>, window: Window) -> Result<bool, String> {
     let data = match request.body() {
-        InvokeBody::Raw(data) if data.len() <= MAX_DIFF_EXPORT_BYTES => data.clone(),
-        InvokeBody::Raw(_) => return Err("Diff export exceeds the 64 MiB limit".to_string()),
+        InvokeBody::Raw(data) => data.clone(),
         InvokeBody::Json(_) => {
             return Err("Diff export requires a binary request body".to_string());
         }
@@ -787,7 +784,17 @@ mod tests {
         }
         assert!(validate_diff_export("review.zip", png).is_err());
         assert!(validate_diff_export("review.png", zip).is_err());
-        assert!(validate_diff_export("review.png", &vec![0; 64 * 1024 * 1024 + 1]).is_err());
+        assert!(validate_diff_export("review.png", &[]).is_err());
+    }
+
+    #[test]
+    fn diff_export_accepts_content_above_the_previous_size_limit() {
+        let mut data = vec![0; 64 * 1024 * 1024 + 1];
+        data[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            validate_diff_export("review.png", &data).unwrap(),
+            DiffExportKind::Png
+        );
     }
 
     #[test]

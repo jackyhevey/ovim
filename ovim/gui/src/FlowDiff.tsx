@@ -64,6 +64,7 @@ export default function FlowDiff(props: FlowDiffProps) {
     const [activeSectionId, setActiveSectionId] = createSignal("");
     const [reconstruction, setReconstruction] =
         createSignal<Reconstruction>("old");
+    const [traceMoves, setTraceMoves] = createSignal(false);
     const [activeMoveId, setActiveMoveId] = createSignal("");
     const effectiveView = createMemo<"files" | "guided">(() =>
         view() === "guided" &&
@@ -79,6 +80,7 @@ export default function FlowDiff(props: FlowDiffProps) {
         const options = {
             view: effectiveView(),
             reconstruction: reconstruction(),
+            traceMoves: traceMoves(),
         };
         setExporting(true);
         setExportMessage("");
@@ -133,6 +135,7 @@ export default function FlowDiff(props: FlowDiffProps) {
         file()
             ? props.review.custom &&
               effectiveView() === "files" &&
+              traceMoves() &&
               props.review.moves?.length
                 ? sectionsWithMoves(
                       file()!,
@@ -145,7 +148,9 @@ export default function FlowDiff(props: FlowDiffProps) {
     const hunks = createMemo(() => file()?.hunks ?? []);
     const changes = createMemo(() =>
         visibleFiles().flatMap((item) =>
-            (props.review.moves?.length && effectiveView() === "files"
+            (traceMoves() &&
+            props.review.moves?.length &&
+            effectiveView() === "files"
                 ? sectionsWithMoves(item, props.review.moves, reconstruction())
                 : sectionsForFile(item)
             )
@@ -730,37 +735,6 @@ export default function FlowDiff(props: FlowDiffProps) {
                             ↓
                         </button>
                     </div>
-                    <Show
-                        when={
-                            props.review.custom &&
-                            effectiveView() === "files" &&
-                            props.review.moves?.length
-                        }
-                    >
-                        <div
-                            class="flow-reconstruction-switch"
-                            role="group"
-                            aria-label="Moved segment reconstruction"
-                        >
-                            <span class="flow-reconstruction-label">
-                                Reconstruct
-                            </span>
-                            <button
-                                type="button"
-                                aria-pressed={reconstruction() === "old"}
-                                onClick={() => changeReconstruction("old")}
-                            >
-                                Before
-                            </button>
-                            <button
-                                type="button"
-                                aria-pressed={reconstruction() === "new"}
-                                onClick={() => changeReconstruction("new")}
-                            >
-                                After
-                            </button>
-                        </div>
-                    </Show>
                     <div
                         class="flow-layout-switch"
                         role="group"
@@ -868,6 +842,70 @@ export default function FlowDiff(props: FlowDiffProps) {
                                 ? "Remove overlay"
                                 : "Apply overlay"}
                     </button>
+                </div>
+            </Show>
+            <Show
+                when={
+                    props.review.custom &&
+                    effectiveView() === "files" &&
+                    props.review.moves?.length
+                }
+            >
+                <div class="flow-move-explanation">
+                    <strong>Possible moved code</strong>
+                    <span>
+                        Similar lines were matched between before and after
+                        locations. They may also have been edited.{" "}
+                        {traceMoves()
+                            ? reconstruction() === "old"
+                                ? "Before context appears beside the added lines."
+                                : "After context appears beside the removed lines."
+                            : "Show moved-code matches to compare their locations."}
+                    </span>
+                    <div class="flow-move-controls">
+                        <div
+                            class="flow-view-switch"
+                            role="group"
+                            aria-label="Moved code view"
+                        >
+                            <button
+                                type="button"
+                                aria-pressed={!traceMoves()}
+                                onClick={() => setTraceMoves(false)}
+                            >
+                                File changes
+                            </button>
+                            <button
+                                type="button"
+                                aria-pressed={traceMoves()}
+                                onClick={() => setTraceMoves(true)}
+                            >
+                                Show moved-code matches
+                            </button>
+                        </div>
+                        <Show when={traceMoves()}>
+                            <div
+                                class="flow-reconstruction-switch"
+                                role="group"
+                                aria-label="Moved code context"
+                            >
+                                <button
+                                    type="button"
+                                    aria-pressed={reconstruction() === "old"}
+                                    onClick={() => changeReconstruction("old")}
+                                >
+                                    Before context
+                                </button>
+                                <button
+                                    type="button"
+                                    aria-pressed={reconstruction() === "new"}
+                                    onClick={() => changeReconstruction("new")}
+                                >
+                                    After context
+                                </button>
+                            </div>
+                        </Show>
+                    </div>
                 </div>
             </Show>
             <Show

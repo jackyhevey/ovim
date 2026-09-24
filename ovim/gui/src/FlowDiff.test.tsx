@@ -324,16 +324,27 @@ describe("FlowDiff", () => {
         expect(result.getByText("2 files")).toBeTruthy();
         fireEvent.change(picker, { target: { value: "src/parser.ts" } });
         expect(result.getByText("new mode 100644")).toBeTruthy();
-        expect(result.getByText("Moved from")).toBeTruthy();
+        expect(result.getByText("Possible moved code")).toBeTruthy();
+        expect(
+            result.queryByRole("region", { name: "src/main.ts context" }),
+        ).toBeNull();
+        fireEvent.click(
+            result.getByRole("button", { name: "Show moved-code matches" }),
+        );
+        expect(result.getByText("Possible match")).toBeTruthy();
+        expect(result.getByText("src/main.ts:20")).toBeTruthy();
+        expect(result.getByText("src/parser.ts:3")).toBeTruthy();
         expect(
             result.getByRole("region", { name: "src/main.ts context" }),
         ).toBeTruthy();
         fireEvent.click(
             result.getByRole("button", { name: "Before line 20, open source" }),
         );
-        fireEvent.click(result.getByRole("button", { name: "After" }));
+        fireEvent.click(result.getByRole("button", { name: "After context" }));
         expect((picker as HTMLSelectElement).value).toBe("src/main.ts");
-        expect(result.getByText("Moved to")).toBeTruthy();
+        expect(
+            result.getByText("After context · matched lines highlighted"),
+        ).toBeTruthy();
         fireEvent.click(
             result.getByRole("button", { name: "After line 3, open source" }),
         );

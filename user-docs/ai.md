@@ -867,12 +867,13 @@ available. Undoing back to the original comparison makes it usable again on
 refresh or reopening. In the terminal, `o` toggles the overlay (or returns from a
 saved view), and `O` opens the saved review.
 
-In the GUI, custom reviews keep changes together by file. Moved code appears in
-an embedded comparison with its source path; scroll inside it to inspect the saved
-surrounding code. Switch the reconstruction between **Before** and **After** to choose
-which side brings in the moved code. Use `n` / `N` or `]c` / `[c` to move between
-changes, and `]f` / `[f` to change files. Move descriptions appear beside their
-source paths; hover over the heading to read the full description. Switch to
+In the GUI, custom reviews first show ordinary file changes. When similar lines
+are matched at different before and after locations, **Show moved-code matches**
+adds an embedded comparison with both paths and line ranges. A match can include
+edits; it does not mean the lines are identical. Switch between **Before context**
+and **After context** to choose which saved surrounding code appears beside the
+change. Scroll inside the comparison to inspect it. Use `n` / `N` or `]c` / `[c`
+to move between changes, and `]f` / `[f` to change files. Switch to
 **Guided** to step through the agent's pairings and explanations one section at
 a time, or **Files** to return to the continuous file view. The terminal shows paired sections with
 both source paths. Old-side navigation opens a labeled snapshot excerpt.
@@ -885,7 +886,7 @@ source paths, line numbers, change totals, and the comparison base when availabl
 Moved ranges appear with nearby saved context. The export records the selected
 review, so an outdated saved review retains its original contents. It helps reviewers
 inspect correspondence during a refactor; it does not prove semantic equivalence.
-Exports exceeding 32 pages or 64 MiB stop with an error instead of omitting changes.
+Large exports may take longer and depend on available browser memory.
 
 Agents should use the block IDs returned by `read_diff`, rather than generating
 a replacement patch. Finish edits before reading the diff; after further edits,

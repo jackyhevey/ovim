@@ -7,6 +7,11 @@ export type FlowDiffFile = GuiDiffDocument["files"][number];
 export type FlowDiffMove = NonNullable<GuiDiffDocument["moves"]>[number];
 export type Reconstruction = "old" | "new";
 
+export function moveLocation(endpoint: FlowDiffMove["old"]): string {
+    const end = endpoint.startLine + endpoint.lineCount - 1;
+    return `${endpoint.path}:${endpoint.startLine}${end > endpoint.startLine ? `–${end}` : ""}`;
+}
+
 export type FlowSection = {
     id: string;
     kind: "context" | "change" | "gap";
