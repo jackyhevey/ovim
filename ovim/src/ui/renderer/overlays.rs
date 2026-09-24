@@ -1,5 +1,6 @@
 use crate::editor::Editor;
 use crate::syntax::{Theme, UiGroup};
+use ovim_core::editor::ai_chat_input::{wrap_chat_input_rows, wrap_chat_input_rows_with_widths};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -784,18 +785,56 @@ pub fn render_ai_code_explanation(frame: &mut Frame, editor: &mut Editor) {
         .saturating_sub(2)
         .max(layout_height)
         .min(buffer.height);
-    let discussion_row_limit = height_limit.saturating_sub(layout_height) as usize;
-    let answer_row_limit = discussion_row_limit.saturating_sub(1).max(1);
-    let discussion = walkthrough_discussion(
+    let mut teaching_lines = walkthrough_text_lines(
+        &teaching_text,
+        inner_width,
+        editor.indent_options().tab_width,
+        Style::default().fg(MODAL_COLORS.text).bg(MODAL_COLORS.bg),
+    );
+    // Estimate the hint height first; narrow cards may need several hint rows.
+    let discussion_row_limit = (height_limit as usize)
+        .saturating_sub(teaching_lines.len())
+        .saturating_sub(4);
+    let mut discussion = walkthrough_discussion(
         &view.discussion,
         inner_width,
-        answer_row_limit,
+        discussion_row_limit,
+        view.answer_scroll,
+    );
+    let hint_rows = wrap_chat_input_rows(&discussion.hints, inner_width, 4).len();
+    let minimum_discussion_rows = usize::from(!discussion.lines.is_empty());
+    let teaching_limit =
+        (height_limit as usize).saturating_sub(2 + hint_rows + minimum_discussion_rows);
+    teaching_lines.truncate(teaching_limit);
+    let available_rows =
+        (height_limit as usize).saturating_sub(teaching_lines.len() + 2 + hint_rows);
+    let spacer_rows = usize::from(available_rows > minimum_discussion_rows);
+    let discussion_row_limit = (height_limit as usize)
+        .saturating_sub(teaching_lines.len())
+        .saturating_sub(2 + spacer_rows + hint_rows);
+    discussion = walkthrough_discussion(
+        &view.discussion,
+        inner_width,
+        discussion_row_limit,
         view.answer_scroll,
     );
     editor.render_cache.code_explanation_answer_max_scroll = discussion.answer_max_scroll;
     let discussion_rows = discussion.lines.len() as u16;
+    let hint_lines = walkthrough_text_lines(
+        &discussion.hints,
+        inner_width,
+        4,
+        Style::default()
+            .fg(MODAL_COLORS.action)
+            .bg(MODAL_COLORS.bg)
+            .add_modifier(Modifier::BOLD),
+    );
+    let content_height = teaching_lines
+        .len()
+        .saturating_add(discussion_rows as usize)
+        .saturating_add(2 + spacer_rows + hint_lines.len());
     let height = layout_height
-        .saturating_add(discussion_rows)
+        .max(content_height.min(u16::MAX as usize) as u16)
         .min(height_limit);
     let y = if concept_page {
         buffer.y + buffer.height.saturating_sub(height) / 2
@@ -811,21 +850,12 @@ pub fn render_ai_code_explanation(frame: &mut Frame, editor: &mut Editor) {
         layout_width,
         height,
     );
-    let mut content = vec![Line::from(Span::styled(
-        teaching_text,
-        Style::default().fg(MODAL_COLORS.text).bg(MODAL_COLORS.bg),
-    ))];
+    let mut content = teaching_lines;
     content.extend(discussion.lines);
-    content.extend([
-        Line::from(""),
-        Line::from(Span::styled(
-            discussion.hints,
-            Style::default()
-                .fg(MODAL_COLORS.action)
-                .bg(MODAL_COLORS.bg)
-                .add_modifier(Modifier::BOLD),
-        )),
-    ]);
+    if spacer_rows > 0 {
+        content.push(Line::from(""));
+    }
+    content.extend(hint_lines);
     let card = Paragraph::new(content)
         .style(Style::default().fg(MODAL_COLORS.text).bg(MODAL_COLORS.bg))
         .wrap(Wrap { trim: false })
@@ -917,6 +947,61 @@ struct WalkthroughExchange {
     max_scroll: usize,
 }
 
+fn walkthrough_text_lines(
+    text: &str,
+    width: usize,
+    tab_width: usize,
+    style: Style,
+) -> Vec<Line<'static>> {
+    wrap_chat_input_rows(text, width, tab_width)
+        .into_iter()
+        .map(|row| {
+            Line::from(Span::styled(
+                text[row.visible_start..row.end].to_string(),
+                style,
+            ))
+        })
+        .collect()
+}
+
+fn walkthrough_composer_lines(
+    input: &str,
+    cursor: usize,
+    label: &str,
+    width: usize,
+    row_limit: usize,
+) -> Vec<Line<'static>> {
+    let mut text = input.to_string();
+    let cursor = cursor.min(text.len());
+    let cursor = (0..=cursor)
+        .rev()
+        .find(|&byte| text.is_char_boundary(byte))
+        .unwrap_or(0);
+    text.insert(cursor, '▏');
+    let label_width = UnicodeWidthStr::width(label);
+    let rows = wrap_chat_input_rows_with_widths(&text, width.saturating_sub(label_width), width, 4);
+    let cursor_row = rows
+        .iter()
+        .position(|row| row.start <= cursor && cursor < row.end)
+        .unwrap_or(rows.len().saturating_sub(1));
+    let start = cursor_row
+        .saturating_add(1)
+        .saturating_sub(row_limit.max(1));
+    let style = Style::default().fg(MODAL_COLORS.title).bg(MODAL_COLORS.bg);
+    rows.into_iter()
+        .skip(start)
+        .take(row_limit.max(1))
+        .enumerate()
+        .map(|(index, row)| {
+            let prefix = if index == 0 && start == 0 { label } else { "" };
+            Line::from(Span::styled(
+                format!("{prefix}{}", &text[row.visible_start..row.end]),
+                style,
+            ))
+        })
+        .collect()
+}
+
 fn walkthrough_discussion(
     discussion: &ovim_core::editor::CodeExplanationDiscussionView,
     width: usize,
@@ -939,7 +1024,16 @@ fn walkthrough_discussion(
                 answer_row_limit,
                 answer_scroll,
             );
-            let hints = if exchange.max_scroll > 0 {
+            let hints = if width < 60 && exchange.max_scroll > 0 {
+                format!(
+                    "↑/↓ reply {}–{}/{}   Space ask   Esc back",
+                    exchange.visible_start + 1,
+                    exchange.visible_end,
+                    exchange.total_rows,
+                )
+            } else if width < 60 {
+                "←/→ steps   Space ask   Esc back".into()
+            } else if exchange.max_scroll > 0 {
                 format!(
                     "↑/↓ reply {}–{}/{}   ←/→ steps   Space ask   [/] replies   Enter next/done   Esc back",
                     exchange.visible_start + 1,
@@ -958,7 +1052,11 @@ fn walkthrough_discussion(
         ovim_core::editor::CodeExplanationDiscussionView::Navigating { .. } => {
             WalkthroughDiscussion {
                 lines: Vec::new(),
-                hints: "←/→ steps   Space ask   t thread   Enter next/done   Esc dismiss".into(),
+                hints: if width < 60 {
+                    "←/→ steps   Space ask   Enter next   Esc".into()
+                } else {
+                    "←/→ steps   Space ask   t thread   Enter next/done   Esc dismiss".into()
+                },
                 answer_max_scroll: 0,
             }
         }
@@ -966,22 +1064,21 @@ fn walkthrough_discussion(
             input,
             cursor,
             question_count,
-        } => {
-            let mut input_with_cursor = input.clone();
-            input_with_cursor.insert((*cursor).min(input_with_cursor.len()), '▏');
-            WalkthroughDiscussion {
-                lines: vec![Line::from(Span::styled(
-                    compact_walkthrough_line(
-                        &format!("Ask {}: ", question_count + 1),
-                        &input_with_cursor,
-                        width,
-                    ),
-                    Style::default().fg(MODAL_COLORS.title).bg(MODAL_COLORS.bg),
-                ))],
-                hints: "Enter send   Shift-Enter newline   Esc cancel".into(),
-                answer_max_scroll: 0,
-            }
-        }
+        } => WalkthroughDiscussion {
+            lines: walkthrough_composer_lines(
+                input,
+                *cursor,
+                &format!("Ask {}: ", question_count + 1),
+                width,
+                answer_row_limit,
+            ),
+            hints: if width < 60 {
+                "Enter send   Ctrl-J newline   Esc cancel".into()
+            } else {
+                "Enter send   Shift-Enter newline   Esc cancel".into()
+            },
+            answer_max_scroll: 0,
+        },
         ovim_core::editor::CodeExplanationDiscussionView::Answering {
             question,
             answer,
@@ -996,7 +1093,16 @@ fn walkthrough_discussion(
                 answer_row_limit,
                 answer_scroll,
             );
-            let hints = if exchange.max_scroll > 0 {
+            let hints = if width < 60 && exchange.max_scroll > 0 {
+                format!(
+                    "↑/↓ reply {}–{}/{}   Esc back",
+                    exchange.visible_start + 1,
+                    exchange.visible_end,
+                    exchange.total_rows,
+                )
+            } else if width < 60 {
+                "Answering…   Esc back".into()
+            } else if exchange.max_scroll > 0 {
                 format!(
                     "Answering…   ↑/↓ reply {}–{}/{}   ←/→ steps   Esc back",
                     exchange.visible_start + 1,
@@ -1025,23 +1131,32 @@ fn walkthrough_exchange_lines(
     answer_scroll: usize,
 ) -> WalkthroughExchange {
     let question_label = format!("Q{question_count}  ");
-    let question_budget = width.saturating_sub(UnicodeWidthStr::width(question_label.as_str()));
-    let question = question.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            question_label,
-            Style::default()
-                .fg(MODAL_COLORS.title)
-                .bg(MODAL_COLORS.bg)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            truncate_to_width(&question, question_budget),
+    let question_rows = wrap_chat_input_rows_with_widths(
+        question,
+        width.saturating_sub(UnicodeWidthStr::width(question_label.as_str())),
+        width,
+        4,
+    );
+    let mut lines = Vec::with_capacity(question_rows.len());
+    for (index, row) in question_rows.iter().enumerate() {
+        let mut spans = Vec::new();
+        if index == 0 {
+            spans.push(Span::styled(
+                question_label.clone(),
+                Style::default()
+                    .fg(MODAL_COLORS.title)
+                    .bg(MODAL_COLORS.bg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.push(Span::styled(
+            question[row.visible_start..row.end].to_string(),
             Style::default()
                 .fg(MODAL_COLORS.secondary)
                 .bg(MODAL_COLORS.bg),
-        ),
-    ])];
+        ));
+        lines.push(Line::from(spans));
+    }
 
     let label = if failed { "Error  " } else { "AI  " };
     let label_width = UnicodeWidthStr::width(label);
@@ -1061,18 +1176,7 @@ fn walkthrough_exchange_lines(
             .collect::<Vec<_>>()
     };
     let answer_row_limit = answer_row_limit.max(1);
-    let total_rows = answer_rows.len();
-    let max_scroll = total_rows.saturating_sub(answer_row_limit);
-    let visible_start = answer_scroll.min(max_scroll);
-    let visible_end = visible_start
-        .saturating_add(answer_row_limit)
-        .min(total_rows);
-    for (index, row) in answer_rows
-        .into_iter()
-        .skip(visible_start)
-        .take(answer_row_limit)
-        .enumerate()
-    {
+    for (index, row) in answer_rows.into_iter().enumerate() {
         let prefix = if index == 0 {
             label.to_string()
         } else {
@@ -1094,25 +1198,23 @@ fn walkthrough_exchange_lines(
         spans.extend(row);
         lines.push(Line::from(spans));
     }
+    let total_rows = lines.len();
+    let max_scroll = total_rows.saturating_sub(answer_row_limit);
+    let visible_start = answer_scroll.min(max_scroll);
+    let visible_end = visible_start
+        .saturating_add(answer_row_limit)
+        .min(total_rows);
     WalkthroughExchange {
-        lines,
+        lines: lines
+            .into_iter()
+            .skip(visible_start)
+            .take(answer_row_limit)
+            .collect(),
         visible_start,
         visible_end,
         total_rows,
         max_scroll,
     }
-}
-
-fn compact_walkthrough_line(label: &str, text: &str, width: usize) -> String {
-    let single_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let available = width.saturating_sub(UnicodeWidthStr::width(label));
-    let (truncated, ellipsis) =
-        if UnicodeWidthStr::width(single_line.as_str()) > available && available > 0 {
-            (truncate_to_width(&single_line, available - 1), "…")
-        } else {
-            (truncate_to_width(&single_line, available), "")
-        };
-    format!("{label}{truncated}{ellipsis}")
 }
 
 /// Live and retained output for one agent-owned shell process.
@@ -1498,13 +1600,14 @@ mod tests {
     use ratatui::{
         backend::TestBackend,
         layout::Rect,
-        style::Modifier,
+        style::{Modifier, Style},
         text::{Line, Span},
         Terminal,
     };
 
     use crate::editor::Editor;
     use ovim_core::ai::chat_types::{ChatOpts, ToolCallInfo};
+    use unicode_width::UnicodeWidthStr;
 
     #[test]
     fn hover_width_uses_terminal_cells_in_preview_and_raw_modes() {
@@ -1683,7 +1786,7 @@ mod tests {
             latest_failed: false,
         };
         let first = super::walkthrough_discussion(&discussion, 24, 10, 0);
-        assert_eq!(first.lines.len(), 11);
+        assert_eq!(first.lines.len(), 10);
         assert!(first.answer_max_scroll > 0);
         assert!(first.hints.contains("↑/↓ reply 1–10/"), "{}", first.hints);
         let first_rendered = first
@@ -1712,6 +1815,72 @@ mod tests {
             "{}",
             following.hints
         );
+    }
+
+    #[test]
+    fn walkthrough_teaching_text_preserves_newlines_and_wraps_to_card_width() {
+        let lines = super::walkthrough_text_lines(
+            "First line\nSecond line has more words than fit\n\nLast line",
+            16,
+            4,
+            Style::default(),
+        );
+        let rows = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows[0], "First line");
+        assert_eq!(rows[1].trim_end(), "Second line has");
+        assert_eq!(rows[2].trim_end(), "more words than");
+        assert_eq!(rows[3], "fit");
+        assert_eq!(rows[4], "");
+        assert_eq!(rows[5], "Last line");
+    }
+
+    #[test]
+    fn walkthrough_composer_wraps_and_keeps_cursor_visible() {
+        let input = "one two three four five six seven eight nine ten\nnext line";
+        let at_end = super::walkthrough_composer_lines(input, input.len(), "Ask 1: ", 20, 2);
+        assert_eq!(at_end.len(), 2);
+        assert!(at_end
+            .iter()
+            .any(|line| line.to_string().contains("next line▏")));
+        assert!(!at_end.iter().any(|line| line.to_string().contains('…')));
+
+        let at_start = super::walkthrough_composer_lines(input, 0, "Ask 1: ", 20, 2);
+        assert!(at_start[0].to_string().starts_with("Ask 1: ▏one"));
+        assert!(at_start.iter().all(|line| line.width() <= 20));
+    }
+
+    #[test]
+    fn walkthrough_long_question_can_be_read_by_scrolling() {
+        let question = "one two three four five six seven eight nine ten eleven twelve\nlast part";
+        let discussion = ovim_core::editor::CodeExplanationDiscussionView::Navigating {
+            question_count: 1,
+            latest_question: Some(question.into()),
+            latest_answer: Some("A short answer".into()),
+            latest_failed: false,
+        };
+        let first = super::walkthrough_discussion(&discussion, 18, 3, 0);
+        let last = super::walkthrough_discussion(&discussion, 18, 3, usize::MAX);
+        assert!(first.answer_max_scroll > 0);
+        let all_rows = (0..=first.answer_max_scroll)
+            .flat_map(|scroll| super::walkthrough_discussion(&discussion, 18, 3, scroll).lines)
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+        assert!(all_rows.iter().any(|row| row.contains("last part")));
+        assert!(last
+            .lines
+            .iter()
+            .any(|line| line.to_string().contains("A short answer")));
+        assert!(all_rows
+            .iter()
+            .all(|row| UnicodeWidthStr::width(row.as_str()) <= 18));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1799,6 +1968,35 @@ mod tests {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(rendered.contains("Ask 1: Why?▏"), "{rendered}");
+        assert!(rendered.contains("Enter send"), "{rendered}");
+
+        for character in " This is a longer question whose cursor must remain visible".chars() {
+            editor.insert_code_explanation_question_char(character);
+        }
+        editor.set_last_layout(
+            ovim_core::Rect {
+                x: 0,
+                y: 0,
+                width: 32,
+                height: 7,
+            },
+            0,
+            32,
+            0,
+        );
+        let backend = TestBackend::new(32, 9);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| super::render_ai_code_explanation(frame, &mut editor))
+            .unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("visible▏"), "{rendered}");
         assert!(rendered.contains("Enter send"), "{rendered}");
     }
 
