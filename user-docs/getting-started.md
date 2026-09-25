@@ -81,6 +81,7 @@ are unchanged.
 |---|---|
 | `<Space>gd` | Open the review, return to it from a file, or leave it |
 | `s` | Switch between the unified and side-by-side layouts |
+| `w` | Hide/show equal same-file pairs, ignoring whitespace (GUI and terminal curated reviews) |
 | `]c` / `[c` | Next / previous hunk (in ordinary files: next / previous git change) |
 | `]f` / `[f` | Next / previous file |
 | `Enter`, `gf` | Open the file at the line under the cursor, in the tab you came from |

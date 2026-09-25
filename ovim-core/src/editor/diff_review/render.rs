@@ -520,6 +520,7 @@ pub fn render_custom(
     layout: DiffLayout,
     width: usize,
     tab_width: usize,
+    hide_equal: bool,
 ) -> Rendered {
     let patch = &custom.snapshot.patch;
     let bodies = patch_bodies(patch);
@@ -545,14 +546,45 @@ pub fn render_custom(
     let toolbar = render_toolbar(layout, &mut builder);
     targets.resize(builder.len(), None);
     builder.header(
-        "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · r refresh/redraw · q close",
+        "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · w hide equal · r refresh/redraw · q close",
         Some(HighlightGroup::Comment),
     );
     targets.push(None);
     builder.header("", None);
     targets.push(None);
 
+    builder.header(
+        if hide_equal {
+            "Hide equal changes: on (same file, ignoring whitespace)"
+        } else {
+            "Hide equal changes: off · w to toggle"
+        },
+        Some(HighlightGroup::Comment),
+    );
+    targets.push(None);
     for section in &custom.sections {
+        let hidden = if hide_equal {
+            section.equal_change_lines()
+        } else {
+            Default::default()
+        };
+        let has_remaining = section.lines.iter().any(|line| {
+            matches!(line.kind, PatchLineKind::Added | PatchLineKind::Removed)
+                && !hidden.contains(&line.source_patch_line)
+        });
+        let has_metadata = section
+            .lines
+            .iter()
+            .any(|line| line.kind == PatchLineKind::Meta);
+        if !hidden.is_empty() && !has_remaining && !has_metadata {
+            continue;
+        }
+        let visible_lines = || {
+            section
+                .lines
+                .iter()
+                .filter(|line| !hidden.contains(&line.source_patch_line))
+        };
         let heading = section_heading(section);
         let header_line = builder.header(&heading, Some(HighlightGroup::DiffHeader));
         targets.push(None);
@@ -569,7 +601,7 @@ pub fn render_custom(
         }
         match layout {
             DiffLayout::Unified => {
-                for line in &section.lines {
+                for line in visible_lines() {
                     emit_custom_unified(
                         line,
                         section,
@@ -584,7 +616,7 @@ pub fn render_custom(
             DiffLayout::Split => {
                 let mut old = Vec::new();
                 let mut new = Vec::new();
-                for line in &section.lines {
+                for line in visible_lines() {
                     match line.kind {
                         PatchLineKind::Removed => old.push(line),
                         PatchLineKind::Added => new.push(line),
@@ -654,6 +686,10 @@ pub fn render_custom(
         builder.header("", None);
         targets.push(None);
     }
+    if hide_equal && hunk_lines.is_empty() {
+        builder.header("No unequal changes", Some(HighlightGroup::Comment));
+        targets.push(None);
+    }
     let fallback = builder.len().saturating_sub(1);
     Rendered {
         title: format!("{DIFF_REVIEW_TITLE_PREFIX}{title}"),
@@ -663,7 +699,13 @@ pub fn render_custom(
         hunk_lines,
         file_lines: file_lines
             .into_iter()
-            .map(|line| if line == usize::MAX { fallback } else { line })
+            .map(|line| {
+                if line == usize::MAX && !hide_equal {
+                    fallback
+                } else {
+                    line
+                }
+            })
             .collect(),
         toolbar,
         highlights: builder.highlights,

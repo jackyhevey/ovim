@@ -260,6 +260,14 @@ async fn custom_review_keeps_cross_file_sources_and_a_frozen_layout() {
         "{split}"
     );
 
+    test.keys("w");
+    let filtered = test.editor.buffer().rope().to_string();
+    assert!(filtered.contains("a.txt → b.txt"));
+    assert!(filtered
+        .lines()
+        .any(|line| line.matches("three").count() == 2));
+    test.keys("w");
+
     fs::write(fixture.root.join("a.txt"), "changed\n").unwrap();
     fs::write(fixture.root.join("b.txt"), "changed\n").unwrap();
     test.editor.refresh_diff_review();
@@ -1567,4 +1575,127 @@ fn diff_scroll_indicator_tracks_wrapped_and_unwrapped_views_without_covering_tex
         );
         assert!(terminal.get_cursor_position().unwrap().x < rail);
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn w_hides_equal_same_file_pairs_in_both_terminal_layouts_without_changing_the_snapshot() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("a.txt"), "one\n two \nTHREE\n").unwrap();
+    fs::remove_file(fixture.root.join("b.txt")).unwrap();
+    let snapshot = ReviewSnapshot::from_patch(
+        review_patch(&fixture.root, &ReviewBase::explicit("main")).unwrap(),
+    )
+    .unwrap();
+    let old = snapshot
+        .blocks
+        .iter()
+        .find(|block| block.kind == PatchLineKind::Removed)
+        .unwrap();
+    let new = snapshot
+        .blocks
+        .iter()
+        .find(|block| block.kind == PatchLineKind::Added)
+        .unwrap();
+    let custom = snapshot
+        .reassign(&[DiffPairing {
+            label: Some("Same-file pair".into()),
+            old: ChangeRef {
+                block_id: old.id.clone(),
+                offset: None,
+                count: None,
+            },
+            new: ChangeRef {
+                block_id: new.id.clone(),
+                offset: None,
+                count: None,
+            },
+        }])
+        .unwrap();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    test.editor
+        .open_custom_diff_review("Equal and real changes", custom.clone())
+        .unwrap();
+    assert!(test.editor.buffer().rope().to_string().contains("two"));
+    test.press_with(KeyCode::Char('w'), ovim_core::Modifiers::CONTROL);
+    test.press_esc();
+    assert!(test.editor.buffer().rope().to_string().contains("two"));
+    test.keys("w");
+    for columns in [100, 80] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(columns, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                ovim::ui::Renderer::render_to_frame(
+                    frame,
+                    &mut test.editor,
+                    &mut Default::default(),
+                )
+            })
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Hide equal changes: on"), "{screen}");
+        assert!(screen.contains("THREE"), "{screen}");
+        let text = test.editor.buffer().rope().to_string();
+        assert!(!text.contains("two"), "{text}");
+        assert!(text.contains("three") && text.contains("THREE"), "{text}");
+        let retained = test.editor.diff_review().unwrap().custom().unwrap();
+        assert_eq!(retained, &custom);
+        retained.validate_coverage().unwrap();
+        let mapping = test.editor.diff_review().unwrap().patch_review_lines();
+        for line in retained.sections.iter().flat_map(|section| &section.lines) {
+            if line.text.trim() == "two" {
+                assert!(mapping[line.source_patch_line].is_none());
+            }
+            if line.text == "THREE" {
+                let row = mapping[line.source_patch_line].expect("real edit has a source mapping");
+                assert!(text.lines().nth(row).unwrap().contains("THREE"));
+            }
+        }
+
+        test.keys("]c");
+        test.editor.refresh_diff_review();
+        assert!(!test.editor.buffer().rope().to_string().contains("two"));
+        test.keys("s");
+    }
+    test.keys("w");
+    assert!(test.editor.buffer().rope().to_string().contains("two"));
+    test.keys("wq");
+    test.editor
+        .open_custom_diff_review("Replay", custom)
+        .unwrap();
+    assert!(!test.editor.buffer().rope().to_string().contains("two"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn entirely_equal_terminal_review_has_no_phantom_navigation_and_can_be_restored() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("a.txt"), "one\n two \nthree\n").unwrap();
+    fs::remove_file(fixture.root.join("b.txt")).unwrap();
+    let snapshot = ReviewSnapshot::from_patch(
+        review_patch(&fixture.root, &ReviewBase::explicit("main")).unwrap(),
+    )
+    .unwrap();
+    let custom = snapshot.reassign(&[]).unwrap();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    test.editor
+        .open_custom_diff_review("Equal pair", custom)
+        .unwrap();
+    test.keys("w");
+    assert!(test
+        .editor
+        .buffer()
+        .rope()
+        .to_string()
+        .contains("No unequal changes"));
+    assert!(!test.editor.buffer().rope().to_string().contains("two"));
+    test.keys("]c]f[c[f");
+    assert!(test.editor.buffer().cursor().line() < test.editor.buffer().line_count());
+    test.keys("sw");
+    assert!(test.editor.buffer().rope().to_string().contains("two"));
 }

@@ -630,6 +630,61 @@ fn is_plain_file_header(line: &str) -> bool {
         || line.starts_with("+++ ")
 }
 
+impl ReviewSection {
+    /// Presentation-only omissions, keyed by canonical patch line. Never alter
+    /// the saved sections: coverage validation and replay still own every edit.
+    pub fn equal_change_lines(&self) -> std::collections::HashSet<usize> {
+        let mut hidden = std::collections::HashSet::new();
+        if self.old_path.is_none() || self.old_path != self.new_path {
+            return hidden;
+        }
+        // Compare each replacement independently; context and metadata are hard
+        // boundaries. A deadline bounds pathological comparisons conservatively.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+        for run in self
+            .lines
+            .split(|line| !matches!(line.kind, PatchLineKind::Added | PatchLineKind::Removed))
+        {
+            let old: Vec<_> = run
+                .iter()
+                .filter(|line| line.kind == PatchLineKind::Removed)
+                .collect();
+            let new: Vec<_> = run
+                .iter()
+                .filter(|line| line.kind == PatchLineKind::Added)
+                .collect();
+            if old.is_empty() || new.is_empty() {
+                continue;
+            }
+            let normalize = |line: &&ReviewSectionLine| {
+                line.text
+                    .chars()
+                    .filter(|ch| !matches!(ch, ' ' | '\t' | '\r' | '\x0b' | '\x0c'))
+                    .collect::<String>()
+            };
+            let before: Vec<_> = old.iter().map(normalize).collect();
+            let after: Vec<_> = new.iter().map(normalize).collect();
+            let before: Vec<_> = before.iter().map(String::as_str).collect();
+            let after: Vec<_> = after.iter().map(String::as_str).collect();
+            let diff = similar::TextDiff::configure()
+                .deadline(deadline)
+                .diff_slices(&before, &after);
+            for change in diff
+                .iter_all_changes()
+                .filter(|change| change.tag() == similar::ChangeTag::Equal)
+            {
+                if let (Some(a), Some(b)) = (change.old_index(), change.new_index()) {
+                    if before[a] == after[b] {
+                        hidden.insert(old[a].source_patch_line);
+                        hidden.insert(new[b].source_patch_line);
+                    }
+                }
+            }
+        }
+        hidden
+    }
+}
+
 impl CustomReview {
     /// Check that rendered changed lines retain their canonical identity and content.
     pub fn validate_coverage(&self) -> Result<()> {
@@ -1064,5 +1119,65 @@ mod tests {
                 .and_then(|source| source.line(1)),
             Some("new in commit")
         );
+    }
+}
+
+#[cfg(test)]
+mod equal_change_tests {
+    use super::*;
+
+    fn paired(old: &[&str], new: &[&str]) -> ReviewSection {
+        ReviewSection {
+            id: "pair".into(),
+            label: None,
+            old_path: Some("src/a.rs".into()),
+            new_path: Some("src/a.rs".into()),
+            is_reassigned: true,
+            lines: old
+                .iter()
+                .map(|text| (PatchLineKind::Removed, *text))
+                .chain(new.iter().map(|text| (PatchLineKind::Added, *text)))
+                .enumerate()
+                .map(|(index, (kind, text))| ReviewSectionLine {
+                    kind,
+                    text: text.into(),
+                    old_line: None,
+                    new_line: None,
+                    source_patch_line: index,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn mixed_pairs_keep_real_edits_and_insertions_in_order() {
+        let section = paired(
+            &["same();", "old();", "end();"],
+            &[" same( );", "new();", "extra();", "end();"],
+        );
+        let hidden = section.equal_change_lines();
+        assert_eq!(hidden, [0, 2, 3, 6].into_iter().collect());
+        let mut cross_file = section;
+        cross_file.new_path = Some("src/b.rs".into());
+        assert!(cross_file.equal_change_lines().is_empty());
+    }
+
+    #[test]
+    fn context_is_a_boundary_and_unpaired_or_reordered_lines_remain_visible() {
+        assert!(paired(&[], &["  "]).equal_change_lines().is_empty());
+        assert!(paired(&["gone"], &[]).equal_change_lines().is_empty());
+        assert!(paired(&["a", "b"], &["b", "a"]).equal_change_lines().len() < 4);
+        let mut section = paired(&["same"], &["same"]);
+        section.lines.insert(
+            1,
+            ReviewSectionLine {
+                kind: PatchLineKind::Context,
+                text: "boundary".into(),
+                old_line: None,
+                new_line: None,
+                source_patch_line: 2,
+            },
+        );
+        assert!(section.equal_change_lines().is_empty());
     }
 }

@@ -11,6 +11,7 @@
 //! - `]c` / `[c` move between hunks, `]f` / `[f` between files
 //! - `Enter` (or `gf`) opens the file at the line under the cursor in the tab
 //!   the review was opened from; `<Space>gd` returns to the review, refreshed
+//! - `w` hides equal same-file pairs in curated reviews, ignoring whitespace
 //! - `o` toggles saved moves, `O` opens their frozen snapshot
 //! - `r` refreshes, `q` closes, `<Space>gf` fetches the base branch
 //!
@@ -208,7 +209,12 @@ impl DiffReviewState {
             .filter(|(_, new_line)| *new_line >= anchor.new_line)
             .min_by_key(|(_, new_line)| *new_line)
             .map(|(line, _)| line)
-            .or_else(|| self.file_lines.get(file).copied())
+            .or_else(|| {
+                self.file_lines
+                    .get(file)
+                    .copied()
+                    .filter(|line| *line != usize::MAX)
+            })
     }
 
     fn line_text(&self, line: usize) -> Option<&str> {
@@ -490,7 +496,14 @@ impl Editor {
         let (area_width, width) = self.diff_review_widths();
         let overlay = self.active_overlay_for_patch(&patch);
         let rendered = if let Some((title, custom)) = &overlay {
-            render::render_custom(custom, title, layout, width, self.diff_review_tab_width())
+            render::render_custom(
+                custom,
+                title,
+                layout,
+                width,
+                self.diff_review_tab_width(),
+                self.ui_panels.diff_review_hide_equal,
+            )
         } else {
             render::render(
                 &patch,
@@ -577,8 +590,14 @@ impl Editor {
         let patch = custom.snapshot.patch.clone();
         let layout = self.ui_panels.diff_review_layout;
         let (area_width, width) = self.diff_review_widths();
-        let rendered =
-            render::render_custom(&custom, title, layout, width, self.diff_review_tab_width());
+        let rendered = render::render_custom(
+            &custom,
+            title,
+            layout,
+            width,
+            self.diff_review_tab_width(),
+            self.ui_panels.diff_review_hide_equal,
+        );
         if self.mode() == crate::mode::Mode::AiChat {
             self.close_ai_chat();
             self.set_mode(crate::mode::Mode::Normal);
@@ -673,6 +692,29 @@ impl Editor {
             self.set_status_message(message);
         }
         Ok(())
+    }
+
+    /// `w` in a curated review hides equal same-file pairs in either layout.
+    pub fn toggle_diff_review_equal_changes(&mut self) {
+        let Some(index) = self.review_buffer_index() else {
+            return;
+        };
+        if self
+            .ui_panels
+            .diff_review
+            .as_ref()
+            .is_none_or(|state| state.custom.is_none())
+        {
+            return;
+        }
+        let anchor = self.diff_review_anchor(index, false);
+        self.ui_panels.diff_review_hide_equal = !self.ui_panels.diff_review_hide_equal;
+        self.rerender_diff_review(anchor);
+        self.set_status_message(if self.ui_panels.diff_review_hide_equal {
+            "Diff review: equal same-file changes hidden (ignoring whitespace)"
+        } else {
+            "Diff review: showing all changes"
+        });
     }
 
     /// `s` in the review, or a click on the toolbar.
@@ -1165,6 +1207,7 @@ impl Editor {
                     state.layout,
                     state.layout_width,
                     tab_width,
+                    self.ui_panels.diff_review_hide_equal,
                 ),
                 None => render::render(
                     &state.patch,
@@ -1210,6 +1253,7 @@ impl Editor {
         state.hunk_lines = rendered.hunk_lines;
         state.file_nav = {
             let mut lines = rendered.file_lines.clone();
+            lines.retain(|line| *line != usize::MAX);
             lines.sort_unstable();
             lines.dedup();
             lines

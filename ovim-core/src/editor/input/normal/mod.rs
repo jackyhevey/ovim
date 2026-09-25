@@ -91,6 +91,14 @@ fn try_handle_diff_review_key(editor: &mut Editor, key_event: KeyEvent) -> bool 
         KeyCode::Char('q') => editor.close_diff_review(),
         KeyCode::Char('r') => editor.refresh_diff_review(),
         KeyCode::Char('s') => editor.toggle_diff_review_layout(),
+        KeyCode::Char('w')
+            if key_event.modifiers.is_empty()
+                && editor
+                    .diff_review()
+                    .is_some_and(|state| state.custom().is_some()) =>
+        {
+            editor.toggle_diff_review_equal_changes();
+        }
         KeyCode::Char('o') => {
             if let Err(error) = editor.toggle_diff_review_overlay() {
                 editor.set_status_message(format!("Diff overlay: {error:#}"));

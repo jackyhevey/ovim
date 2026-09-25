@@ -4355,6 +4355,7 @@ dependencies = [
  "sha2",
  "shellexpand",
  "shlex 1.3.0",
+ "similar",
  "streaming-iterator",
  "sysinfo",
  "tempfile",
