@@ -6,7 +6,7 @@ import type {
     FlowDiffMove,
     Reconstruction,
 } from "./FlowDiffModel";
-import { moveLocation, equalPairedLines } from "./FlowDiffModel";
+import { moveLocation, equalMoveLines } from "./FlowDiffModel";
 
 export function pairedMoveLine(
     move: FlowDiffMove,
@@ -43,9 +43,7 @@ export function MoveOverlay(props: {
     onOpenSource?: (path: string, line: number, side: Side) => void;
 }) {
     const hidden = createMemo(() =>
-        props.hideEqual
-            ? equalPairedLines(props.file, [props.move])
-            : undefined,
+        props.hideEqual ? equalMoveLines(props.move, props.file) : undefined,
     );
     const visibleLines = (lines: FlowDiffLine[]) =>
         lines.filter((line) =>

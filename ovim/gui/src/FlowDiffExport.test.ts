@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-    buildDiffExportPages,
-    DiffExportTooLargeError,
-} from "./FlowDiffExport";
+import { buildDiffExportImage } from "./FlowDiffExport";
 import type { FlowDiffFile, FlowDiffReview } from "./FlowDiffModel";
 
 function file(path: string): FlowDiffFile {
@@ -113,24 +110,22 @@ describe("diff image export", () => {
                 },
             },
         ];
-        const plainSvg = buildDiffExportPages(document, {
+        const plainSvg = buildDiffExportImage(document, {
             view: "files",
             reconstruction: "old",
-        })[0].svg;
+        }).svg;
         expect(plainSvg).toContain("FILE CHANGES");
         expect(plainSvg).not.toContain("SOURCE 10");
 
-        const pages = buildDiffExportPages(document, {
+        const image = buildDiffExportImage(document, {
             view: "files",
             reconstruction: "old",
             traceMoves: true,
         });
-        expect(pages).toHaveLength(1);
-        expect(pages[0].height).toBeLessThan(2000);
-        expect(pages[0].filename).toMatch(
-            /extract-parser-safely-files-01-of-01\.png/,
-        );
-        const svg = pages[0].svg;
+
+        expect(image.height).toBeLessThan(2000);
+        expect(image.filename).toMatch(/extract-parser-safely-files\.png/);
+        const svg = image.svg;
         expect(svg).toContain("DELETE &lt;one&gt;");
         expect(svg).toContain("DELETE &amp;two");
         expect(svg).toContain("ADD &lt;one&gt;");
@@ -143,14 +138,14 @@ describe("diff image export", () => {
         expect(svg).not.toContain("SOURCE 15");
         expect(textY(svg, "SOURCE 10")).toBe(textY(svg, "ADD &lt;one&gt;"));
         expect(svg).toContain("Snapshot base: main");
-        expect(svg).toContain("Page 1 of 1");
+        expect(svg).not.toContain("Page 1 of");
         expect(svg).not.toContain("foreignObject");
 
-        const newSvg = buildDiffExportPages(document, {
+        const newSvg = buildDiffExportImage(document, {
             view: "files",
             reconstruction: "new",
             traceMoves: true,
-        })[0].svg;
+        }).svg;
         expect(textY(newSvg, "DEST 3")).toBe(
             textY(newSvg, "DELETE &lt;one&gt;"),
         );
@@ -187,7 +182,7 @@ describe("diff image export", () => {
         const document = review([canonical]);
         document.guidedFiles = [guided];
         expect(() =>
-            buildDiffExportPages(document, {
+            buildDiffExportImage(document, {
                 view: "guided",
                 reconstruction: "old",
             }),
@@ -195,15 +190,15 @@ describe("diff image export", () => {
 
         guided.label = "Parser moved after validation";
         guided.hunks[0].lines = canonical.hunks[0].lines;
-        const pages = buildDiffExportPages(document, {
+        const image = buildDiffExportImage(document, {
             view: "guided",
             reconstruction: "old",
         });
-        expect(pages[0].svg).toContain("Parser moved after validation");
-        expect(pages[0].svg).toContain("GUIDED SECTIONS");
+        expect(image.svg).toContain("Parser moved after validation");
+        expect(image.svg).toContain("GUIDED SECTIONS");
     });
 
-    it("paginates long wrapped code and includes metadata and binary files", () => {
+    it("keeps long wrapped code in one dark image and includes metadata and binary files", () => {
         const source = file("src/long.ts");
         source.additions = 180;
         source.hunks = [
@@ -223,19 +218,19 @@ describe("diff image export", () => {
         const binary = file("assets/icon.png");
         binary.binary = true;
         binary.metadata = ["new mode 100644"];
-        const pages = buildDiffExportPages(review([source, binary]), {
+        const image = buildDiffExportImage(review([source, binary]), {
             view: "files",
             reconstruction: "new",
         });
-        expect(pages.length).toBeGreaterThan(1);
-        expect(pages.every((page) => page.height <= 2000)).toBe(true);
-        expect(pages.at(-1)!.height).toBeLessThan(2000);
-        const text = pages.map((page) => page.svg).join("\n");
+
+        expect(image.height).toBeGreaterThan(18000);
+        expect(image.svg).toContain('fill="#111827"');
+        const text = image.svg;
         expect(text).toContain("LINE-001");
         expect(text).toContain("LINE-180");
         expect(text).toContain("new mode 100644");
         expect(text).toContain("Binary file; no text diff.");
-        expect(pages[1].svg).toContain("continued");
+        expect(image.svg).not.toContain("continued");
     });
 
     it("exports reviews beyond the former page and text limits", () => {
@@ -255,12 +250,13 @@ describe("diff image export", () => {
                 })),
             },
         ];
-        const pages = buildDiffExportPages(review([source]), {
+        const image = buildDiffExportImage(review([source]), {
             view: "files",
             reconstruction: "old",
         });
-        expect(pages.length).toBeGreaterThan(32);
-        expect(pages.map((page) => page.svg).join(" ")).toContain("LINE-5100");
+
+        expect(image.height).toBeGreaterThan(127500);
+        expect(image.svg).toContain("LINE-5100");
     });
 
     it("wraps Unicode code points without losing characters", () => {
@@ -276,11 +272,45 @@ describe("diff image export", () => {
                 lines: [{ kind: "added", text: "🙂".repeat(130), newLine: 1 }],
             },
         ];
-        const svg = buildDiffExportPages(review([source]), {
+        const svg = buildDiffExportImage(review([source]), {
             view: "files",
             reconstruction: "new",
-        })[0].svg;
+        }).svg;
         expect(svg.match(/🙂/g)).toHaveLength(130);
         expect(svg).toContain('textLength="650"');
     });
+});
+
+it("exports the selected unified guided order with full-width code", () => {
+    const source = file("new.ts");
+    source.oldPath = "old.ts";
+    source.hunks = [
+        {
+            header: "Pair",
+            oldStart: 1,
+            oldCount: 2,
+            newStart: 10,
+            newCount: 2,
+            lines: [
+                { kind: "removed", text: "old first", oldLine: 1 },
+                { kind: "removed", text: "old second", oldLine: 2 },
+                { kind: "added", text: "new first", newLine: 10 },
+                { kind: "added", text: "new second", newLine: 11 },
+            ],
+        },
+    ];
+    const document = {
+        ...review([source]),
+        guidedFiles: [{ ...source, label: "Curated pairing" }],
+    };
+    const svg = buildDiffExportImage(document, {
+        view: "guided",
+        layout: "unified",
+        reconstruction: "old",
+    }).svg;
+    expect(svg).toContain("GUIDED SECTIONS · UNIFIED");
+    expect(svg).toContain("Curated pairing");
+    expect(textY(svg, "old second")).toBeLessThan(textY(svg, "new first"));
+    expect(svg).toContain('width="1492" height="25"');
+    expect(svg).not.toContain(">AFTER</text>");
 });

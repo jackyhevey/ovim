@@ -11,7 +11,7 @@
 //! - `]c` / `[c` move between hunks, `]f` / `[f` between files
 //! - `Enter` (or `gf`) opens the file at the line under the cursor in the tab
 //!   the review was opened from; `<Space>gd` returns to the review, refreshed
-//! - `w` hides equal same-file pairs in curated reviews, ignoring whitespace
+//! - `w` hides equal paired changes in curated reviews, ignoring whitespace
 //! - `o` toggles saved moves, `O` opens their frozen snapshot
 //! - `r` refreshes, `q` closes, `<Space>gf` fetches the base branch
 //!
@@ -325,6 +325,7 @@ pub struct SavedDiffOverlay {
     title: String,
     review: CustomReview,
     enabled: bool,
+    requires_proof: bool,
 }
 
 pub struct DiffOverlayViewState {
@@ -332,17 +333,64 @@ pub struct DiffOverlayViewState {
     pub title: Option<String>,
 }
 
-fn same_canonical_patch(left: &ReviewPatch, right: &ReviewPatch) -> bool {
-    left.root == right.root
-        && left.base.spec == right.base.spec
-        && left.comparison_base_oid == right.comparison_base_oid
-        && left.text == right.text
-        && left.lines == right.lines
-        && left.files == right.files
-        && left.truncated == right.truncated
+impl SavedDiffOverlay {
+    fn matches(&self, live: &native_diff::ReviewSnapshot) -> bool {
+        if self.requires_proof || self.review.snapshot.content_fingerprint.is_some() {
+            native_diff::store::same_comparison(&self.review.snapshot, live)
+        } else {
+            // Explicitly opened legacy reviews keep their in-session behavior;
+            // loading from disk always requires the stronger comparison proof.
+            native_diff::store::same_patch(&self.review.snapshot.patch, &live.patch)
+        }
+    }
 }
 
 impl Editor {
+    /// Frontend opt-in follows other durable editor state: bare editors stay isolated.
+    pub fn enable_diff_review_persistence(&mut self) {
+        match native_diff::store::ReviewStore::discover() {
+            Ok(store) => self.set_diff_review_store(Some(store)),
+            Err(error) => {
+                crate::log_warn!("diff", "Diff review persistence unavailable: {error:#}")
+            }
+        }
+    }
+
+    pub fn set_diff_review_store(&mut self, store: Option<native_diff::store::ReviewStore>) {
+        self.ui_panels.diff_review_store = store;
+    }
+
+    fn restore_diff_overlay(&mut self, snapshot: &native_diff::ReviewSnapshot) {
+        let Some(store) = &self.ui_panels.diff_review_store else {
+            return;
+        };
+        match store.load(snapshot) {
+            Ok(Some((title, review))) => {
+                let previous = self
+                    .ui_panels
+                    .diff_review_overlays
+                    .get(&snapshot.patch.root);
+                let enabled = previous
+                    .filter(|saved| saved.review == review && saved.title == title)
+                    .is_none_or(|saved| saved.enabled);
+                self.ui_panels.diff_review_overlays.insert(
+                    snapshot.patch.root.clone(),
+                    SavedDiffOverlay {
+                        title,
+                        review,
+                        enabled,
+                        requires_proof: true,
+                    },
+                );
+            }
+            Ok(None) => {}
+            Err(error) => self.review_toast(
+                ToastLevel::Warning,
+                format!("Could not restore saved diff: {error:#}"),
+            ),
+        }
+    }
+
     pub fn diff_review(&self) -> Option<&DiffReviewState> {
         self.ui_panels.diff_review.as_ref()
     }
@@ -357,9 +405,7 @@ impl Editor {
             });
         }
         let mode = match cached {
-            Some(saved) if !same_canonical_patch(&saved.review.snapshot.patch, &state.patch) => {
-                "stale"
-            }
+            Some(saved) if !saved.matches(&state.context_snapshot) => "stale",
             Some(saved) if saved.enabled => "active",
             Some(_) => "available",
             None => "none",
@@ -370,26 +416,31 @@ impl Editor {
         })
     }
 
-    fn active_overlay_for_patch(&self, patch: &ReviewPatch) -> Option<(String, CustomReview)> {
+    fn active_overlay_for_patch(
+        &self,
+        snapshot: &native_diff::ReviewSnapshot,
+    ) -> Option<(String, CustomReview)> {
         self.ui_panels
             .diff_review_overlays
-            .get(&patch.root)
-            .filter(|saved| {
-                saved.enabled && same_canonical_patch(&saved.review.snapshot.patch, patch)
-            })
+            .get(&snapshot.patch.root)
+            .filter(|saved| saved.enabled && saved.matches(snapshot))
             .map(|saved| (saved.title.clone(), saved.review.clone()))
     }
 
-    fn live_review_status(&self, patch: &ReviewPatch) -> String {
-        match self.ui_panels.diff_review_overlays.get(&patch.root) {
-            Some(saved) if !same_canonical_patch(&saved.review.snapshot.patch, patch) => {
-                "Saved moves outdated · press O to view the frozen diff".to_string()
+    fn live_review_status(&self, snapshot: &native_diff::ReviewSnapshot) -> String {
+        match self
+            .ui_panels
+            .diff_review_overlays
+            .get(&snapshot.patch.root)
+        {
+            Some(saved) if !saved.matches(snapshot) => {
+                "Saved moves unverified · press O to view the frozen diff".to_string()
             }
             Some(saved) if saved.enabled => {
                 "Saved moves applied · press o to remove overlay".to_string()
             }
             Some(_) => "Saved moves available · press o to apply overlay".to_string(),
-            None => summary_message(patch),
+            None => summary_message(&snapshot.patch),
         }
     }
 
@@ -497,12 +548,13 @@ impl Editor {
             Some(spec) => ReviewBase::explicit(spec),
             None => self.resolve_review_base_for_path(&root_hint)?,
         };
-        let context_snapshot = native_diff::review_snapshot(&root_hint, &base)?;
+        let context_snapshot = native_diff::review_display_snapshot(&root_hint, &base)?;
         let patch = context_snapshot.patch.clone();
 
         let layout = self.ui_panels.diff_review_layout;
         let (area_width, width) = self.diff_review_widths();
-        let overlay = self.active_overlay_for_patch(&patch);
+        self.restore_diff_overlay(&context_snapshot);
+        let overlay = self.active_overlay_for_patch(&context_snapshot);
         let context_snapshot = overlay
             .as_ref()
             .map(|(_, custom)| custom.snapshot.clone())
@@ -566,7 +618,7 @@ impl Editor {
             .ui_panels
             .diff_review
             .as_ref()
-            .map(|state| self.live_review_status(&state.patch));
+            .map(|state| self.live_review_status(&state.context_snapshot));
         if let Some(message) = message {
             self.set_status_message(message);
         }
@@ -593,12 +645,21 @@ impl Editor {
     ) -> anyhow::Result<()> {
         custom.validate_coverage()?;
         if remember {
+            if let Some(store) = &self.ui_panels.diff_review_store {
+                if let Err(error) = store.save(title, &custom) {
+                    self.review_toast(
+                        ToastLevel::Warning,
+                        format!("Could not save diff for restart: {error:#}"),
+                    );
+                }
+            }
             self.ui_panels.diff_review_overlays.insert(
                 custom.snapshot.patch.root.clone(),
                 SavedDiffOverlay {
                     title: title.to_string(),
                     review: custom.clone(),
                     enabled: true,
+                    requires_proof: false,
                 },
             );
         }
@@ -690,10 +751,11 @@ impl Editor {
             Some(spec) => Ok(ReviewBase::explicit(spec)),
             None => self.resolve_review_base_for_path(&root),
         }?;
-        let context_snapshot = native_diff::review_snapshot(&root, &base)?;
+        let context_snapshot = native_diff::review_display_snapshot(&root, &base)?;
         let patch = context_snapshot.patch.clone();
 
-        let overlay = self.active_overlay_for_patch(&patch);
+        self.restore_diff_overlay(&context_snapshot);
+        let overlay = self.active_overlay_for_patch(&context_snapshot);
         let context_snapshot = overlay
             .as_ref()
             .map(|(_, custom)| custom.snapshot.clone())
@@ -718,7 +780,7 @@ impl Editor {
             .ui_panels
             .diff_review
             .as_ref()
-            .map(|state| self.live_review_status(&state.patch));
+            .map(|state| self.live_review_status(&state.context_snapshot));
         if let Some(message) = message {
             self.set_status_message(message);
         }
@@ -794,7 +856,7 @@ impl Editor {
         }
     }
 
-    /// `w` in a curated review hides equal same-file pairs in either layout.
+    /// `w` in a curated review hides equal paired changes in either layout.
     pub fn toggle_diff_review_equal_changes(&mut self) {
         let Some(index) = self.review_buffer_index() else {
             return;
@@ -811,7 +873,7 @@ impl Editor {
         self.ui_panels.diff_review_hide_equal = !self.ui_panels.diff_review_hide_equal;
         self.rerender_diff_review(anchor);
         self.set_status_message(if self.ui_panels.diff_review_hide_equal {
-            "Diff review: equal same-file changes hidden (ignoring whitespace)"
+            "Diff review: equal paired changes hidden (ignoring whitespace)"
         } else {
             "Diff review: showing all changes"
         });

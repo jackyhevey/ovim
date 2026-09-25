@@ -68,14 +68,24 @@ The GUI also supports `n` / `N` (next / previous hunk), `j` / `k` to scroll,
 and the review keys below. `Enter` or `gf` opens the active change in the GUI.
 `:` and `<Space>` return to Ovim's command input.
 Text can be selected and copied directly from either pane.
+In the GUI, `/` or `Cmd/Ctrl+F` opens search across the displayed diff.
+Type to highlight matching lines; Enter/Shift+Enter or `n`/`N` moves between
+matches. Escape returns focus to the diff. Search follows the selected view and filter.
 
-In the GUI, press `w` or click **Hide equal changes** to hide same-file pairs
+In the GUI, press `w` or click **Hide equal changes** to hide paired changes
 that are equal after ignoring spaces and tabs, including equal sections paired
 by the agent in a curated diff. Real edits within a pair remain visible.
-Cross-file pairs stay visible even when their contents match. This applies to
+Pairs across different files are filtered too; unpaired additions and deletions stay visible. This applies to
 both layouts, Guided sections, change navigation, and image exports. Toggle it
 off to restore the complete review. The original patch and its change totals
 are unchanged.
+
+Refinements are saved immediately and shared by the terminal and GUI. After a
+restart, open the same comparison with `<Space>gd` or `:GitDiff`: Ovim reapplies
+its saved pairing only after verifying the resolved base, complete patch and
+full content fingerprints of the compared files. This needs no chat resume.
+Changed or unverifiable comparisons keep the saved review separate; use
+**View saved review** (`O` in the terminal) to inspect or export that frozen version.
 
 In a managed diff, use `K` / `J` to reveal ten more source lines above / below
 the current block. The GUI also has small gutter arrows at the block edges;
@@ -88,7 +98,7 @@ the captured source. Older saved reviews may not contain surrounding source.
 | `<Space>gd` | Open the review, return to it from a file, or leave it |
 | `K` / `J` | Reveal ten surrounding lines above / below the current diff block (GUI and terminal) |
 | `s` | Switch between the unified and side-by-side layouts |
-| `w` | Hide/show equal same-file pairs, ignoring whitespace (GUI and terminal curated reviews) |
+| `w` | Hide/show equal paired changes, ignoring whitespace (GUI and terminal curated reviews) |
 | `]c` / `[c` | Next / previous hunk (in ordinary files: next / previous git change) |
 | `]f` / `[f` | Next / previous file |
 | `Enter`, `gf` | Open the file at the line under the cursor, in the tab you came from |

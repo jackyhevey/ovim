@@ -162,48 +162,66 @@ function compareLines(before: FlowDiffLine[], after: FlowDiffLine[]) {
     });
 }
 
-/** The agent's same-file pairings may connect distant hunks. Use their source
- * coordinates to hide both endpoints in Files view as well as in Guided view.
- */
-export function equalPairedLines(file: FlowDiffFile, moves: FlowDiffMove[]) {
+/** Compare a complete agent pairing using its frozen endpoint text. */
+export function equalMoveLines(move: FlowDiffMove, file?: FlowDiffFile) {
     const oldLines = new Set<number>();
     const newLines = new Set<number>();
-    const lines = file.hunks.flatMap((hunk) => hunk.lines);
-    for (const move of moves) {
-        if (move.old.path !== file.path || move.new.path !== file.path)
-            continue;
-        const before = lines.filter(
-            (line) =>
-                line.kind === "removed" &&
-                line.oldLine !== undefined &&
-                line.oldLine >= move.old.startLine &&
-                line.oldLine < move.old.startLine + move.old.lineCount,
+    const endpointLines = (side: "old" | "new") => {
+        const endpoint = move[side];
+        const coordinate = side === "old" ? "oldLine" : "newLine";
+        const canonical =
+            file &&
+            endpoint.path ===
+                (side === "old" ? file.oldPath || file.path : file.path)
+                ? file.hunks
+                      .flatMap((h) => h.lines)
+                      .filter(
+                          (l) =>
+                              l.kind === (side === "old" ? "removed" : "added"),
+                      )
+                : [];
+        const byNumber = new Map(
+            [...endpoint.contextWindows.flatMap((w) => w.lines), ...canonical]
+                .filter((l) => l[coordinate] !== undefined)
+                .map((l) => [l[coordinate]!, l]),
         );
-        const after = lines.filter(
-            (line) =>
-                line.kind === "added" &&
-                line.newLine !== undefined &&
-                line.newLine >= move.new.startLine &&
-                line.newLine < move.new.startLine + move.new.lineCount,
+        return Array.from({ length: endpoint.lineCount }, (_, i) =>
+            byNumber.get(endpoint.startLine + i),
         );
-        // Do not compare partial pairings when projecting a subset of the patch.
-        if (
-            before.length !== move.old.lineCount ||
-            after.length !== move.new.lineCount
-        )
-            continue;
-        let oldIndex = 0,
-            newIndex = 0;
-        for (const part of compareLines(before, after) ?? []) {
-            if (!part.added && !part.removed) {
-                for (let i = 0; i < part.count; i++) {
-                    oldLines.add(before[oldIndex + i].oldLine!);
-                    newLines.add(after[newIndex + i].newLine!);
-                }
+    };
+    const before = endpointLines("old"),
+        after = endpointLines("new");
+    if (before.some((l) => !l) || after.some((l) => !l))
+        return { oldLines, newLines };
+    let oldIndex = 0,
+        newIndex = 0;
+    for (const part of compareLines(
+        before as FlowDiffLine[],
+        after as FlowDiffLine[],
+    ) ?? []) {
+        if (!part.added && !part.removed) {
+            for (let i = 0; i < part.count; i++) {
+                oldLines.add(before[oldIndex + i]!.oldLine!);
+                newLines.add(after[newIndex + i]!.newLine!);
             }
-            if (!part.added) oldIndex += part.count;
-            if (!part.removed) newIndex += part.count;
         }
+        if (!part.added) oldIndex += part.count;
+        if (!part.removed) newIndex += part.count;
+    }
+    return { oldLines, newLines };
+}
+
+/** Apply paired omissions only to their owning file and side. */
+export function equalPairedLines(file: FlowDiffFile, moves: FlowDiffMove[]) {
+    const oldLines = new Set<number>(),
+        newLines = new Set<number>();
+    for (const move of moves) {
+        const old = move.old.path === (file.oldPath || file.path);
+        const next = move.new.path === file.path;
+        if (!old && !next) continue;
+        const equal = equalMoveLines(move, file);
+        if (old) for (const line of equal.oldLines) oldLines.add(line);
+        if (next) for (const line of equal.newLines) newLines.add(line);
     }
     return { oldLines, newLines };
 }
@@ -211,15 +229,13 @@ export function equalPairedLines(file: FlowDiffFile, moves: FlowDiffMove[]) {
 /** Collapse equal lines after ignoring horizontal whitespace, preserving source
  * coordinates and the original patch. Re-diff each replacement so cosmetic
  * edits do not obscure real changes inside the same block. Unpaired insertions and
- * deletions remain changes; cross-file moves retain their useful correspondence.
+ * deletions remain changes. Explicit pairings may cross file boundaries.
  */
 export function hideEqualChanges(
     file: FlowDiffFile,
     sections: FlowSection[],
     moves: FlowDiffMove[] = [],
 ): FlowSection[] {
-    // Cross-file correspondence remains useful even when the text is equal.
-    if (file.oldPath && file.oldPath !== file.path) return sections;
     const paired = equalPairedLines(file, moves);
     return sections.flatMap((original) => {
         const left = original.left.filter(
@@ -241,7 +257,7 @@ export function hideEqualChanges(
                     kind: "gap" as const,
                     equal: true,
                     hunkIndex: original.hunkIndex,
-                    label: "Equal same-file pairing hidden",
+                    label: "Equal pairing hidden",
                     left: [],
                     right: [],
                 },
@@ -376,6 +392,22 @@ export function mappedScrollTop(
 
 /** A paired excerpt has two independent source streams. In unified layout,
  * keep each stream's context with its changes instead of interleaving files. */
+/** Ordinary context appears once; independent expanded excerpts retain both sides. */
+export function unifiedLeftLines(
+    file: FlowDiffFile,
+    section: FlowSection,
+): FlowDiffLine[] {
+    const shared =
+        section.kind === "context" &&
+        (!section.expanded ||
+            ((file.oldPath || file.path) === file.path &&
+                section.left.length === section.right.length &&
+                section.left.every(
+                    (line, index) => line.text === section.right[index]?.text,
+                )));
+    return shared ? [] : section.left;
+}
+
 export function unifiedSections(sections: FlowSection[]): FlowSection[] {
     const combined = new Set<number>();
     return sections.flatMap((section) => {

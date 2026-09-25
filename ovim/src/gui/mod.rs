@@ -1399,6 +1399,7 @@ async fn run_editor(
 ) {
     let mut editor = Editor::new().with_services(services);
     editor.load_ai_chat_preference();
+    editor.enable_diff_review_persistence();
     if let Err(error) = editor.enable_lua() {
         editor.set_status_message(format!("Lua configuration: {error}"));
     }

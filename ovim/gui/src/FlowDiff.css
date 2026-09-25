@@ -112,6 +112,7 @@
     color: var(--info);
 }
 
+.flow-search button,
 .flow-hunk-nav button,
 .flow-view-switch button,
 .flow-reconstruction-switch button,
@@ -124,6 +125,7 @@
     color: var(--text-secondary);
 }
 
+.flow-search button:hover:not(:disabled),
 .flow-hunk-nav button:hover:not(:disabled),
 .flow-view-switch button:hover,
 .flow-reconstruction-switch button:hover,
@@ -774,4 +776,27 @@
     height: 11px;
     font-size: 9px;
     line-height: 8px;
+}
+
+.flow-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    flex-shrink: 0;
+}
+.flow-search input {
+    min-width: 0;
+    flex: 1;
+    color: var(--text-primary);
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    padding: 5px 8px;
+}
+.flow-search-match .flow-line-text {
+    background: #b5890040;
+}
+.flow-search-current .flow-line-text {
+    outline: 2px solid #d6aa46;
+    outline-offset: -2px;
 }

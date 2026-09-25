@@ -60,12 +60,7 @@ struct ShowCustomDiffArgs {
     pairings: Vec<DiffPairing>,
 }
 
-#[derive(Serialize, Deserialize)]
-struct SavedCustomDiff {
-    title: String,
-    snapshot: ReviewSnapshot,
-    pairings: Vec<DiffPairing>,
-}
+use crate::native_diff::store::SavedReview as SavedCustomDiff;
 
 /// Content-addressed payloads live in the run's artifact store. Small named
 /// references connect snapshot IDs and chat tool calls to those payloads.
@@ -514,11 +509,10 @@ impl Editor {
                 .ok_or("That custom diff is no longer available to replay")?;
             let artifacts = DiffArtifacts::open(self)?;
             let saved: SavedCustomDiff = artifacts.load("review", &call.id)?;
-            let custom = saved
-                .snapshot
-                .reassign(&saved.pairings)
+            let (title, custom) = saved
+                .into_custom()
                 .map_err(|error| format!("Stored review is invalid: {error:#}"))?;
-            self.open_custom_diff_review(&saved.title, custom)
+            self.open_custom_diff_review(&title, custom)
                 .map_err(|error| format!("Could not open saved diff: {error:#}"))
         })();
         match result {

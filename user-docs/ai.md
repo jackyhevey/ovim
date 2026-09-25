@@ -864,9 +864,25 @@ change counts; older reviews without captured source cannot expand.
 
 Replay uses the saved content, including after the source files change or the
 chat is restored. `<leader>gd` opens the current comparison and reapplies the
-session's saved restructuring when the comparison still matches. Use **Remove
+saved restructuring when the comparison is verified to match, including after
+switching between `ovim` and `ovim-gui`. Opening the same comparison restores it
+without `--resume` or the original chat session. A match requires the resolved
+base, exact patch/source mapping, and full byte fingerprints of the compared
+files; mtimes and whitespace-normalized equality are not enough. Use **Remove
 overlay** to see the regular diff, or **Apply overlay** to bring it back.
-After further edits, the live diff marks the saved restructuring as outdated and
+
+Refinements are written immediately to the shared application data directory
+(`$XDG_DATA_HOME/ovim/diff-reviews`, normally `~/.local/share/ovim/diff-reviews` on
+Linux; override with `OVIM_DIFF_REVIEWS_DIR`). Storage is private and separate
+from the Git working tree. Each worktree retains up to 20 comparisons within
+128 MiB, with a 32 MiB limit per saved review; a new refinement of the same
+comparison replaces the previous one. Concurrent instances publish atomically.
+Layout, cursor, expansion and overlay-toggle state remain local to each instance.
+Older captures without byte fingerprints, truncated comparisons, unreadable
+endpoints, submodules and endpoints over the 32 MiB capture limit cannot be
+automatically verified; their frozen review can still be opened explicitly.
+
+After further edits, the live diff marks the saved restructuring as unverified and
 offers **View saved review**. **Return to live diff** keeps the saved arrangement
 available. Undoing back to the original comparison makes it usable again on
 refresh or reopening. In the terminal, `o` toggles the overlay (or returns from a
@@ -890,18 +906,18 @@ both source paths. Old-side navigation opens a labeled snapshot excerpt.
 Older saved reviews and large files may have limited surrounding context.
 
 In both the GUI and terminal curated review, press `w` (or click **Hide equal
-changes** in the GUI) to hide equal same-file pairs, treating spaces and tabs as
+changes** in the GUI) to hide equal paired changes, treating spaces and tabs as
 insignificant. Entire equal sections disappear; real edits
 inside mixed pairs stay visible. This follows the agent's pairings even across
 separate hunks in **Files**, and also works in **Guided**, both layouts, navigation,
-and image exports. Cross-file pairs remain visible so the relocation is clear.
+and image exports. Pairs across different files are filtered too.
 Toggle it off to restore every pair; the saved review and change totals are preserved.
 The terminal shows the active filter above the sections and keeps it through layout
 changes, refreshes, and reopening reviews during the session.
 
 Use **Export image** in the GUI to save the complete **Files** or **Guided** view,
-including files and sections outside the viewport. Short reviews produce one PNG;
-longer reviews produce a ZIP of numbered PNG pages. Images include descriptions,
+including files and sections outside the viewport. The export is one dark PNG,
+with the selected layout, pairings, expanded context, and equal-change filter. Images include descriptions,
 source paths, line numbers, change totals, and the comparison base when available.
 Moved ranges appear with nearby saved context. The export records the selected
 review, so an outdated saved review retains its original contents. It helps reviewers

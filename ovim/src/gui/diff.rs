@@ -994,13 +994,25 @@ mod tests {
             },
         }];
         let custom = snapshot.reassign(&pairings).unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let store = ovim_core::native_diff::store::ReviewStore::new(storage.path().to_path_buf());
         let mut editor = Editor::default();
+        editor.set_diff_review_store(Some(store.clone()));
         editor.open_file(root.join("anchor.rs")).unwrap();
         editor
             .open_custom_diff_review("Parser move", custom)
             .unwrap();
 
+        drop(editor);
+        // A fresh frontend needs neither the old process nor resumed chat history.
+        let mut editor = Editor::default();
+        editor.set_diff_review_store(Some(store));
+        editor.open_file(root.join("anchor.rs")).unwrap();
+        editor.open_diff_review(Some("HEAD")).unwrap();
         let projected = project_diff(&editor, editor.buffer()).unwrap();
+        if let Some(path) = std::env::var_os("OVIM_DIFF_QA_FIXTURE") {
+            fs::write(path, serde_json::to_vec_pretty(&projected).unwrap()).unwrap();
+        }
         assert!(projected.custom);
         let provenance = projected.provenance.as_ref().unwrap();
         assert_eq!(provenance.base_label, "HEAD");
@@ -1011,7 +1023,7 @@ mod tests {
             .is_some_and(|id| id.starts_with("diff_")));
         assert_eq!(
             projected.overlay.as_ref().map(|state| state.mode),
-            Some("saved")
+            Some("active")
         );
         assert!(projected.files.iter().any(|file| file.path == "old.rs"));
         assert!(projected.files.iter().any(|file| file.path == "new.rs"));

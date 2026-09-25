@@ -1844,7 +1844,17 @@ function App() {
                     active.select();
                 else void selectAllEditorText();
                 break;
-            case "edit.find":
+            case "edit.find": {
+                const diff =
+                    workbenchView() === "source"
+                        ? document.querySelector<HTMLElement>(
+                              ".editor-pane.focused .flow-diff",
+                          )
+                        : undefined;
+                if (diff) {
+                    diff.dispatchEvent(new Event("ovim-diff-find"));
+                    break;
+                }
                 if (activeBrowserId())
                     performBrowserKey({
                         sessionId: activeBrowserId(),
@@ -1861,6 +1871,7 @@ function App() {
                     });
                 }
                 break;
+            }
         }
     };
 
@@ -2039,6 +2050,15 @@ function App() {
         ) {
             event.preventDefault();
             openBrowserCommand();
+            return;
+        }
+        if (
+            primaryModifier &&
+            event.key.toLowerCase() === "f" &&
+            target?.closest?.(".flow-diff")
+        ) {
+            event.preventDefault();
+            performMenuAction("edit.find");
             return;
         }
         if (primaryModifier && !nativeControl) {

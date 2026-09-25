@@ -23,10 +23,12 @@ pub struct DiffFile {
 pub fn worktree_root(path: &Path) -> Result<PathBuf> {
     let repo = Repository::discover(path)
         .with_context(|| format!("{} is not inside a Git worktree", path.display()))?;
-    repo.workdir()
+    let root = repo
+        .workdir()
         .map(Path::to_path_buf)
         .or_else(|| repo.path().parent().map(Path::to_path_buf))
-        .context("Could not resolve the Git worktree")
+        .context("Could not resolve the Git worktree")?;
+    std::fs::canonicalize(root).context("Could not canonicalize the Git worktree")
 }
 
 // ---------------------------------------------------------------------------
@@ -383,9 +385,11 @@ impl ReviewPatch {
 
 pub mod context;
 mod custom;
+pub mod store;
 pub use custom::{
-    review_snapshot, ChangeBlock, ChangeRef, CustomReview, DiffPairing, FrozenSource,
-    ReviewSection, ReviewSectionLine, ReviewSnapshot, SourceFileSnapshot, SourceWindow,
+    review_display_snapshot, review_snapshot, ChangeBlock, ChangeRef, CustomReview, DiffPairing,
+    FrozenSource, ReviewSection, ReviewSectionLine, ReviewSnapshot, SourceFileSnapshot,
+    SourceWindow,
 };
 
 /// Builds the full review patch for `base`.

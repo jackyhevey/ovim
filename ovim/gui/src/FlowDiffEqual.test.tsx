@@ -2,7 +2,7 @@
 import { fireEvent, render } from "@solidjs/testing-library";
 import { describe, expect, it, vi } from "vitest";
 import FlowDiff from "./FlowDiff";
-import { buildDiffExportPages } from "./FlowDiffExport";
+import { buildDiffExportImage } from "./FlowDiffExport";
 import {
     hideEqualChanges,
     isEqualOnly,
@@ -66,13 +66,13 @@ const review: FlowDiffReview = {
 };
 
 describe("hiding equal curated changes", () => {
-    it("hides same-file equal and whitespace-only pairs while preserving cross-file pairs", () => {
+    it("hides same-file equal and whitespace-only pairs including cross-file pairs", () => {
         const sections = hideEqualChanges(equal, sectionsForFile(equal));
         expect(isEqualOnly(equal, sections)).toBe(true);
         expect(sections.every((section) => section.kind === "gap")).toBe(true);
-        expect(hideEqualChanges(cross, sectionsForFile(cross))).toEqual(
-            sectionsForFile(cross),
-        );
+        expect(
+            isEqualOnly(cross, hideEqualChanges(cross, sectionsForFile(cross))),
+        ).toBe(true);
         expect(equal.hunks[0].lines).toHaveLength(4);
     });
 
@@ -143,18 +143,16 @@ describe("hiding equal curated changes", () => {
         fireEvent.keyDown(panel, { key: "w" });
         expect(toggle.getAttribute("aria-pressed")).toBe("true");
         expect(result.queryAllByText("same();")).toHaveLength(0);
-        expect(result.getByText("1 / 1")).toBeTruthy();
+        expect(result.getByText("0 / 0")).toBeTruthy();
         fireEvent.click(result.getByRole("button", { name: "Guided" }));
         expect(result.queryAllByText("same();")).toHaveLength(0);
         fireEvent.keyDown(panel, { key: "s" });
-        expect(
-            result.container.querySelector(".flow-unified-scroll"),
-        ).toBeTruthy();
+        expect(result.getByText("No unequal changes")).toBeTruthy();
         fireEvent.keyDown(panel, { key: "Enter" });
-        expect(onOpenSource).toHaveBeenCalledWith("src/new.ts", 40, "new");
+        expect(onOpenSource).not.toHaveBeenCalled();
         fireEvent.click(toggle);
         expect(result.getAllByText("same();")).toHaveLength(2);
-        expect(result.getByText("2 / 2")).toBeTruthy();
+        expect(result.getByText("1 / 2")).toBeTruthy();
     });
 
     it("shows an explicit empty state and can restore an entirely equal review", () => {
@@ -179,23 +177,19 @@ describe("hiding equal curated changes", () => {
 
     it("exports the selected filter in Files and Guided without changing coverage accounting", () => {
         for (const view of ["files", "guided"] as const) {
-            const filtered = buildDiffExportPages(review, {
+            const filtered = buildDiffExportImage(review, {
                 view,
                 reconstruction: "old",
                 hideEqual: true,
-            })
-                .map((page) => page.svg)
-                .join("");
+            }).svg;
             expect(filtered).not.toContain("same();");
-            expect(filtered).toContain("moved();");
-            expect(filtered).toContain("Equal same-file changes hidden");
+            expect(filtered).not.toContain("moved();");
+            expect(filtered).toContain("Equal paired changes hidden");
             expect(filtered).not.toContain("src/parser.ts");
-            const complete = buildDiffExportPages(review, {
+            const complete = buildDiffExportImage(review, {
                 view,
                 reconstruction: "old",
-            })
-                .map((page) => page.svg)
-                .join("");
+            }).svg;
             expect(complete).toContain("same();");
         }
     });
@@ -236,7 +230,7 @@ it("follows same-file agent pairings across separate hunks in Files view", () =>
         filtered.flatMap((section) => section.right).map((line) => line.text),
     ).toEqual(["new();"]);
     for (const traceMoves of [false, true]) {
-        const exported = buildDiffExportPages(
+        const exported = buildDiffExportImage(
             { ...review, files: [file], moves: [move] },
             {
                 view: "files",
@@ -244,9 +238,7 @@ it("follows same-file agent pairings across separate hunks in Files view", () =>
                 hideEqual: true,
                 traceMoves,
             },
-        )
-            .map((page) => page.svg)
-            .join("");
+        ).svg;
         expect(exported).not.toContain("same();");
         expect(exported).toContain("old();");
         expect(exported).toContain("new();");
@@ -254,7 +246,7 @@ it("follows same-file agent pairings across separate hunks in Files view", () =>
 });
 
 it("exports an explicit empty state when all curated pairs are equal", () => {
-    const pages = buildDiffExportPages(
+    const image = buildDiffExportImage(
         { ...review, files: [equal], guidedFiles: [equal] },
         {
             view: "guided",
@@ -262,7 +254,63 @@ it("exports an explicit empty state when all curated pairs are equal", () => {
             hideEqual: true,
         },
     );
-    expect(pages).toHaveLength(1);
-    expect(pages[0].svg).toContain("No unequal changes");
-    expect(pages[0].svg).not.toContain("same();");
+    expect(image.svg).toContain("No unequal changes");
+    expect(image.svg).not.toContain("same();");
+});
+
+it("hides cross-file pair endpoints in Files view without hiding unrelated coordinates", () => {
+    const guided = paired(
+        ["same();", "old();"],
+        ["same( );", "new();"],
+        "new.ts",
+        "old.ts",
+    );
+    const oldLines = guided.hunks[0].lines.filter((l) => l.kind === "removed");
+    const newLines = guided.hunks[0].lines.filter((l) => l.kind === "added");
+    const before = {
+        ...guided,
+        id: "old",
+        path: "old.ts",
+        oldPath: undefined,
+        hunks: [{ ...guided.hunks[0], lines: oldLines }],
+    };
+    const after = {
+        ...guided,
+        id: "new",
+        oldPath: undefined,
+        hunks: [{ ...guided.hunks[0], lines: newLines }],
+    };
+    const move = {
+        id: "cross",
+        old: {
+            path: "old.ts",
+            startLine: 10,
+            lineCount: 2,
+            contextComplete: true,
+            contextWindows: [{ startLine: 10, lines: oldLines }],
+        },
+        new: {
+            path: "new.ts",
+            startLine: 40,
+            lineCount: 2,
+            contextComplete: true,
+            contextWindows: [{ startLine: 40, lines: newLines }],
+        },
+    };
+    for (const file of [before, after, guided]) {
+        const sections = hideEqualChanges(file, sectionsForFile(file), [move]);
+        const text = sections
+            .flatMap((s) => [...s.left, ...s.right])
+            .map((l) => l.text);
+        expect(text.join()).not.toContain("same");
+        expect(text).toContain(file === before ? "old();" : "new();");
+    }
+    const unrelated = { ...before, path: "unrelated.ts" };
+    expect(
+        hideEqualChanges(unrelated, sectionsForFile(unrelated), [move]),
+    ).toEqual(sectionsForFile(unrelated));
+    const incomplete = { ...move, new: { ...move.new, contextWindows: [] } };
+    expect(
+        hideEqualChanges(before, sectionsForFile(before), [incomplete]),
+    ).toEqual(sectionsForFile(before));
 });

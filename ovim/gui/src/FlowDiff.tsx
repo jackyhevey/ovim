@@ -14,6 +14,7 @@ import {
     isEqualOnly,
     sectionsForFile,
     unifiedSections as combineUnifiedSections,
+    unifiedLeftLines,
     sectionsWithMoves,
     type FlowDiffLine,
     type FlowDiffFile,
@@ -24,14 +25,10 @@ import {
 import { FileLine, type Side } from "./FlowDiffCode";
 import { MoveOverlay, pairedMoveLine } from "./FlowDiffMove";
 import {
-    buildDiffExportPages,
-    rasterizeDiffExportPages,
+    buildDiffExportImage,
+    rasterizeDiffExportImage,
 } from "./FlowDiffExport";
-import {
-    downloadDiffImages,
-    packageDiffImages,
-    type DiffImageFile,
-} from "./diffImageDownload";
+import { downloadDiffImages, type DiffImageFile } from "./diffImageDownload";
 import "./FlowDiff.css";
 
 export type FlowDiffProps = {
@@ -54,6 +51,42 @@ export type FlowDiffProps = {
 };
 
 export default function FlowDiff(props: FlowDiffProps) {
+    let panel: HTMLElement | undefined;
+    let searchInput: HTMLInputElement | undefined;
+    const [searchOpen, setSearchOpen] = createSignal(false);
+    const [searchText, setSearchText] = createSignal("");
+    const [searchCount, setSearchCount] = createSignal(0);
+    const [searchIndex, setSearchIndex] = createSignal(-1);
+    let searchMatches: HTMLElement[] = [];
+    const openSearch = () => {
+        setSearchOpen(true);
+        queueMicrotask(() => {
+            searchInput?.focus();
+            searchInput?.select();
+        });
+    };
+    const selectSearchMatch = (index: number) => {
+        searchMatches.forEach((line) =>
+            line.classList.remove("flow-search-current"),
+        );
+        if (!searchMatches.length) {
+            setSearchIndex(-1);
+            return;
+        }
+        const next = (index + searchMatches.length) % searchMatches.length;
+        setSearchIndex(next);
+        const line = searchMatches[next];
+        line.classList.add("flow-search-current");
+        line.scrollIntoView?.({ block: "center", inline: "nearest" });
+    };
+    const stepSearch = (direction: number) =>
+        selectSearchMatch(searchIndex() + direction);
+    onMount(() => {
+        panel?.addEventListener("ovim-diff-find", openSearch);
+        onCleanup(() =>
+            panel?.removeEventListener("ovim-diff-find", openSearch),
+        );
+    });
     const [hideEqual, setHideEqual] = createSignal(false);
     const [exporting, setExporting] = createSignal(false);
     const [exportMessage, setExportMessage] = createSignal("");
@@ -85,6 +118,7 @@ export default function FlowDiff(props: FlowDiffProps) {
         const review = props.review;
         const options = {
             view: effectiveView(),
+            layout: layout(),
             reconstruction: reconstruction(),
             traceMoves: traceMoves(),
             hideEqual: hideEqual(),
@@ -94,10 +128,8 @@ export default function FlowDiff(props: FlowDiffProps) {
         setExportFailed(false);
         try {
             await document.fonts?.ready;
-            const pages = buildDiffExportPages(review, options);
-            const file = await packageDiffImages(
-                await rasterizeDiffExportPages(pages),
-            );
+            const image = buildDiffExportImage(review, options);
+            const file = await rasterizeDiffExportImage(image);
             if (props.onExport) {
                 if (await props.onExport(file))
                     setExportMessage(`Saved ${file.filename}`);
@@ -747,6 +779,36 @@ export default function FlowDiff(props: FlowDiffProps) {
         });
     });
 
+    createEffect(() => {
+        const query = searchText().toLocaleLowerCase();
+        allSections();
+        layout();
+        reconstruction();
+        queueMicrotask(() => {
+            const lines = [
+                ...(panel?.querySelectorAll<HTMLElement>(".flow-code-line") ??
+                    []),
+            ];
+            for (const line of lines)
+                line.classList.remove(
+                    "flow-search-match",
+                    "flow-search-current",
+                );
+            searchMatches = query
+                ? lines.filter((line) =>
+                      line
+                          .querySelector(".flow-line-text")
+                          ?.textContent?.toLocaleLowerCase()
+                          .includes(query),
+                  )
+                : [];
+            for (const line of searchMatches)
+                line.classList.add("flow-search-match");
+            setSearchCount(searchMatches.length);
+            selectSearchMatch(0);
+        });
+    });
+
     const openCurrentChange = () => {
         const currentFile = file();
         const activeSection = sections().find(
@@ -776,6 +838,32 @@ export default function FlowDiff(props: FlowDiffProps) {
     const keydown: JSX.EventHandlerUnion<HTMLElement, KeyboardEvent> = (
         event,
     ) => {
+        if (
+            event.target instanceof HTMLInputElement ||
+            event.target instanceof HTMLTextAreaElement ||
+            event.isComposing
+        )
+            return;
+        if (
+            event.key === "/" ||
+            ((event.metaKey || event.ctrlKey) &&
+                event.key.toLowerCase() === "f")
+        ) {
+            event.preventDefault();
+            openSearch();
+            return;
+        }
+        if (event.key === "Escape" && searchOpen()) {
+            event.preventDefault();
+            setSearchOpen(false);
+            panel?.focus();
+            return;
+        }
+        if ((event.key === "n" || event.key === "N") && searchText()) {
+            event.preventDefault();
+            stepSearch(event.key === "N" ? -1 : 1);
+            return;
+        }
         if (event.target instanceof HTMLSelectElement) return;
         if (
             event.target instanceof HTMLButtonElement &&
@@ -898,6 +986,7 @@ export default function FlowDiff(props: FlowDiffProps) {
 
     return (
         <section
+            ref={panel}
             class="flow-diff"
             aria-label="Diff review"
             tabindex={0}
@@ -978,7 +1067,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                         type="button"
                         class="flow-equal-toggle"
                         aria-pressed={hideEqual()}
-                        title="Hide equal same-file changes, ignoring spaces and tabs (w)"
+                        title="Hide equal paired changes, ignoring spaces and tabs (w)"
                         onClick={() => setHideEqual((value) => !value)}
                     >
                         Hide equal changes
@@ -1026,7 +1115,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                     <button
                         type="button"
                         disabled={exporting() || !props.review.files.length}
-                        title="Download the complete review as PNG images. Multi-page reviews download as a ZIP."
+                        title="Download this view and layout as one dark PNG image."
                         onClick={() => void exportImages()}
                     >
                         {exporting() ? "Exporting…" : "Export image"}
@@ -1059,6 +1148,63 @@ export default function FlowDiff(props: FlowDiffProps) {
                     </Show>
                 </div>
             </header>
+            <Show when={searchOpen()}>
+                <div class="flow-search" role="search" aria-label="Search diff">
+                    <input
+                        ref={searchInput}
+                        type="search"
+                        aria-label="Find in diff"
+                        placeholder="Find in diff"
+                        value={searchText()}
+                        onInput={(event) =>
+                            setSearchText(event.currentTarget.value)
+                        }
+                        onKeyDown={(event) => {
+                            event.stopPropagation();
+                            if (event.key === "Enter") {
+                                event.preventDefault();
+                                stepSearch(event.shiftKey ? -1 : 1);
+                            }
+                            if (event.key === "Escape") {
+                                event.preventDefault();
+                                setSearchOpen(false);
+                                panel?.focus();
+                            }
+                        }}
+                    />
+                    <span role="status">
+                        {searchText()
+                            ? `${searchIndex() + 1} / ${searchCount()} matching lines`
+                            : "Type to search"}
+                    </span>
+                    <button
+                        type="button"
+                        aria-label="Previous search match"
+                        disabled={!searchCount()}
+                        onClick={() => stepSearch(-1)}
+                    >
+                        ↑
+                    </button>
+                    <button
+                        type="button"
+                        aria-label="Next search match"
+                        disabled={!searchCount()}
+                        onClick={() => stepSearch(1)}
+                    >
+                        ↓
+                    </button>
+                    <button
+                        type="button"
+                        aria-label="Close search"
+                        onClick={() => {
+                            setSearchOpen(false);
+                            panel?.focus();
+                        }}
+                    >
+                        ×
+                    </button>
+                </div>
+            </Show>
             <Show when={exportMessage()}>
                 <div
                     class="flow-export-status"
@@ -1071,7 +1217,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                 <div class="flow-overlay-status" role="status">
                     <span>
                         {props.review.overlay?.mode === "stale"
-                            ? "Saved restructuring no longer matches these changes."
+                            ? "Saved restructuring cannot be verified against this comparison."
                             : props.review.overlay?.mode === "saved"
                               ? "Viewing saved restructuring."
                               : props.review.overlay?.mode === "active"
@@ -1286,34 +1432,10 @@ export default function FlowDiff(props: FlowDiffProps) {
                                                                 </div>
                                                             </Show>
                                                             <For
-                                                                each={
-                                                                    section.kind ===
-                                                                        "context" &&
-                                                                    (!section.expanded ||
-                                                                        ((item.oldPath ||
-                                                                            item.path) ===
-                                                                            item.path &&
-                                                                            section
-                                                                                .left
-                                                                                .length ===
-                                                                                section
-                                                                                    .right
-                                                                                    .length &&
-                                                                            section.left.every(
-                                                                                (
-                                                                                    line,
-                                                                                    index,
-                                                                                ) =>
-                                                                                    line.text ===
-                                                                                    section
-                                                                                        .right[
-                                                                                        index
-                                                                                    ]
-                                                                                        ?.text,
-                                                                            )))
-                                                                        ? []
-                                                                        : section.left
-                                                                }
+                                                                each={unifiedLeftLines(
+                                                                    item,
+                                                                    section,
+                                                                )}
                                                             >
                                                                 {(
                                                                     line,

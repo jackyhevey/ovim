@@ -1,7 +1,10 @@
+import { PngWriter } from "./pngWriter";
 import {
     replacementParts,
     hideEqualChanges,
-    equalPairedLines,
+    equalMoveLines,
+    unifiedSections,
+    unifiedLeftLines,
     isEqualOnly,
     sectionsForFile,
     sectionsWithMoves,
@@ -18,35 +21,29 @@ export type DiffExportView = "files" | "guided";
 
 export type DiffExportOptions = {
     view: DiffExportView;
+    layout?: "split" | "unified";
     reconstruction: Reconstruction;
     traceMoves?: boolean;
     hideEqual?: boolean;
 };
 
-export type DiffExportPage = {
+export type DiffExportImage = {
     filename: string;
     svg: string;
     width: number;
     height: number;
 };
 
-export type RasterizedDiffExportPage = {
+export type RasterizedDiffExportImage = {
     filename: string;
     blob: Blob;
 };
 
-export class DiffExportTooLargeError extends Error {
-    constructor(message: string) {
-        super(message);
-        this.name = "DiffExportTooLargeError";
-    }
-}
-
-const PAGE_WIDTH = 1600;
-const PAGE_HEIGHT = 2000;
+const IMAGE_WIDTH = 1600;
+const STRIP_HEIGHT = 1024;
 const MARGIN = 54;
 const COLUMN_GAP = 24;
-const COLUMN_WIDTH = (PAGE_WIDTH - MARGIN * 2 - COLUMN_GAP) / 2;
+const COLUMN_WIDTH = (IMAGE_WIDTH - MARGIN * 2 - COLUMN_GAP) / 2;
 const FONT_SIZE = 16;
 const GLYPH_WIDTH = 10;
 const CODE_CHARS = Math.floor((COLUMN_WIDTH - 82) / GLYPH_WIDTH);
@@ -109,7 +106,7 @@ type FileBlock = {
     rows: ExportRow[];
 };
 type PositionedRow = { row: ExportRow; y: number };
-type DraftPage = { rows: PositionedRow[]; bottom: number; file?: FlowDiffFile };
+type ImageLayout = { rows: PositionedRow[]; bottom: number };
 
 function xml(text: string): string {
     return printable(text)
@@ -124,12 +121,12 @@ function printable(text: string): string {
     return text.replace(/\t/g, "    ").replace(/[\u0000-\u001f\u007f]/g, "�");
 }
 
-function wrapCode(text: string): string[] {
+function wrapCode(text: string, chars = CODE_CHARS): string[] {
     const characters = Array.from(printable(text));
     if (!characters.length) return [""];
     const chunks: string[] = [];
-    for (let start = 0; start < characters.length; start += CODE_CHARS)
-        chunks.push(characters.slice(start, start + CODE_CHARS).join(""));
+    for (let start = 0; start < characters.length; start += chars)
+        chunks.push(characters.slice(start, start + chars).join(""));
     return chunks;
 }
 
@@ -166,10 +163,11 @@ function codeCells(
     side: Side,
     counterpart?: FlowDiffLine,
     paired = false,
+    chars = CODE_CHARS,
 ): CodeCell[] {
     if (!line) return [];
     const fullText = printable(line.text);
-    return wrapCode(line.text).map((text, index) => ({
+    return wrapCode(line.text, chars).map((text, index) => ({
         number: index === 0 ? lineNumber(line, side) : undefined,
         marker:
             index === 0
@@ -183,7 +181,7 @@ function codeCells(
         text,
         fullText,
         counterpart: counterpart ? printable(counterpart.text) : undefined,
-        offset: index * CODE_CHARS,
+        offset: index * chars,
         paired,
     }));
 }
@@ -209,7 +207,7 @@ function moveRows(
     move: FlowDiffMove,
     reconstruction: Reconstruction,
     anchorLines: FlowDiffLine[],
-    hidden?: ReturnType<typeof equalPairedLines>,
+    hidden?: ReturnType<typeof equalMoveLines>,
 ): ExportRow[] {
     const endpoint = move[reconstruction];
     const side = reconstruction;
@@ -393,13 +391,81 @@ function fileBlock(
             text: "No text changes in this file.",
         });
     const renderedMoves = new Set<string>();
-    for (const section of sections) {
+    for (const section of options.layout === "unified"
+        ? unifiedSections(sections)
+        : sections) {
         if (section.kind === "gap") {
             rows.push({
                 kind: "gap",
                 height: 28,
                 text: section.label || "Context omitted",
             });
+            continue;
+        }
+        if (options.layout === "unified") {
+            for (const side of ["old", "new"] as const) {
+                const lines =
+                    side === "old"
+                        ? unifiedLeftLines(file, section)
+                        : section.right;
+                const other = side === "old" ? section.right : section.left;
+                lines.forEach((line, index) => {
+                    for (const cell of codeCells(
+                        line,
+                        side,
+                        other[index],
+                        false,
+                        Math.floor(
+                            (IMAGE_WIDTH - 2 * MARGIN - 82) / GLYPH_WIDTH,
+                        ),
+                    ))
+                        rows.push({
+                            kind: "code",
+                            height: LINE_HEIGHT,
+                            [side === "old" ? "left" : "right"]: cell,
+                        });
+                });
+            }
+            if (section.move && !renderedMoves.has(section.move.id)) {
+                renderedMoves.add(section.move.id);
+                const side = options.reconstruction;
+                const endpoint = section.move[side];
+                rows.push({
+                    kind: "overlayHeading",
+                    height: 30,
+                    side,
+                    text: `Possible match · ${moveLocation(endpoint)}`,
+                    overlayTitle: section.move.label || section.move.id,
+                });
+                const hidden = options.hideEqual
+                    ? equalMoveLines(section.move, file)
+                    : undefined;
+                for (const window of endpoint.contextWindows) {
+                    for (const line of window.lines) {
+                        if (
+                            side === "old"
+                                ? hidden?.oldLines.has(line.oldLine!)
+                                : hidden?.newLines.has(line.newLine!)
+                        )
+                            continue;
+                        for (const cell of codeCells(
+                            line,
+                            side,
+                            undefined,
+                            false,
+                            Math.floor(
+                                (IMAGE_WIDTH - 2 * MARGIN - 82) / GLYPH_WIDTH,
+                            ),
+                        ))
+                            rows.push({
+                                kind: "code",
+                                height: LINE_HEIGHT,
+                                overlaySide: side,
+                                [side === "old" ? "left" : "right"]: cell,
+                            });
+                    }
+                }
+            }
             continue;
         }
         if (section.move) {
@@ -435,7 +501,7 @@ function fileBlock(
                     sourceSide,
                     anchorLines,
                     options.hideEqual
-                        ? equalPairedLines(file, [section.move])
+                        ? equalMoveLines(section.move, file)
                         : undefined,
                 ),
             );
@@ -448,32 +514,42 @@ function fileBlock(
     return { file, header, rows };
 }
 
-function rowSvg(row: ExportRow, y: number): string {
+function rowSvg(row: ExportRow, y: number, unified = false): string {
     if (row.kind === "file") {
         const label = row.lines
             .map(
                 (line, index) =>
-                    `<text x="${MARGIN + 14}" y="${y + 27 + index * 23}" fill="#18253c" font-family="${MONO}" font-size="17" font-weight="700">${xml(line)}</text>`,
+                    `<text x="${MARGIN + 14}" y="${y + 27 + index * 23}" fill="#e5e7eb" font-family="${MONO}" font-size="17" font-weight="700">${xml(line)}</text>`,
             )
             .join("");
-        return `<rect x="${MARGIN}" y="${y}" width="${PAGE_WIDTH - 2 * MARGIN}" height="${row.height}" rx="5" fill="#e9eef5"/><text x="${PAGE_WIDTH - MARGIN - 14}" y="${y + 27}" text-anchor="end" fill="#52647e" font-family="${MONO}" font-size="14">${xml(`${row.status}   ${row.stats}${row.continued ? "   continued" : ""}`)}</text>${label}`;
+        return `<rect x="${MARGIN}" y="${y}" width="${IMAGE_WIDTH - 2 * MARGIN}" height="${row.height}" rx="5" fill="#263244"/><text x="${IMAGE_WIDTH - MARGIN - 14}" y="${y + 27}" text-anchor="end" fill="#b4bfce" font-family="${MONO}" font-size="14">${xml(`${row.status}   ${row.stats}${row.continued ? "   continued" : ""}`)}</text>${label}`;
     }
     if (row.kind === "overlayHeading") {
         const x =
-            row.side === "old" ? MARGIN : MARGIN + COLUMN_WIDTH + COLUMN_GAP;
-        return `<rect x="${x}" y="${y}" width="${COLUMN_WIDTH}" height="${row.height}" fill="#dfeaf6"/><rect x="${x}" y="${y}" width="4" height="${row.height}" fill="#547ba6"/><text x="${x + 14}" y="${y + 21}" fill="#294767" font-family="${MONO}" font-size="14" font-weight="700">${xml(row.text)}</text>`;
+            unified || row.side === "old"
+                ? MARGIN
+                : MARGIN + COLUMN_WIDTH + COLUMN_GAP;
+        return `<rect x="${x}" y="${y}" width="${unified ? IMAGE_WIDTH - 2 * MARGIN : COLUMN_WIDTH}" height="${row.height}" fill="#243c56"/><rect x="${x}" y="${y}" width="4" height="${row.height}" fill="#7aa2f7"/><text x="${x + 14}" y="${y + 21}" fill="#b5d5f5" font-family="${MONO}" font-size="14" font-weight="700">${xml(row.text)}</text>`;
     }
     if (row.kind === "note" || row.kind === "gap") {
         const x =
             row.side === "new" ? MARGIN + COLUMN_WIDTH + COLUMN_GAP : MARGIN;
-        const width = row.side ? COLUMN_WIDTH : PAGE_WIDTH - 2 * MARGIN;
+        const width = row.side ? COLUMN_WIDTH : IMAGE_WIDTH - 2 * MARGIN;
         const fill = row.side
-            ? "#f0f5fa"
+            ? "#1d3045"
             : row.kind === "gap"
-              ? "#f2f5f8"
-              : "#ffffff";
-        return `<rect x="${x}" y="${y}" width="${width}" height="${row.height}" fill="${fill}"/><text x="${x + 13}" y="${y + 19}" fill="#607087" font-family="${MONO}" font-size="13">${xml(row.text)}</text>`;
+              ? "#192231"
+              : "#161e2c";
+        return `<rect x="${x}" y="${y}" width="${width}" height="${row.height}" fill="${fill}"/><text x="${x + 13}" y="${y + 19}" fill="#9ca3af" font-family="${MONO}" font-size="13">${xml(row.text)}</text>`;
     }
+    if (unified)
+        return cellSvg(
+            row.left || row.right,
+            MARGIN,
+            y,
+            Boolean(row.overlaySide),
+            IMAGE_WIDTH - 2 * MARGIN,
+        );
     const left = cellSvg(row.left, MARGIN, y, row.overlaySide === "old");
     const right = cellSvg(
         row.right,
@@ -489,18 +565,19 @@ function cellSvg(
     x: number,
     y: number,
     overlay: boolean,
+    width = COLUMN_WIDTH,
 ): string {
     const fill = overlay
-        ? "#f0f5fa"
+        ? "#1d3045"
         : cell?.kind === "added"
-          ? "#eef8f0"
+          ? "#19362b"
           : cell?.kind === "removed"
-            ? "#fbefef"
-            : "#ffffff";
-    let svg = `<rect x="${x}" y="${y}" width="${COLUMN_WIDTH}" height="${LINE_HEIGHT}" fill="${fill}"/>`;
+            ? "#3b242d"
+            : "#161e2c";
+    let svg = `<rect x="${x}" y="${y}" width="${width}" height="${LINE_HEIGHT}" fill="${fill}"/>`;
     if (!cell) return svg;
     if (cell.paired)
-        svg += `<rect x="${x}" y="${y}" width="4" height="${LINE_HEIGHT}" fill="#547ba6"/>`;
+        svg += `<rect x="${x}" y="${y}" width="4" height="${LINE_HEIGHT}" fill="#7aa2f7"/>`;
     const codeX = x + 78;
     if (cell.counterpart !== undefined) {
         let offset = 0;
@@ -511,15 +588,15 @@ function cellSvg(
                 offset + Array.from(part.text).length,
             );
             if (part.changed && end > start)
-                svg += `<rect x="${codeX + (start - cell.offset) * GLYPH_WIDTH}" y="${y + 4}" width="${(end - start) * GLYPH_WIDTH}" height="18" rx="2" fill="${cell.kind === "added" ? "#b8e3c1" : cell.kind === "removed" ? "#f2c4c4" : "#c7dcf2"}"/>`;
+                svg += `<rect x="${codeX + (start - cell.offset) * GLYPH_WIDTH}" y="${y + 4}" width="${(end - start) * GLYPH_WIDTH}" height="18" rx="2" fill="${cell.kind === "added" ? "#285a40" : cell.kind === "removed" ? "#713741" : "#355575"}"/>`;
             offset += Array.from(part.text).length;
         }
     }
     const number = cell.number === undefined ? "" : String(cell.number);
-    svg += `<text x="${x + 43}" y="${y + 18}" text-anchor="end" fill="#738198" font-family="${MONO}" font-size="13">${xml(number)}</text>`;
-    svg += `<text x="${x + 58}" y="${y + 18}" fill="${cell.kind === "added" ? "#23834b" : cell.kind === "removed" ? "#b24a4a" : "#708097"}" font-family="${MONO}" font-size="14">${xml(cell.marker)}</text>`;
+    svg += `<text x="${x + 43}" y="${y + 18}" text-anchor="end" fill="#94a3b8" font-family="${MONO}" font-size="13">${xml(number)}</text>`;
+    svg += `<text x="${x + 58}" y="${y + 18}" fill="${cell.kind === "added" ? "#7bdca1" : cell.kind === "removed" ? "#f59ba5" : "#94a3b8"}" font-family="${MONO}" font-size="14">${xml(cell.marker)}</text>`;
     if (cell.text)
-        svg += `<text x="${codeX}" y="${y + 18}" fill="#1d2a3d" font-family="${MONO}" font-size="${FONT_SIZE}" textLength="${Array.from(cell.text).length * GLYPH_WIDTH}" lengthAdjust="spacingAndGlyphs" xml:space="preserve">${xml(cell.text)}</text>`;
+        svg += `<text x="${codeX}" y="${y + 18}" fill="#e5e7eb" font-family="${MONO}" font-size="${FONT_SIZE}" textLength="${Array.from(cell.text).length * GLYPH_WIDTH}" lengthAdjust="spacingAndGlyphs" xml:space="preserve">${xml(cell.text)}</text>`;
     return svg;
 }
 
@@ -593,10 +670,11 @@ function assertGuidedCoverage(
 }
 
 /** Lay out every selected canonical line before creating any raster image. */
-export function buildDiffExportPages(
+export function buildDiffExportImage(
     review: FlowDiffReview,
     options: DiffExportOptions,
-): DiffExportPage[] {
+): DiffExportImage {
+    options = { ...options, layout: options.layout ?? review.layout };
     const files = options.view === "guided" ? review.guidedFiles : review.files;
     if (!files)
         throw new Error("Guided review is unavailable for this comparison.");
@@ -604,75 +682,22 @@ export function buildDiffExportPages(
     const moves = options.view === "files" ? review.moves || [] : [];
     const titleLines = wrapWords(review.title, 116);
     const bodyTop = 151 + titleLines.length * 24;
-    if (bodyTop > PAGE_HEIGHT / 2)
-        throw new DiffExportTooLargeError(
-            "The review title is too long to fit a readable export page.",
-        );
     const provenance = review.provenance;
     const source = provenance
         ? `Change accounting · Snapshot base: ${provenance.baseLabel} · ${provenance.comparisonBaseOid}${provenance.snapshotId ? ` · ${provenance.snapshotId}` : ""}`
         : "Change accounting from the selected review";
     const sourceLines = wrapWords(source, 115);
     const footerSpace = Math.max(74, 38 + sourceLines.length * 18);
-    if (footerSpace > PAGE_HEIGHT / 3)
-        throw new DiffExportTooLargeError(
-            "Snapshot provenance is too long to fit a readable export page.",
-        );
-    const drafts: DraftPage[] = [{ rows: [], bottom: bodyTop }];
-    let current = drafts[0];
-    const append = (row: ExportRow, block: FileBlock) => {
-        if (row.height > PAGE_HEIGHT - footerSpace - bodyTop)
-            throw new DiffExportTooLargeError(
-                "A review heading is too long to fit a readable export page.",
-            );
-        if (current.bottom + row.height > PAGE_HEIGHT - footerSpace) {
-            current = { rows: [], bottom: bodyTop, file: block.file };
-            drafts.push(current);
-            if (row.kind !== "file") {
-                const header = block.header;
-                current.rows.push({
-                    row: { ...header, continued: true },
-                    y: current.bottom,
-                });
-                current.bottom += header.height;
-            }
-            if (
-                "overlayTitle" in row &&
-                row.overlayTitle &&
-                row.kind !== "overlayHeading"
-            ) {
-                for (const text of wrapWords(
-                    `${row.overlayTitle} (continued)`,
-                    CODE_CHARS + 3,
-                )) {
-                    const heading: ExportRow = {
-                        kind: "overlayHeading",
-                        height: 30,
-                        text,
-                        side:
-                            row.kind === "code"
-                                ? row.overlaySide!
-                                : row.side || "old",
-                        overlayTitle: row.overlayTitle,
-                    };
-                    current.rows.push({ row: heading, y: current.bottom });
-                    current.bottom += heading.height;
-                }
-            }
-        }
-        if (current.bottom + row.height > PAGE_HEIGHT - footerSpace)
-            throw new DiffExportTooLargeError(
-                "A review section is too tall to fit a readable export page.",
-            );
-        current.rows.push({ row, y: current.bottom });
-        current.bottom += row.height;
-        current.file = block.file;
+    const draft: ImageLayout = { rows: [], bottom: bodyTop };
+    const append = (row: ExportRow) => {
+        draft.rows.push({ row, y: draft.bottom });
+        draft.bottom += row.height;
     };
     for (const file of files) {
         const block = fileBlock(file, moves, options);
         if (!block) continue;
-        append(block.header, block);
-        for (const row of block.rows) append(row, block);
+        append(block.header);
+        for (const row of block.rows) append(row);
     }
     const additions = review.files.reduce(
         (sum, file) => sum + file.additions,
@@ -683,120 +708,113 @@ export function buildDiffExportPages(
         0,
     );
     const moveCount = review.moves?.length ?? 0;
-    const coverage = `${options.hideEqual ? "Equal same-file changes hidden · original patch: " : ""}${review.files.length} files · ${moveCount} possible moved-code matches · +${additions} −${deletions}`;
+    const coverage = `${options.hideEqual ? "Equal paired changes hidden · original patch: " : ""}${review.files.length} files · ${moveCount} possible moved-code matches · +${additions} −${deletions}`;
     const scope = options.view === "guided" ? "Guided sections" : "Files";
     const stem = safeStem(review.title);
-    const pageCount = drafts.length;
-    const pages = drafts.map((draft, index) => {
-        const height = Math.min(
-            PAGE_HEIGHT,
-            Math.max(420, draft.bottom + footerSpace),
-        );
-        const header = titleLines
-            .map(
-                (line, lineIndex) =>
-                    `<text x="${MARGIN}" y="${72 + lineIndex * 24}" fill="#18253c" font-family="${MONO}" font-size="20" font-weight="700">${xml(line)}</text>`,
-            )
-            .join("");
-        const rows = draft.rows.length
-            ? draft.rows.map(({ row, y }) => rowSvg(row, y)).join("")
-            : rowSvg(
-                  {
-                      kind: "note",
-                      height: 28,
-                      text: options.hideEqual
-                          ? "No unequal changes"
-                          : "No changes",
-                  },
-                  bodyTop,
-              );
-        const footer = sourceLines
-            .map(
-                (line, lineIndex) =>
-                    `<text x="${MARGIN}" y="${height - footerSpace + 32 + lineIndex * 18}" fill="#607087" font-family="${MONO}" font-size="12">${xml(line)}</text>`,
-            )
-            .join("");
-        const viewLabel =
-            options.view === "guided"
-                ? "GUIDED SECTIONS"
-                : options.traceMoves
-                  ? options.reconstruction === "old"
-                      ? "MOVED CODE · BEFORE CONTEXT"
-                      : "MOVED CODE · AFTER CONTEXT"
-                  : "FILE CHANGES";
-        const svg = [
-            `<svg xmlns="http://www.w3.org/2000/svg" width="${PAGE_WIDTH}" height="${height}" viewBox="0 0 ${PAGE_WIDTH} ${height}">`,
-            `<rect width="${PAGE_WIDTH}" height="${height}" fill="#f8fafc"/>`,
-            `<text x="${MARGIN}" y="38" fill="#547ba6" font-family="${MONO}" font-size="14" font-weight="700">DIFF REVIEW · ${xml(scope.toUpperCase())} · ${viewLabel}</text>`,
-            header,
-            `<text x="${MARGIN}" y="${bodyTop - 55}" fill="#607087" font-family="${MONO}" font-size="13">${xml(coverage)}</text>`,
-            `<line x1="${MARGIN}" x2="${PAGE_WIDTH - MARGIN}" y1="${bodyTop - 44}" y2="${bodyTop - 44}" stroke="#d7dfe8"/>`,
-            `<text x="${MARGIN + 8}" y="${bodyTop - 19}" fill="#52647e" font-family="${MONO}" font-size="13" font-weight="700">BEFORE</text>`,
-            `<text x="${MARGIN + COLUMN_WIDTH + COLUMN_GAP + 8}" y="${bodyTop - 19}" fill="#52647e" font-family="${MONO}" font-size="13" font-weight="700">AFTER</text>`,
-            rows,
-            `<line x1="${MARGIN}" x2="${PAGE_WIDTH - MARGIN}" y1="${height - footerSpace + 12}" y2="${height - footerSpace + 12}" stroke="#d7dfe8"/>`,
-            footer,
-            `<text x="${PAGE_WIDTH - MARGIN}" y="${height - 34}" text-anchor="end" fill="#607087" font-family="${MONO}" font-size="12">Page ${index + 1} of ${pageCount}</text>`,
-            "</svg>",
-        ].join("");
-        return {
-            filename: `${stem}-${options.view}-${String(index + 1).padStart(2, "0")}-of-${String(pageCount).padStart(2, "0")}.png`,
-            svg,
-            width: PAGE_WIDTH,
-            height,
-        };
-    });
-    return pages;
+
+    const height = Math.max(420, draft.bottom + footerSpace);
+    const header = titleLines
+        .map(
+            (line, lineIndex) =>
+                `<text x="${MARGIN}" y="${72 + lineIndex * 24}" fill="#e5e7eb" font-family="${MONO}" font-size="20" font-weight="700">${xml(line)}</text>`,
+        )
+        .join("");
+    const rows = draft.rows.length
+        ? draft.rows
+              .map(({ row, y }) => rowSvg(row, y, options.layout === "unified"))
+              .join("")
+        : rowSvg(
+              {
+                  kind: "note",
+                  height: 28,
+                  text: options.hideEqual ? "No unequal changes" : "No changes",
+              },
+              bodyTop,
+          );
+    const footer = sourceLines
+        .map(
+            (line, lineIndex) =>
+                `<text x="${MARGIN}" y="${height - footerSpace + 32 + lineIndex * 18}" fill="#9ca3af" font-family="${MONO}" font-size="12">${xml(line)}</text>`,
+        )
+        .join("");
+    const viewLabel =
+        options.view === "guided"
+            ? "GUIDED SECTIONS"
+            : options.traceMoves
+              ? options.reconstruction === "old"
+                  ? "MOVED CODE · BEFORE CONTEXT"
+                  : "MOVED CODE · AFTER CONTEXT"
+              : "FILE CHANGES";
+    const svg = [
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${IMAGE_WIDTH}" height="${height}" viewBox="0 0 ${IMAGE_WIDTH} ${height}">`,
+        `<rect width="${IMAGE_WIDTH}" height="${height}" fill="#111827"/>`,
+        `<text x="${MARGIN}" y="38" fill="#7aa2f7" font-family="${MONO}" font-size="14" font-weight="700">DIFF REVIEW · ${viewLabel} · ${options.layout === "unified" ? "UNIFIED" : "SIDE BY SIDE"}</text>`,
+        header,
+        `<text x="${MARGIN}" y="${bodyTop - 55}" fill="#9ca3af" font-family="${MONO}" font-size="13">${xml(coverage)}</text>`,
+        `<line x1="${MARGIN}" x2="${IMAGE_WIDTH - MARGIN}" y1="${bodyTop - 44}" y2="${bodyTop - 44}" stroke="#374151"/>`,
+        `<text x="${MARGIN + 8}" y="${bodyTop - 19}" fill="#b4bfce" font-family="${MONO}" font-size="13" font-weight="700">${options.layout === "unified" ? "CHANGES" : "BEFORE"}</text>`,
+        options.layout === "unified"
+            ? ""
+            : `<text x="${MARGIN + COLUMN_WIDTH + COLUMN_GAP + 8}" y="${bodyTop - 19}" fill="#b4bfce" font-family="${MONO}" font-size="13" font-weight="700">AFTER</text>`,
+        rows,
+        `<line x1="${MARGIN}" x2="${IMAGE_WIDTH - MARGIN}" y1="${height - footerSpace + 12}" y2="${height - footerSpace + 12}" stroke="#374151"/>`,
+        footer,
+        `<text x="${IMAGE_WIDTH - MARGIN}" y="${height - 34}" text-anchor="end" fill="#9ca3af" font-family="${MONO}" font-size="12">${xml(scope)}</text>`,
+        "</svg>",
+    ].join("");
+    return {
+        filename: `${stem}-${options.view}.png`,
+        svg,
+        width: IMAGE_WIDTH,
+        height,
+    };
 }
 
-/** Rasterize one page at a time so the canvas never holds the whole review. */
-export async function rasterizeDiffExportPages(
-    pages: DiffExportPage[],
-): Promise<RasterizedDiffExportPage[]> {
-    const output: RasterizedDiffExportPage[] = [];
-    for (const page of pages) {
-        const url = URL.createObjectURL(
-            new Blob([page.svg], { type: "image/svg+xml;charset=utf-8" }),
-        );
-        try {
-            const image = new Image();
-            await new Promise<void>((resolve, reject) => {
-                image.onload = () => resolve();
-                image.onerror = () =>
-                    reject(new Error(`Could not render ${page.filename}.`));
-                image.src = url;
-            });
-            const canvas = document.createElement("canvas");
-            canvas.width = page.width;
-            canvas.height = page.height;
+/** Render bounded strips into one PNG; tall reviews never require a giant canvas. */
+export async function rasterizeDiffExportImage(
+    page: DiffExportImage,
+): Promise<RasterizedDiffExportImage> {
+    const png = new PngWriter(page.width, page.height);
+    const canvas = document.createElement("canvas");
+    canvas.width = page.width;
+    try {
+        for (let top = 0; top < page.height; top += STRIP_HEIGHT) {
+            const height = Math.min(STRIP_HEIGHT, page.height - top);
+            // A small SVG viewport also avoids image-decoder dimension limits.
+            const svg = page.svg.replace(
+                /<svg[^>]*>/,
+                `<svg xmlns="http://www.w3.org/2000/svg" width="${page.width}" height="${height}" viewBox="0 ${top} ${page.width} ${height}">`,
+            );
+            const url = URL.createObjectURL(
+                new Blob([svg], { type: "image/svg+xml;charset=utf-8" }),
+            );
             try {
-                const context = canvas.getContext("2d");
+                const image = new Image();
+                await new Promise<void>((resolve, reject) => {
+                    image.onload = () => resolve();
+                    image.onerror = () =>
+                        reject(new Error(`Could not render ${page.filename}.`));
+                    image.src = url;
+                });
+                canvas.height = height;
+                const context = canvas.getContext("2d", {
+                    willReadFrequently: true,
+                });
                 if (!context)
                     throw new Error(
                         "Image export is unavailable in this browser.",
                     );
                 context.drawImage(image, 0, 0);
-                const blob = await new Promise<Blob>((resolve, reject) =>
-                    canvas.toBlob(
-                        (value) =>
-                            value
-                                ? resolve(value)
-                                : reject(
-                                      new Error(
-                                          `Could not encode ${page.filename}.`,
-                                      ),
-                                  ),
-                        "image/png",
-                    ),
-                );
-                output.push({ filename: page.filename, blob });
+                png.write(context.getImageData(0, 0, page.width, height).data);
+                // Let progress repaint and controls respond between strips.
+                await new Promise<void>((resolve) => setTimeout(resolve, 0));
             } finally {
-                canvas.width = 0;
-                canvas.height = 0;
+                URL.revokeObjectURL(url);
             }
-        } finally {
-            URL.revokeObjectURL(url);
         }
+        return { filename: page.filename, blob: png.finish() };
+    } finally {
+        canvas.width = 0;
+        canvas.height = 0;
     }
-    return output;
 }

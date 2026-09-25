@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { unzipSync } from "fflate";
+import { unzlibSync } from "fflate";
 import { expect, test, type Page } from "@playwright/test";
 import type { GuiDiffDocument, GuiDiffLine } from "../src/types";
 
@@ -669,7 +669,7 @@ test("stale restructuring can be recovered through native diff actions", async (
         overlay: { mode: "stale", title: "Extract parser" },
     });
     await expect(
-        page.getByText("Saved restructuring no longer matches these changes."),
+        page.getByText("Saved restructuring cannot be verified against this comparison."),
     ).toBeVisible();
     await page.screenshot({
         path: test.info().outputPath("custom-diff-stale.png"),
@@ -970,7 +970,7 @@ for (const view of ["Files", "Guided"]) {
     });
 }
 
-test("exports long reviews as one ZIP containing every numbered PNG page", async ({
+test("exports a tall review as one dark PNG beyond browser canvas limits", async ({
     page,
 }, testInfo) => {
     test.setTimeout(120_000);
@@ -998,17 +998,25 @@ test("exports long reviews as one ZIP containing every numbered PNG page", async
         .getByRole("button", { name: "Export image", exact: true })
         .click();
     const download = await pending;
-    expect(download.suggestedFilename()).toMatch(/\.zip$/);
-    const destination = testInfo.outputPath("review.zip");
+    expect(download.suggestedFilename()).toMatch(/\.png$/);
+    const destination = testInfo.outputPath("review.png");
     await download.saveAs(destination);
-    const entries = Object.entries(unzipSync(await readFile(destination)));
-    expect(entries.length).toBeGreaterThan(32);
-    for (const [name, bytes] of entries) {
-        expect(name).toMatch(/-\d+-of-\d+\.png$/);
-        expect([...bytes.subarray(0, 8)]).toEqual([
-            137, 80, 78, 71, 13, 10, 26, 10,
-        ]);
+    const png = await readFile(destination);
+    expect([...png.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(png.readUInt32BE(16)).toBe(1600);
+    const height = png.readUInt32BE(20);
+    expect(height).toBeGreaterThan(62500);
+    const data: Uint8Array[] = [];
+    for (let offset = 8; offset < png.length;) {
+        const length = png.readUInt32BE(offset);
+        if (png.toString("ascii", offset + 4, offset + 8) === "IDAT") data.push(png.subarray(offset + 8, offset + 8 + length));
+        offset += length + 12;
     }
+    const pixels = unzlibSync(Buffer.concat(data));
+    expect(pixels.length).toBe(height * (1600 * 4 + 1));
+    // Sub-filter first pixel is literal RGBA. Check the final strip as well.
+    expect([...pixels.subarray(1, 5)]).toEqual([17, 24, 39, 255]);
+    expect([...pixels.subarray((height - 1) * 6401 + 1, (height - 1) * 6401 + 5)]).toEqual([17, 24, 39, 255]);
 });
 
 for (const width of [1440, 760]) {
@@ -1174,13 +1182,13 @@ for (const width of [1440, 760]) {
         await expect(movedLines).toHaveCount(2);
         await page.getByRole("button", { name: "Guided", exact: true }).click();
         await expect(equalLines).toHaveCount(0);
-        await expect(movedLines).toHaveCount(2);
-        await expect(page.getByText("1 / 1", { exact: true })).toBeVisible();
+        await expect(movedLines).toHaveCount(0);
+        await expect(page.getByText("0 / 0", { exact: true })).toBeVisible();
         await diff.focus();
         await page.keyboard.press("s");
-        await expect(page.locator(".flow-unified-scroll")).toBeVisible();
+        await expect(page.getByText("No unequal changes", {exact: true})).toBeVisible();
         await expect(equalLines).toHaveCount(0);
-        await expect(movedLines).toHaveCount(2);
+        await expect(movedLines).toHaveCount(0);
         await page.screenshot({
             path: testInfo.outputPath("equal-pairs-hidden.png"),
         });
@@ -1325,4 +1333,44 @@ test("one-line diff context controls fit the gutter without overlapping", async 
     const heading = (await page.locator(".flow-unified-heading").boundingBox())!;
     const unifiedUp = (await page.locator(".flow-unified-scroll").getByRole("button", { name: "Show more context above" }).boundingBox())!;
     expect(unifiedUp.y).toBeGreaterThanOrEqual(heading.y + heading.height);
+});
+
+
+test("guided diff search owns slash and find typing, wraps matches and keeps shortcuts out", async ({page}, testInfo) => {
+    await setup(page, movedReview);
+    await page.getByRole("button", {name: "Guided", exact: true}).click();
+    const panel = page.getByRole("region", {name: "Diff review", exact: true});
+    await panel.focus();
+    await page.keyboard.press("/");
+    const input = page.getByRole("searchbox", {name: "Find in diff"});
+    await expect(input).toBeFocused();
+    await page.keyboard.type("parse");
+    await expect(input).toHaveValue("parse");
+    await expect(page.locator(".flow-search-current")).toHaveCount(1);
+    const first = await page.locator(".flow-search-current").textContent();
+    await input.press("Enter");
+    await expect(page.locator(".flow-search-current")).not.toHaveText(first!);
+    await input.press("Shift+Enter");
+    await expect(page.locator(".flow-search-current")).toHaveText(first!);
+    await input.fill("jkswr");
+    await expect(page.getByRole("button", {name: "Hide equal changes"})).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByRole("button", {name: "Side by side", exact: true})).toHaveAttribute("aria-pressed", "true");
+    await expect(page.getByText("0 / 0 matching lines", {exact: true})).toBeVisible();
+    await input.press("Escape");
+    await expect(input).toHaveCount(0);
+    await expect(panel).toBeFocused();
+    await page.keyboard.press("Control+f");
+    await expect(input).toBeFocused();
+    await input.press("Escape");
+    await page.keyboard.press("Meta+f");
+    await expect(input).toBeFocused();
+    await input.fill("parseTokens");
+    await expect(page.locator(".flow-search-current")).toHaveCount(1);
+    await page.screenshot({path: testInfo.outputPath("guided-search.png")});
+    await input.press("Escape");
+    await page.getByRole("button", {name: "Unified", exact: true}).click();
+    await panel.focus();
+    await page.keyboard.press("/");
+    await expect(input).toBeFocused();
+    await expect(page.locator(".flow-search-current")).toHaveCount(1);
 });

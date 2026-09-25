@@ -555,7 +555,7 @@ pub fn render_custom(
 
     builder.header(
         if hide_equal {
-            "Hide equal changes: on (same file, ignoring whitespace)"
+            "Hide equal changes: on (paired, ignoring whitespace)"
         } else {
             "Hide equal changes: off · w to toggle"
         },
@@ -1486,52 +1486,6 @@ fn humanize(age: Duration) -> String {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn humanize_buckets() {
-        assert_eq!(humanize(Duration::from_secs(10)), "just now");
-        assert_eq!(humanize(Duration::from_secs(600)), "10 min ago");
-        assert_eq!(humanize(Duration::from_secs(3 * 3600)), "3 h ago");
-        assert_eq!(humanize(Duration::from_secs(3 * 86_400)), "3 d ago");
-    }
-
-    #[test]
-    fn tabs_expand_to_the_next_stop_and_point_back_at_the_tab() {
-        let glyphs = layout_body("\tx", 4, true);
-        assert_eq!(glyphs.len(), 5);
-        assert!(glyphs[..4].iter().all(|glyph| glyph.src_byte == 0));
-        assert_eq!(glyphs[4].src_byte, 1);
-
-        // Without expansion a tab is a single glyph, so unified rows keep the
-        // raw patch bytes.
-        let raw = layout_body("\tx", 4, false);
-        assert_eq!(raw.len(), 2);
-    }
-
-    #[test]
-    fn chunking_never_loops_on_a_glyph_wider_than_the_column() {
-        let glyphs = layout_body("日本語", 4, true);
-        let runs = chunk_glyphs(&glyphs, 1);
-        assert_eq!(runs.len(), 3);
-        assert_eq!(runs[0], 0..1);
-    }
-
-    #[test]
-    fn chunking_an_empty_body_yields_one_empty_run() {
-        assert_eq!(chunk_glyphs(&[], 20), vec![0..0]);
-    }
-
-    #[test]
-    fn layout_parses_its_command_argument() {
-        assert_eq!(DiffLayout::parse("Split"), Some(DiffLayout::Split));
-        assert_eq!(DiffLayout::parse("unified"), Some(DiffLayout::Unified));
-        assert_eq!(DiffLayout::parse("nope"), None);
-    }
-}
-
 /// Insert source context at existing code boundaries, without control or spacer rows.
 /// Canonical patch indices and their syntax mappings remain untouched.
 pub fn expand_context(
@@ -1776,4 +1730,50 @@ pub fn expand_context(
     rendered.highlights = highlights;
     rendered.custom_targets = targets;
     result_ids
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_buckets() {
+        assert_eq!(humanize(Duration::from_secs(10)), "just now");
+        assert_eq!(humanize(Duration::from_secs(600)), "10 min ago");
+        assert_eq!(humanize(Duration::from_secs(3 * 3600)), "3 h ago");
+        assert_eq!(humanize(Duration::from_secs(3 * 86_400)), "3 d ago");
+    }
+
+    #[test]
+    fn tabs_expand_to_the_next_stop_and_point_back_at_the_tab() {
+        let glyphs = layout_body("\tx", 4, true);
+        assert_eq!(glyphs.len(), 5);
+        assert!(glyphs[..4].iter().all(|glyph| glyph.src_byte == 0));
+        assert_eq!(glyphs[4].src_byte, 1);
+
+        // Without expansion a tab is a single glyph, so unified rows keep the
+        // raw patch bytes.
+        let raw = layout_body("\tx", 4, false);
+        assert_eq!(raw.len(), 2);
+    }
+
+    #[test]
+    fn chunking_never_loops_on_a_glyph_wider_than_the_column() {
+        let glyphs = layout_body("日本語", 4, true);
+        let runs = chunk_glyphs(&glyphs, 1);
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0], 0..1);
+    }
+
+    #[test]
+    fn chunking_an_empty_body_yields_one_empty_run() {
+        assert_eq!(chunk_glyphs(&[], 20), vec![0..0]);
+    }
+
+    #[test]
+    fn layout_parses_its_command_argument() {
+        assert_eq!(DiffLayout::parse("Split"), Some(DiffLayout::Split));
+        assert_eq!(DiffLayout::parse("unified"), Some(DiffLayout::Unified));
+        assert_eq!(DiffLayout::parse("nope"), None);
+    }
 }

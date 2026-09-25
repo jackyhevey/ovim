@@ -26,6 +26,10 @@ pub struct ReviewSnapshot {
     /// Captured source text for navigation and context on replay.
     #[serde(default)]
     pub sources: Vec<SourceFileSnapshot>,
+    /// Full byte identity of every comparison endpoint, independent of excerpt limits.
+    /// Missing in old snapshots or when any endpoint cannot be captured safely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_fingerprint: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +120,28 @@ pub struct CustomReview {
 }
 
 pub fn review_snapshot(path: &Path, base: &ReviewBase) -> Result<ReviewSnapshot> {
-    let mut snapshot = ReviewSnapshot::from_patch(review_patch(path, base)?)?;
+    let snapshot = review_display_snapshot(path, base)?;
+    ensure!(
+        !snapshot.patch.truncated,
+        "Diff exceeds the 4 MiB review limit; narrow the comparison before creating a custom diff"
+    );
+    Ok(snapshot)
+}
+
+/// Ordinary diffs remain viewable at the patch limit, but a truncated comparison
+/// cannot supply context or prove that a saved refinement is still applicable.
+pub fn review_display_snapshot(path: &Path, base: &ReviewBase) -> Result<ReviewSnapshot> {
+    let patch = review_patch(path, base)?;
+    if patch.truncated {
+        return Ok(ReviewSnapshot {
+            id: String::new(),
+            patch,
+            blocks: Vec::new(),
+            sources: Vec::new(),
+            content_fingerprint: None,
+        });
+    }
+    let mut snapshot = ReviewSnapshot::from_patch(patch)?;
     snapshot.capture_sources(path)?;
     snapshot.refresh_id()?;
     Ok(snapshot)
@@ -135,7 +160,11 @@ impl ReviewSnapshot {
     }
 
     fn refresh_id(&mut self) -> Result<()> {
-        let digest = Sha256::digest(serde_json::to_vec(&(&self.patch, &self.sources))?);
+        let digest = Sha256::digest(serde_json::to_vec(&(
+            &self.patch,
+            &self.sources,
+            &self.content_fingerprint,
+        ))?);
         self.id = format!(
             "diff_{}",
             digest
@@ -152,6 +181,8 @@ impl ReviewSnapshot {
         let old_tree = repo.find_commit(base_oid)?.tree()?;
         let new_tree = comparison_target_tree(&repo, &self.patch.base.spec)?;
         let mut remaining = MAX_FROZEN_SOURCE_BYTES;
+        let mut identities = Vec::new();
+        let mut complete_identity = true;
         let raw = self.patch.text.lines().collect::<Vec<_>>();
         let mut by_file = vec![Vec::new(); self.patch.files.len()];
         for (index, line) in self.patch.lines.iter().enumerate() {
@@ -163,9 +194,6 @@ impl ReviewSnapshot {
         }
 
         for (file_index, file) in self.patch.files.iter().enumerate() {
-            if file.binary {
-                continue;
-            }
             let mut captured = SourceFileSnapshot {
                 file: file_index,
                 old: None,
@@ -194,15 +222,18 @@ impl ReviewSnapshot {
                     .filter_map(|line| if is_old { line.old_line } else { line.new_line })
                     .collect::<Vec<_>>();
                 let source = if is_old {
-                    source_from_tree(&repo, &old_tree, &source_path)?
+                    capture_from_tree(&repo, &old_tree, &source_path)?
                 } else if let Some(tree) = &new_tree {
-                    source_from_tree(&repo, tree, &source_path)?
+                    capture_from_tree(&repo, tree, &source_path)?
                 } else {
-                    source_from_worktree(&self.patch.root, &source_path)?
+                    capture_from_worktree(&self.patch.root, &source_path)?
                 };
-                let Some(source) = source else {
+                complete_identity &= source.identity.is_some();
+                identities.push((file_index, is_old, source_path.clone(), source.identity));
+                let Some(bytes) = source.bytes.filter(|_| !file.binary) else {
                     continue;
                 };
+                let source = source_lines(&bytes);
                 verify_changed_lines(
                     &self.patch,
                     &raw,
@@ -224,6 +255,12 @@ impl ReviewSnapshot {
             if captured.old.is_some() || captured.new.is_some() {
                 self.sources.push(captured);
             }
+        }
+        if complete_identity {
+            self.content_fingerprint = Some(format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&identities)?)
+            ));
         }
         Ok(())
     }
@@ -304,6 +341,7 @@ impl ReviewSnapshot {
             patch,
             blocks,
             sources: Vec::new(),
+            content_fingerprint: None,
         })
     }
 
@@ -482,38 +520,87 @@ fn safe_relative_path(path: &str) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
-fn source_from_tree(repo: &Repository, tree: &Tree<'_>, path: &str) -> Result<Option<Vec<String>>> {
-    let Ok(entry) = tree.get_path(Path::new(path)) else {
-        return Ok(None);
-    };
-    let Ok(blob) = repo.find_blob(entry.id()) else {
-        return Ok(None);
-    };
-    if blob.size() > MAX_SOURCE_READ_BYTES {
-        return Ok(None);
+/// An absent endpoint has a verifiable identity; an unreadable one does not.
+struct CapturedSource {
+    bytes: Option<Vec<u8>>,
+    identity: Option<String>,
+}
+impl CapturedSource {
+    fn missing() -> Self {
+        Self {
+            bytes: None,
+            identity: Some("absent".into()),
+        }
     }
-    Ok(Some(source_lines(blob.content())))
+    fn unavailable() -> Self {
+        Self {
+            bytes: None,
+            identity: None,
+        }
+    }
+    fn bytes(bytes: Vec<u8>) -> Self {
+        let identity = Some(format!("sha256:{:x}", Sha256::digest(&bytes)));
+        Self {
+            bytes: Some(bytes),
+            identity,
+        }
+    }
 }
 
-fn source_from_worktree(root: &Path, path: &str) -> Result<Option<Vec<String>>> {
-    let path = root.join(path);
+fn capture_from_tree(repo: &Repository, tree: &Tree<'_>, path: &str) -> Result<CapturedSource> {
+    let entry = match tree.get_path(Path::new(path)) {
+        Ok(entry) => entry,
+        Err(error) if error.code() == git2::ErrorCode::NotFound => {
+            return Ok(CapturedSource::missing())
+        }
+        Err(_) => return Ok(CapturedSource::unavailable()),
+    };
+    let Ok(blob) = repo.find_blob(entry.id()) else {
+        return Ok(CapturedSource::unavailable());
+    };
+    if blob.size() > MAX_SOURCE_READ_BYTES {
+        return Ok(CapturedSource::unavailable());
+    }
+    Ok(CapturedSource::bytes(blob.content().to_vec()))
+}
+
+fn capture_from_worktree(root: &Path, relative: &str) -> Result<CapturedSource> {
+    let path = root.join(relative);
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
-        Err(_) => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(CapturedSource::missing())
+        }
+        Err(_) => return Ok(CapturedSource::unavailable()),
     };
+    // Do not follow an intermediate symlink outside this worktree.
+    let canonical_root = fs::canonicalize(root)?;
+    if !path
+        .parent()
+        .and_then(|parent| fs::canonicalize(parent).ok())
+        .is_some_and(|parent| parent.starts_with(canonical_root))
+    {
+        return Ok(CapturedSource::unavailable());
+    }
+    if metadata.file_type().is_symlink() {
+        return Ok(match fs::read_link(path) {
+            Ok(target) => CapturedSource::bytes(target.as_os_str().as_encoded_bytes().to_vec()),
+            Err(_) => CapturedSource::unavailable(),
+        });
+    }
     if !metadata.file_type().is_file() || metadata.len() > MAX_SOURCE_READ_BYTES as u64 {
-        return Ok(None);
+        return Ok(CapturedSource::unavailable());
     }
     let Ok(file) = File::open(path) else {
-        return Ok(None);
+        return Ok(CapturedSource::unavailable());
     };
     let mut bytes = Vec::new();
     file.take(MAX_SOURCE_READ_BYTES as u64 + 1)
         .read_to_end(&mut bytes)?;
     if bytes.len() > MAX_SOURCE_READ_BYTES {
-        return Ok(None);
+        return Ok(CapturedSource::unavailable());
     }
-    Ok(Some(source_lines(&bytes)))
+    Ok(CapturedSource::bytes(bytes))
 }
 
 fn source_lines(bytes: &[u8]) -> Vec<String> {
@@ -635,7 +722,7 @@ impl ReviewSection {
     /// the saved sections: coverage validation and replay still own every edit.
     pub fn equal_change_lines(&self) -> std::collections::HashSet<usize> {
         let mut hidden = std::collections::HashSet::new();
-        if self.old_path.is_none() || self.old_path != self.new_path {
+        if self.old_path.is_none() || self.new_path.is_none() {
             return hidden;
         }
         // Compare each replacement independently; context and metadata are hard
@@ -1159,7 +1246,7 @@ mod equal_change_tests {
         assert_eq!(hidden, [0, 2, 3, 6].into_iter().collect());
         let mut cross_file = section;
         cross_file.new_path = Some("src/b.rs".into());
-        assert!(cross_file.equal_change_lines().is_empty());
+        assert_eq!(cross_file.equal_change_lines(), hidden);
     }
 
     #[test]

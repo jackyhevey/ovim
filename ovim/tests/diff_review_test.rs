@@ -1673,6 +1673,102 @@ async fn w_hides_equal_same_file_pairs_in_both_terminal_layouts_without_changing
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn w_hides_equal_cross_file_pairs_in_both_terminal_layouts_without_changing_the_snapshot() {
+    let fixture = Fixture::new();
+    fs::write(fixture.root.join("moved.txt"), "one\n two \nTHREE\n").unwrap();
+    fs::remove_file(fixture.root.join("a.txt")).unwrap();
+    fs::remove_file(fixture.root.join("b.txt")).unwrap();
+    let snapshot = ReviewSnapshot::from_patch(
+        review_patch(&fixture.root, &ReviewBase::explicit("main")).unwrap(),
+    )
+    .unwrap();
+    let old = snapshot
+        .blocks
+        .iter()
+        .find(|block| block.kind == PatchLineKind::Removed)
+        .unwrap();
+    let new = snapshot
+        .blocks
+        .iter()
+        .find(|block| block.kind == PatchLineKind::Added)
+        .unwrap();
+    let custom = snapshot
+        .reassign(&[DiffPairing {
+            label: Some("Cross-file pair".into()),
+            old: ChangeRef {
+                block_id: old.id.clone(),
+                offset: None,
+                count: None,
+            },
+            new: ChangeRef {
+                block_id: new.id.clone(),
+                offset: None,
+                count: None,
+            },
+        }])
+        .unwrap();
+    let mut test = open_editor_on(&fixture, "moved.txt");
+    test.editor
+        .open_custom_diff_review("Equal and real changes", custom.clone())
+        .unwrap();
+    assert!(test.editor.buffer().rope().to_string().contains("two"));
+    test.press_with(KeyCode::Char('w'), ovim_core::Modifiers::CONTROL);
+    test.press_esc();
+    assert!(test.editor.buffer().rope().to_string().contains("two"));
+    test.keys("w");
+    for columns in [100, 80] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(columns, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                ovim::ui::Renderer::render_to_frame(
+                    frame,
+                    &mut test.editor,
+                    &mut Default::default(),
+                )
+            })
+            .unwrap();
+        let screen: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(screen.contains("Hide equal changes: on"), "{screen}");
+        assert!(screen.contains("THREE"), "{screen}");
+        let text = test.editor.buffer().rope().to_string();
+        assert!(!text.contains("two"), "{text}");
+        assert!(text.contains("three") && text.contains("THREE"), "{text}");
+        let retained = test.editor.diff_review().unwrap().custom().unwrap();
+        assert_eq!(retained, &custom);
+        retained.validate_coverage().unwrap();
+        let mapping = test.editor.diff_review().unwrap().patch_review_lines();
+        for line in retained.sections.iter().flat_map(|section| &section.lines) {
+            if line.text.trim() == "two" {
+                assert!(mapping[line.source_patch_line].is_none());
+            }
+            if line.text == "THREE" {
+                let row = mapping[line.source_patch_line].expect("real edit has a source mapping");
+                assert!(text.lines().nth(row).unwrap().contains("THREE"));
+            }
+        }
+
+        test.keys("]c");
+        test.editor.refresh_diff_review();
+        assert!(!test.editor.buffer().rope().to_string().contains("two"));
+        test.keys("s");
+    }
+    test.keys("w");
+    assert!(test.editor.buffer().rope().to_string().contains("two"));
+    test.keys("wq");
+    test.editor
+        .open_custom_diff_review("Replay", custom)
+        .unwrap();
+    assert!(!test.editor.buffer().rope().to_string().contains("two"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn entirely_equal_terminal_review_has_no_phantom_navigation_and_can_be_restored() {
     let fixture = Fixture::new();
     fs::write(fixture.root.join("a.txt"), "one\n two \nthree\n").unwrap();
@@ -1951,4 +2047,177 @@ async fn paired_context_stays_with_each_file_and_stops_at_capture_gaps() {
         assert_eq!(view.after.old.last().unwrap().number, 60);
         assert_eq!(view.after.new.last().unwrap().number, 81);
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn refined_diffs_survive_independent_editors_only_for_verified_comparisons() {
+    use ovim_core::native_diff::store::{same_comparison, ReviewStore};
+    let fixture = Fixture::new();
+    let storage = tempfile::tempdir().unwrap();
+    let store = ReviewStore::new(storage.path().join("reviews"));
+    let first = review_snapshot(&fixture.root, &ReviewBase::explicit("main")).unwrap();
+    let custom = first.reassign(&[]).unwrap();
+    {
+        let mut terminal = open_editor_on(&fixture, "a.txt");
+        terminal.editor.set_diff_review_store(Some(store.clone()));
+        terminal
+            .editor
+            .open_custom_diff_review("Saved refinement", custom.clone())
+            .unwrap();
+    } // no exit hook or live instance required
+    let mut gui = open_editor_on(&fixture, "a.txt");
+    gui.editor.set_diff_review_store(Some(store.clone()));
+    gui.editor.open_diff_review(Some("main")).unwrap();
+    assert_eq!(gui.editor.diff_review().unwrap().custom(), Some(&custom));
+    assert_eq!(
+        gui.editor.diff_review_overlay_state().unwrap().mode,
+        "active"
+    );
+    assert!(gui
+        .editor
+        .buffer()
+        .rope()
+        .to_string()
+        .contains("Saved refinement"));
+    gui.editor.toggle_diff_review_overlay().unwrap();
+    assert_eq!(
+        gui.editor.diff_review_overlay_state().unwrap().mode,
+        "available"
+    );
+    gui.editor.refresh_diff_review();
+    assert_eq!(
+        gui.editor.diff_review_overlay_state().unwrap().mode,
+        "available",
+        "disk reload must respect the current instance's toggle"
+    );
+
+    fs::write(fixture.root.join("a.txt"), "another comparison\n").unwrap();
+    let second = review_snapshot(&fixture.root, &ReviewBase::explicit("main")).unwrap();
+    assert!(!same_comparison(&first, &second));
+    let mut changed = open_editor_on(&fixture, "a.txt");
+    changed.editor.set_diff_review_store(Some(store.clone()));
+    changed.editor.open_diff_review(Some("main")).unwrap();
+    assert!(changed.editor.diff_review().unwrap().custom().is_none());
+    assert_eq!(
+        changed.editor.diff_review_overlay_state().unwrap().mode,
+        "stale"
+    );
+    changed.editor.open_saved_diff_overlay().unwrap();
+    assert_eq!(
+        changed.editor.diff_review().unwrap().custom(),
+        Some(&custom)
+    );
+    assert_eq!(
+        changed.editor.diff_review_overlay_state().unwrap().mode,
+        "saved"
+    );
+    let second_custom = second.reassign(&[]).unwrap();
+    changed
+        .editor
+        .open_custom_diff_review("Second refinement", second_custom)
+        .unwrap();
+    // Returning to an older comparison recovers its own refinement, not just the latest.
+    fs::write(fixture.root.join("a.txt"), "one\n2\nthree\nfour\n").unwrap();
+    let mut returned = open_editor_on(&fixture, "a.txt");
+    returned.editor.set_diff_review_store(Some(store.clone()));
+    returned.editor.open_diff_review(Some("main")).unwrap();
+    assert_eq!(
+        returned.editor.diff_review().unwrap().custom(),
+        Some(&custom)
+    );
+    // A different comparison selector must not silently reuse this view.
+    returned.editor.open_diff_review(Some("HEAD")).unwrap();
+    assert!(returned.editor.diff_review().unwrap().custom().is_none());
+
+    let other = Fixture::new();
+    let mut isolated = open_editor_on(&other, "a.txt");
+    isolated.editor.set_diff_review_store(Some(store));
+    isolated.editor.open_diff_review(Some("main")).unwrap();
+    assert!(isolated.editor.diff_review().unwrap().custom().is_none());
+    assert_eq!(
+        isolated.editor.diff_review_overlay_state().unwrap().mode,
+        "none"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn persistent_diff_verification_covers_bytes_outside_excerpts_and_legacy_reviews_fail_closed()
+{
+    use ovim_core::native_diff::store::{same_comparison, ReviewStore};
+    let fixture = Fixture::new();
+    let storage = tempfile::tempdir().unwrap();
+    let store = ReviewStore::new(storage.path().join("reviews"));
+    fs::write(fixture.root.join("binary.bin"), b"\0binary one").unwrap();
+    let first = review_snapshot(&fixture.root, &ReviewBase::explicit("main")).unwrap();
+    assert!(first.content_fingerprint.is_some());
+    let mut changed = first.clone();
+    fs::write(fixture.root.join("binary.bin"), b"\0binary two").unwrap();
+    let second = review_snapshot(&fixture.root, &ReviewBase::explicit("main")).unwrap();
+    // Even a coincidentally equal presentation is insufficient for binary content.
+    changed.content_fingerprint = second.content_fingerprint.clone();
+    assert!(!same_comparison(&first, &changed));
+    assert!(!same_comparison(&first, &second));
+    fs::write(fixture.root.join("binary.bin"), b"\0binary one").unwrap();
+    fs::write(fixture.root.join("a.txt"), "one\r\n2\r\nthree\r\nfour\r\n").unwrap();
+    let crlf = review_snapshot(&fixture.root, &ReviewBase::explicit("main")).unwrap();
+    assert_ne!(first.content_fingerprint, crlf.content_fingerprint);
+    assert!(!same_comparison(&first, &crlf));
+    fs::write(fixture.root.join("a.txt"), "one\n2\nthree\nfour\n").unwrap();
+    let mut legacy = first.clone();
+    legacy.content_fingerprint = None;
+    store
+        .save("Older saved diff", &legacy.reassign(&[]).unwrap())
+        .unwrap();
+    let mut editor = open_editor_on(&fixture, "a.txt");
+    editor.editor.set_diff_review_store(Some(store));
+    editor.editor.open_diff_review(Some("main")).unwrap();
+    assert!(editor.editor.diff_review().unwrap().custom().is_none());
+    assert_eq!(
+        editor.editor.diff_review_overlay_state().unwrap().mode,
+        "stale"
+    );
+    editor.editor.open_saved_diff_overlay().unwrap();
+    assert!(editor.editor.diff_review().unwrap().custom().is_some());
+}
+
+#[test]
+fn comparison_proof_covers_large_source_beyond_captured_context() {
+    use ovim_core::native_diff::store::same_comparison;
+    let fixture = Fixture::new();
+    let repo = Repository::open(&fixture.root).unwrap();
+    let mut lines: Vec<_> = (0..90_000)
+        .map(|i| format!("original source line {i}"))
+        .collect();
+    fs::write(fixture.root.join("large.txt"), lines.join("\n")).unwrap();
+    commit_all(&repo, "large source");
+    lines[100] = "first actual change".into();
+    fs::write(fixture.root.join("large.txt"), lines.join("\n")).unwrap();
+    let first = review_snapshot(&fixture.root, &ReviewBase::explicit("HEAD")).unwrap();
+    let source = first.source_for("large.txt", "new").unwrap();
+    assert!(!source.complete);
+    assert!(source.line(50_001).is_none());
+    assert!(first.content_fingerprint.is_some());
+    lines[50_000] = "change outside previously captured context".into();
+    fs::write(fixture.root.join("large.txt"), lines.join("\n")).unwrap();
+    let second = review_snapshot(&fixture.root, &ReviewBase::explicit("HEAD")).unwrap();
+    assert_ne!(first.content_fingerprint, second.content_fingerprint);
+    assert!(!same_comparison(&first, &second));
+}
+
+#[test]
+fn truncated_diff_still_opens_as_a_display_snapshot_without_restoration_proof() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("large.txt"),
+        "added source line\n".repeat(300_000),
+    )
+    .unwrap();
+    let snapshot = ovim_core::native_diff::review_display_snapshot(
+        &fixture.root,
+        &ReviewBase::explicit("HEAD"),
+    )
+    .unwrap();
+    assert!(snapshot.patch.truncated);
+    assert!(snapshot.content_fingerprint.is_none());
+    assert!(review_snapshot(&fixture.root, &ReviewBase::explicit("HEAD")).is_err());
 }

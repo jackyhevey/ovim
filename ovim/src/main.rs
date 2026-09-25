@@ -121,6 +121,7 @@ async fn main() -> Result<()> {
     // detection, syntax highlighting, LSP startup, and --render.
     let mut editor = Editor::new();
     editor.load_ai_chat_preference();
+    editor.enable_diff_review_persistence();
     if let Err(e) = editor.enable_lua() {
         ovim_core::log_error!("main", "Failed to enable Lua support: {}", e);
     }
