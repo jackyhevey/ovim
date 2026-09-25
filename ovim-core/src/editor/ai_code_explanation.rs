@@ -1060,6 +1060,11 @@ impl Editor {
                 }
             }
 
+            let path = absolute_path
+                .strip_prefix(root)
+                .unwrap_or(&absolute_path)
+                .to_string_lossy()
+                .into_owned();
             steps.push(CodeExplanationStep::Code {
                 path,
                 absolute_path,
@@ -1232,16 +1237,59 @@ impl Editor {
             );
             return Err(ToolResult::Error(error));
         }
-        // `select_text` centers the midpoint for general navigation. A
-        // walkthrough instead owns the bottom rows with its card, so pin the
-        // range's first line to the top and let the validated visual-row budget
-        // flow downward without being obscured.
-        self.buffer_mut().cursor_mut().set_position(
-            start_line.saturating_sub(1),
-            crate::unicode::GraphemeCol::ZERO,
-        );
-        self.move_cursor_line_to_top_with_offset(0);
+        self.position_code_explanation(self.ai_code_explanation_safe_range_lines());
         Ok(())
+    }
+
+    /// Center the complete selection in the unobscured code area. Frontends may
+    /// supply measured rows above their card; oversized ranges start at the top.
+    pub fn position_code_explanation(&mut self, visible_rows: usize) {
+        let Some(CodeExplanationView {
+            page:
+                CodeExplanationPageView::Code {
+                    start_line,
+                    end_line,
+                    ..
+                },
+            ..
+        }) = self.ai_code_explanation_view()
+        else {
+            return;
+        };
+        let start = start_line.saturating_sub(1);
+        let width = self.render_cache.last_text_width;
+        if self.options.wrap && width > 0 {
+            self.ensure_wrap_map(width);
+        }
+        let visible_rows = visible_rows.max(1).min(self.viewport_height().max(1));
+        let (offset, subrow) = if let Some(map) = self.wrap_map().filter(|_| self.options.wrap) {
+            let first = map.logical_to_visual(start);
+            let height = map.logical_to_visual(end_line).saturating_sub(first);
+            map.visual_to_logical(first.saturating_sub(visible_rows.saturating_sub(height) / 2))
+        } else {
+            let height = end_line.saturating_sub(start);
+            (
+                start.saturating_sub(visible_rows.saturating_sub(height) / 2),
+                0,
+            )
+        };
+        self.buffer_mut()
+            .cursor_mut()
+            .set_position(start, crate::unicode::GraphemeCol::ZERO);
+        self.viewport.scroll_offset = offset;
+        self.viewport.scroll_subrow = subrow;
+        if let Some(window) = self
+            .window_manager
+            .as_mut()
+            .and_then(|wm| wm.focused_window_mut())
+        {
+            window
+                .cursor_mut()
+                .set_position(start, crate::unicode::GraphemeCol::ZERO);
+            window.set_scroll_position(offset, subrow);
+        }
+        self.preserve_viewport_after_input();
+        self.mark_dirty();
     }
 
     pub(super) fn discard_code_explanation_presentation_buffer(
@@ -1426,6 +1474,86 @@ mod tests {
             remaining_tool_calls: Vec::new(),
             model_name: "test".into(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn walkthrough_centers_full_ranges_and_gui_scroll_chords_preserve_selection() {
+        let (_dir, mut editor, first, _second) = setup_editor();
+        std::fs::write(
+            &first,
+            (1..=100)
+                .map(|i| format!("// row {i}\n"))
+                .collect::<String>(),
+        )
+        .unwrap();
+        // The invocation snapshot prefers the open buffer, so reload its contents.
+        editor.buffer_mut().replace_content(
+            &(1..=100)
+                .map(|i| format!("// row {i}\n"))
+                .collect::<String>(),
+        );
+        let result = editor.begin_code_explanation(
+            call(json!([{
+                "path": first.to_string_lossy(), "start_line": 40, "end_line": 43,
+                "comment": "A complete range."
+            }])),
+            batch_continuation(),
+        );
+        if let Err((error, _)) = result {
+            panic!("{error:?}");
+        }
+        let view = editor.ai_code_explanation_view().unwrap();
+        assert!(
+            matches!(view.page, CodeExplanationPageView::Code { ref path, .. } if path == "first.rs")
+        );
+        editor.position_code_explanation(14);
+        assert_eq!(editor.scroll_offset(), 34);
+        editor.position_code_explanation(3);
+        assert_eq!(editor.scroll_offset(), 39);
+        let selection = editor.ai_state.active_selection.clone().unwrap();
+        for (key, expected) in [('e', 40), ('y', 39)] {
+            crate::editor::input::InputHandler::handle_key_event(
+                &mut editor,
+                crate::KeyEvent::new(crate::KeyCode::Char(key), crate::Modifiers::CONTROL),
+            )
+            .unwrap();
+            assert_eq!(editor.scroll_offset(), expected);
+            let active = editor.ai_state.active_selection.as_ref().unwrap();
+            assert_eq!(
+                (active.start_line, active.end_line),
+                (selection.start_line, selection.end_line)
+            );
+            assert!(editor.ai_chat_has_pending_code_explanation());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn walkthrough_position_counts_wrapped_rows_and_preserves_eof_visibility() {
+        let (_dir, mut editor, _first, _second) = setup_editor();
+        let source = (0..50)
+            .map(|_| "abcdefghijklmnopqrst\n")
+            .collect::<String>();
+        editor.buffer_mut().replace_content(&source);
+        if let Err((error, _)) = editor.begin_code_explanation(
+            call(json!([{
+                "path": "first.rs", "start_line": 48, "end_line": 50, "comment": "End of file."
+            }])),
+            batch_continuation(),
+        ) {
+            panic!("{error:?}");
+        }
+        editor.options.wrap = true;
+        editor.render_cache.last_text_width = 10;
+        editor.position_code_explanation(12);
+        let map = editor.wrap_map().unwrap();
+        let start = map.logical_to_visual(47);
+        let end = map.logical_to_visual(50);
+        let top = map.viewport_top_visual_row(editor.scroll_offset(), editor.scroll_subrow());
+        assert_eq!(start - top, (12 - (end - start)) / 2);
+        assert!(end - top <= 12);
+        editor.position_code_explanation(2);
+        assert_eq!(editor.scroll_offset(), 47);
+        assert_eq!(editor.scroll_subrow(), 0);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -1883,7 +2011,7 @@ mod tests {
         assert_eq!(editor.ai_code_explanation_view().unwrap().current, 1);
         let selection = editor.ai_state.active_selection.as_ref().unwrap();
         assert_eq!((selection.start_line, selection.end_line), (1, 3));
-        assert_eq!(editor.scroll_offset(), 1);
+        assert_eq!(editor.scroll_offset(), 0);
 
         assert!(editor.move_code_explanation(true));
         assert!(editor.buffer().file_path().is_none());
@@ -2175,7 +2303,7 @@ mod tests {
         )
         .unwrap();
         let pinned_offset = editor.scroll_offset();
-        assert_eq!(pinned_offset, 6);
+        assert_eq!(pinned_offset, 0);
 
         // Repeating an ignored key used to consume the initial viewport pin and
         // then let the shared scrolloff pass pull the selection toward center.

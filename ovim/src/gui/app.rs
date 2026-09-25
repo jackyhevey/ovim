@@ -361,6 +361,15 @@ async fn gui_attach_image(
 }
 
 #[tauri::command]
+async fn gui_position_walkthrough(
+    bridge: State<'_, GuiBridge>,
+    current: usize,
+    rows: usize,
+) -> Result<(), String> {
+    bridge.position_walkthrough(current, rows).await
+}
+
+#[tauri::command]
 async fn gui_set_cursor(
     bridge: State<'_, GuiBridge>,
     pane: usize,
@@ -614,6 +623,7 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
             gui_paste,
             gui_attach_image,
             gui_set_cursor,
+            gui_position_walkthrough,
             gui_open_ai_chat,
             gui_set_chat_input_cursor,
             gui_update_chat_input,

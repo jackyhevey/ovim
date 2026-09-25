@@ -12,6 +12,7 @@ import { Channel, invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
+import { walkthroughPath } from "./walkthroughTitle";
 import { mockSnapshot } from "./mock";
 import { version } from "../package.json";
 import MarkdownDocument from "./MarkdownDocument";
@@ -340,8 +341,51 @@ export const CodeWalkthrough = (props: {
     walkthrough: GuiCodeExplanation;
     onKey: (key: string) => void;
     restoreFocus?: () => void;
+    onPosition?: (current: number, rows: number) => void;
 }) => {
     let dialog!: HTMLElement;
+    let heading!: HTMLElement;
+    const [titleBudget, setTitleBudget] = createSignal(80);
+    let measure = () => {};
+    onMount(() => {
+        let lastGeometry = "";
+        measure = () => {
+            setTitleBudget(Math.max(8, Math.floor(heading.clientWidth / 8)));
+            if (page().kind !== "code") return;
+            const viewport = dialog
+                .closest(".editor-body")
+                ?.querySelector<HTMLElement>(
+                    ".editor-pane.focused .code-viewport",
+                );
+            if (!viewport) return;
+            const code = viewport.getBoundingClientRect();
+            const rows = Math.max(
+                1,
+                Math.floor(
+                    (Math.min(
+                        code.bottom,
+                        dialog.getBoundingClientRect().top - 12,
+                    ) -
+                        code.top) /
+                        LINE_HEIGHT,
+                ),
+            );
+            const geometry = `${props.walkthrough.current}:${rows}:${code.width}`;
+            if (geometry === lastGeometry) return;
+            lastGeometry = geometry;
+            props.onPosition?.(props.walkthrough.current, rows);
+        };
+        const observer = new ResizeObserver(measure);
+        observer.observe(dialog);
+        observer.observe(dialog.parentElement!);
+        measure();
+        onCleanup(() => observer.disconnect());
+    });
+    createEffect(() => {
+        props.walkthrough.current;
+        props.walkthrough.page;
+        queueMicrotask(() => measure());
+    });
     const dispatch = (key: string) => {
         props.onKey(key);
         queueMicrotask(() => dialog?.focus({ preventScroll: true }));
@@ -349,10 +393,11 @@ export const CodeWalkthrough = (props: {
     onMount(() => queueMicrotask(() => dialog?.focus({ preventScroll: true })));
     onCleanup(() => queueMicrotask(() => props.restoreFocus?.()));
     const page = () => props.walkthrough.page;
-    const title = () => {
+    const title = (shorten = false) => {
         const active = page();
         if (active.kind === "concept") return active.title;
-        return `${active.path}:${active.startLine}${active.endLine !== active.startLine ? `–${active.endLine}` : ""}`;
+        const range = `:${active.startLine}${active.endLine !== active.startLine ? `–${active.endLine}` : ""}`;
+        return `${shorten ? walkthroughPath(active.path, titleBudget() - range.length) : active.path}${range}`;
     };
     const teaching = () => {
         const active = page();
@@ -394,7 +439,14 @@ export const CodeWalkthrough = (props: {
                             · {props.walkthrough.current} of{" "}
                             {props.walkthrough.total}
                         </small>
-                        <b id="walkthrough-title">{title()}</b>
+                        <b
+                            ref={heading!}
+                            id="walkthrough-title"
+                            title={title()}
+                            aria-label={title()}
+                        >
+                            {title(true)}
+                        </b>
                     </div>
                     <button
                         type="button"
@@ -2146,9 +2198,16 @@ function App() {
     };
 
     const handleWheel = async (event: WheelEvent) => {
-        const pane = (event.target as Element | null)?.closest<HTMLElement>(
-            ".editor-pane",
-        );
+        const target = event.target as Element | null;
+        // The modal blocks source clicks, but its uncovered code surface still
+        // scrolls the focused pane. Card content keeps native DOM scrolling.
+        if (target?.closest(".walkthrough-card, .walkthrough-layer.concept"))
+            return;
+        const pane =
+            target?.closest<HTMLElement>(".editor-pane") ??
+            (target?.closest(".walkthrough-layer.code")
+                ? editorBody.querySelector<HTMLElement>(".editor-pane.focused")
+                : null);
         if (
             !pane ||
             (event.target as Element | null)?.closest(
@@ -3793,6 +3852,12 @@ function App() {
                                 <CodeWalkthrough
                                     walkthrough={active()}
                                     restoreFocus={focusPrimaryInput}
+                                    onPosition={(current, rows) =>
+                                        void mutate(
+                                            "gui_position_walkthrough",
+                                            { current, rows },
+                                        )
+                                    }
                                     onKey={(key) =>
                                         void sendKey({
                                             key,

@@ -936,6 +936,11 @@ enum GuiRequest {
         data: Vec<u8>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    PositionWalkthrough {
+        current: usize,
+        rows: usize,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     SetCursor {
         pane: usize,
         line: usize,
@@ -1170,6 +1175,15 @@ impl GuiBridge {
     pub async fn attach_image_data(&self, name: String, data: Vec<u8>) -> Result<(), String> {
         self.request(|reply| GuiRequest::AttachImageData { name, data, reply })
             .await
+    }
+
+    pub async fn position_walkthrough(&self, current: usize, rows: usize) -> Result<(), String> {
+        self.request(|reply| GuiRequest::PositionWalkthrough {
+            current,
+            rows,
+            reply,
+        })
+        .await
     }
 
     pub async fn set_cursor(
@@ -1835,6 +1849,19 @@ async fn handle_request(
                 editor.dispatch_pending_intents().await;
             }
             (reply, result)
+        }
+        GuiRequest::PositionWalkthrough {
+            current,
+            rows,
+            reply,
+        } => {
+            if editor
+                .ai_code_explanation_view()
+                .is_some_and(|view| view.current == current)
+            {
+                editor.position_code_explanation(rows);
+            }
+            (reply, Ok(()))
         }
         GuiRequest::SetCursor {
             pane,
@@ -4230,7 +4257,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join(".git")).unwrap();
         std::fs::write(dir.path().join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
         let file = dir.path().join("demo.rs");
-        std::fs::write(&file, "fn demo() {}\n").unwrap();
+        std::fs::write(&file, "fn demo() {}\n".repeat(100)).unwrap();
         let mut editor = Editor::default();
         editor.open_file(&file).unwrap();
         editor
@@ -4248,8 +4275,8 @@ mod tests {
                     },
                     {
                         "type": "code",
-                        "path": "demo.rs",
-                        "start_line": 1,
+                        "path": file.to_string_lossy(),
+                        "start_line": 40,
                         "comment": "This function is the entry point."
                     }
                 ]
@@ -4311,11 +4338,67 @@ mod tests {
             code_page.page,
             GuiCodeExplanationPage::Code {
                 ref path,
-                start_line: 1,
-                end_line: 1,
+                start_line: 40,
+                end_line: 40,
                 ref comment,
             } if path == "demo.rs" && comment.contains("entry point")
         ));
+
+        handle_viewport_resize(&mut editor, 100, 30);
+        let (reply, response) = oneshot::channel();
+        handle_request(
+            GuiRequest::PositionWalkthrough {
+                current: 2,
+                rows: 11,
+                reply,
+            },
+            &mut editor,
+            &mut (100, 30),
+            &mut 3,
+            &mut GuiProjectionCache::default(),
+        )
+        .await;
+        response.await.unwrap().unwrap();
+        assert_eq!(snapshot(&editor, 3).first_line, 34);
+        let (reply, response) = oneshot::channel();
+        handle_request(
+            GuiRequest::Key {
+                input: GuiKeyInput {
+                    key: "e".into(),
+                    control: true,
+                    shift: false,
+                    alt: false,
+                    meta: false,
+                },
+                reply,
+            },
+            &mut editor,
+            &mut (100, 30),
+            &mut 4,
+            &mut GuiProjectionCache::default(),
+        )
+        .await;
+        response.await.unwrap().unwrap();
+        assert_eq!(snapshot(&editor, 4).first_line, 35);
+        let (reply, response) = oneshot::channel();
+        handle_request(
+            GuiRequest::PositionWalkthrough {
+                current: 1,
+                rows: 1,
+                reply,
+            },
+            &mut editor,
+            &mut (100, 30),
+            &mut 5,
+            &mut GuiProjectionCache::default(),
+        )
+        .await;
+        response.await.unwrap().unwrap();
+        assert_eq!(
+            snapshot(&editor, 5).first_line,
+            35,
+            "stale page geometry must not undo manual scrolling"
+        );
     }
 
     #[test]

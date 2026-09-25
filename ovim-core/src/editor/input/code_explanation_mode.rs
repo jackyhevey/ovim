@@ -31,6 +31,20 @@ pub(super) fn handle_key(editor: &mut Editor, key_event: KeyEvent) -> bool {
         )
     });
 
+    // The GUI translates wheel input into the editor's scrolling chords.
+    // Keep these available while composing too, without changing the question.
+    if key_event.modifiers.contains(Modifiers::CONTROL)
+        && matches!(key_event.code, KeyCode::Char('e' | 'y'))
+    {
+        if key_event.code == KeyCode::Char('e') {
+            editor.scroll_viewport_down(1);
+        } else {
+            editor.scroll_viewport_up(1);
+        }
+        editor.preserve_viewport_after_input();
+        return true;
+    }
+
     if composing {
         match key_event.code {
             KeyCode::Esc => {
