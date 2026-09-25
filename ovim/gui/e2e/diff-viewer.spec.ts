@@ -1241,3 +1241,88 @@ test("an entirely equal curated review has a visible empty state and can be rest
     await toggle.click();
     await expect(page.locator(".flow-code-line")).toHaveCount(2);
 });
+
+for (const curated of [false, true]) test(`context expansion preserves code position and adds only source rows (${curated ? "curated unified" : "ordinary split"})`, async ({ page }) => {
+    const document = structuredClone(review);
+    document.files = [document.files[0]];
+    if (curated) {
+        document.custom = true;
+        document.layout = "unified";
+        document.files[0].status = "reassigned";
+        document.files[0].oldPath = "src/legacy/PaymentResource.java";
+        document.files[0].hunks[0].lines = document.files[0].hunks[0].lines.filter(line => line.kind !== "context");
+    }
+    document.files[0].hunks[0].context = {
+        id: "hunk:8", before: { old: [], new: [] }, after: { old: [], new: [] }, canExpandUp: true, canExpandDown: true,
+    };
+    await page.route("**/node_modules/.vite/deps/@tauri-apps_api_event.js*", route => route.fulfill({ contentType: "application/javascript", body: "export const listen = async () => () => {};" }));
+    await page.route("**/node_modules/.vite/deps/@tauri-apps_api_core.js*", route => route.fulfill({ contentType: "application/javascript", body: `
+        import { mockSnapshot } from '/src/mock.ts';
+        export const isTauri = () => true;
+        export class Channel {}
+        window.diffCommands = [];
+        let listener, current = mockSnapshot;
+        export const invoke = async (command, args) => {
+            window.diffCommands.push({command, args});
+            if (command === 'gui_subscribe') { listener = args.onEvent; listener.onmessage(current); }
+            if (command === 'gui_diff_action') {
+                const next = structuredClone(current);
+                const doc = next.panes[0].diffReview;
+                const context = doc.files[0].hunks[0].context;
+                if (args.action.startsWith('expand_up:')) {
+                    context.before = { old: Array.from({length: 10}, (_, i) => ({number: 1190+i, text: 'captured_before_' + i + '();'})), new: Array.from({length: 10}, (_, i) => ({number: 1190+i, text: 'captured_before_' + i + '();'})) };
+                    context.canExpandUp = false;
+                } else if (args.action.startsWith('expand_down:')) {
+                    context.after = { old: [{number: 1304, text: 'captured_after();'}], new: [{number: 1285, text: 'captured_after();'}] };
+                    context.canExpandDown = false;
+                } else if (args.action === 'unified') doc.layout = 'unified';
+                next.revision++;
+                current = next;
+                listener.onmessage(next);
+            }
+        };` }));
+    await setup(page, document);
+    const old = page.locator(curated ? ".flow-unified-scroll" : ".flow-scroll.old");
+    const anchor = old.getByRole("button", { name: `Before line ${curated ? 1204 : 1200}, open source`, exact: true });
+    await page.screenshot({ path: "/tmp/ovim-context-controls-" + test.info().project.name + (curated ? "-curated" : "") + ".png" });
+    const before = (await anchor.boundingBox())!;
+    const count = await old.locator(".flow-code-line").count();
+    await old.getByRole("button", { name: "Show more context above" }).click();
+    await expect(old.locator(".flow-code-line")).toHaveCount(count + (curated ? 20 : 10));
+    await expect.poll(async () => Math.abs((await anchor.boundingBox())!.y - before.y)).toBeLessThan(2);
+    await expect(old.getByRole("button", { name: "Show more context above" })).toHaveCount(0);
+    await page.locator(".flow-diff").press("J");
+    await expect(old.getByText("captured_after();")).toHaveCount(curated ? 2 : 1);
+    const rows = await old.locator(".flow-code-line").evaluateAll(elements => elements.map(element => {
+        const rect = element.getBoundingClientRect(); return { top: rect.top, bottom: rect.bottom };
+    }));
+    expect(rows.every((row, index) => !index || Math.abs(row.top - rows[index - 1].bottom) < 1)).toBe(true);
+    if (!curated) await page.locator(".flow-diff").press("s");
+    const unified = page.locator(".flow-unified-scroll");
+    await expect(unified).toBeVisible();
+    await expect(unified.getByText("captured_before_0();", {exact: true})).toHaveCount(curated ? 2 : 1);
+    await expect(unified.getByText("captured_after();", {exact: true})).toHaveCount(curated ? 2 : 1);
+    await page.screenshot({ path: '/tmp/ovim-context-' + test.info().project.name + '.png' });
+});
+
+test("one-line diff context controls fit the gutter without overlapping", async ({ page }) => {
+    await page.setViewportSize({ width: 760, height: 600 });
+    const document = structuredClone(review);
+    document.files = [document.files[0]];
+    document.files[0].hunks = [{ header: "Pair", oldStart: 10, oldCount: 1, newStart: 10, newCount: 1,
+        lines: [{ kind: "removed", text: "before();", oldLine: 10 }, { kind: "added", text: "after();", newLine: 10 }],
+        context: { id: "hunk:1", before: { old: [], new: [] }, after: { old: [], new: [] }, canExpandUp: true, canExpandDown: true },
+    }];
+    await setup(page, document);
+    const old = page.locator(".flow-scroll.old");
+    const up = (await old.getByRole("button", { name: "Show more context above" }).boundingBox())!;
+    const down = (await old.getByRole("button", { name: "Show more context below" }).boundingBox())!;
+    const code = (await old.locator(".flow-line-text").boundingBox())!;
+    expect(up.y + up.height).toBeLessThanOrEqual(down.y);
+    expect(up.x + up.width).toBeLessThanOrEqual(code.x);
+    expect(down.x + down.width).toBeLessThanOrEqual(code.x);
+    await page.locator(".flow-diff").press("s");
+    const heading = (await page.locator(".flow-unified-heading").boundingBox())!;
+    const unifiedUp = (await page.locator(".flow-unified-scroll").getByRole("button", { name: "Show more context above" }).boundingBox())!;
+    expect(unifiedUp.y).toBeGreaterThanOrEqual(heading.y + heading.height);
+});

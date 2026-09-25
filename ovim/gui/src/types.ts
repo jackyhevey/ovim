@@ -57,7 +57,19 @@ export interface GuiDiffLine {
     highlights?: GuiMarkdownHighlight[];
 }
 
+export interface GuiDiffContext {
+    id: string;
+    before: {
+        old: { number: number; text: string }[];
+        new: { number: number; text: string }[];
+    };
+    after: GuiDiffContext["before"];
+    canExpandUp: boolean;
+    canExpandDown: boolean;
+}
+
 export interface GuiDiffHunk {
+    context?: GuiDiffContext;
     header: string;
     oldStart: number;
     oldCount: number;

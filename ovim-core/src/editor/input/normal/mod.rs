@@ -14,7 +14,7 @@ mod pending_commands;
 mod text_objects;
 
 use crate::editor::Editor;
-use crate::{KeyCode, KeyEvent};
+use crate::{KeyCode, KeyEvent, Modifiers};
 use anyhow::Result;
 
 /// Handle a key event in normal mode.
@@ -91,6 +91,20 @@ fn try_handle_diff_review_key(editor: &mut Editor, key_event: KeyEvent) -> bool 
         KeyCode::Char('q') => editor.close_diff_review(),
         KeyCode::Char('r') => editor.refresh_diff_review(),
         KeyCode::Char('s') => editor.toggle_diff_review_layout(),
+        KeyCode::Char('K')
+            if !key_event
+                .modifiers
+                .intersects(Modifiers::CONTROL | Modifiers::ALT) =>
+        {
+            editor.expand_diff_context_at_cursor(true)
+        }
+        KeyCode::Char('J')
+            if !key_event
+                .modifiers
+                .intersects(Modifiers::CONTROL | Modifiers::ALT) =>
+        {
+            editor.expand_diff_context_at_cursor(false)
+        }
         KeyCode::Char('w')
             if key_event.modifiers.is_empty()
                 && editor

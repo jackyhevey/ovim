@@ -381,6 +381,7 @@ impl ReviewPatch {
     }
 }
 
+pub mod context;
 mod custom;
 pub use custom::{
     review_snapshot, ChangeBlock, ChangeRef, CustomReview, DiffPairing, FrozenSource,

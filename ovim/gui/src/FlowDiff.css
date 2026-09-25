@@ -727,3 +727,51 @@
     color: var(--text-secondary);
     white-space: nowrap;
 }
+
+/* Gutter affordances overlay the existing boundary line; no control rows. */
+.flow-section,
+.flow-unified-section {
+    position: relative;
+}
+.flow-expand-context {
+    position: absolute;
+    left: 0;
+    z-index: 3;
+    width: 17px;
+    height: 17px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-primary);
+    background: var(--surface-1);
+    font: inherit;
+    font-size: 12px;
+    line-height: 14px;
+    cursor: pointer;
+    opacity: 0.7;
+}
+.flow-expand-context.up {
+    top: 0;
+}
+.flow-expand-context.down {
+    bottom: 0;
+}
+.flow-expand-context:hover,
+.flow-expand-context:focus-visible {
+    opacity: 1;
+    color: var(--accent);
+}
+
+/* Unified headings already occupy a row: keep arrows in the code gutter. */
+.flow-unified-section.change > .flow-expand-context.up {
+    top: 30px;
+}
+/* A one-line excerpt still offers both directions without covering its number. */
+:is(.flow-section, .flow-unified-section):has(> .flow-code-line):not(
+        :has(> .flow-code-line ~ .flow-code-line)
+    )
+    > .flow-expand-context {
+    height: 11px;
+    font-size: 9px;
+    line-height: 8px;
+}

@@ -91,7 +91,11 @@ export function FileLine(props: {
         });
     };
     return (
-        <div class={`flow-code-line ${props.line.kind}`}>
+        <div
+            class={`flow-code-line ${props.line.kind}`}
+            data-source-line={number()}
+            data-source-side={props.side}
+        >
             <button
                 type="button"
                 class="flow-line-number"

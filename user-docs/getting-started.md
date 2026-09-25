@@ -77,9 +77,16 @@ both layouts, Guided sections, change navigation, and image exports. Toggle it
 off to restore the complete review. The original patch and its change totals
 are unchanged.
 
+In a managed diff, use `K` / `J` to reveal ten more source lines above / below
+the current block. The GUI also has small gutter arrows at the block edges;
+they do not add spacer rows. Context comes from the captured comparison, stays
+with its own file on each side, and stops at a neighboring block or the end of
+the captured source. Older saved reviews may not contain surrounding source.
+
 | Key | Action |
 |---|---|
 | `<Space>gd` | Open the review, return to it from a file, or leave it |
+| `K` / `J` | Reveal ten surrounding lines above / below the current diff block (GUI and terminal) |
 | `s` | Switch between the unified and side-by-side layouts |
 | `w` | Hide/show equal same-file pairs, ignoring whitespace (GUI and terminal curated reviews) |
 | `]c` / `[c` | Next / previous hunk (in ordinary files: next / previous git change) |

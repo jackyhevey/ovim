@@ -1699,3 +1699,256 @@ async fn entirely_equal_terminal_review_has_no_phantom_navigation_and_can_be_res
     test.keys("sw");
     assert!(test.editor.buffer().rope().to_string().contains("two"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn captured_context_expands_in_both_layouts_without_duplicates_or_moving_the_cursor() {
+    use ovim_core::native_diff::context::DiffContext;
+    let dir = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let repo = Repository::init(&root).unwrap();
+    repo.set_head("refs/heads/main").unwrap();
+    let original: Vec<_> = (1..=100).map(|i| format!("source_{i:03}();")).collect();
+    fs::write(root.join("code.rs"), original.join("\n") + "\n").unwrap();
+    commit_all(&repo, "base");
+    let mut changed = original.clone();
+    changed[29] = "changed_030();".into();
+    changed[59] = "changed_060();".into();
+    fs::write(root.join("code.rs"), changed.join("\n") + "\n").unwrap();
+    let snapshot = review_snapshot(&root, &ReviewBase::explicit("HEAD")).unwrap();
+    let mut context = DiffContext::new(&snapshot, None);
+    let ids: Vec<_> = context.regions(false).map(|r| r.id.clone()).collect();
+    assert_eq!(ids.len(), 2);
+    assert!(context.expand(&snapshot, &ids[0], false));
+    assert!(context.expand(&snapshot, &ids[1], true));
+    for _ in 0..20 {
+        context.expand(&snapshot, &ids[0], false);
+        context.expand(&snapshot, &ids[1], true);
+    }
+    let first = context.view(&snapshot, &ids[0]).unwrap();
+    let second = context.view(&snapshot, &ids[1]).unwrap();
+    assert!(!first.can_expand_down && !second.can_expand_up);
+    let left: Vec<_> = first.after.old.iter().map(|l| l.number).collect();
+    assert!(second.before.old.iter().all(|l| !left.contains(&l.number)));
+    let mut unavailable = snapshot.clone();
+    unavailable.sources.clear();
+    let missing = DiffContext::new(&unavailable, None);
+    assert!(!missing.view(&unavailable, &ids[0]).unwrap().can_expand_up);
+
+    for curated in [false, true] {
+        for split in [false, true] {
+            // Recreate the captured source before opening the live comparison.
+            fs::write(root.join("code.rs"), changed.join("\n") + "\n").unwrap();
+            let mut test = EditorTest::new("");
+            test.editor.open_file(root.join("code.rs")).unwrap();
+            let custom = snapshot.reassign(&[]).unwrap();
+            if curated {
+                test.editor
+                    .open_custom_diff_review("Context", custom.clone())
+                    .unwrap();
+            } else {
+                test.editor.open_diff_review(Some("HEAD")).unwrap();
+            }
+            if split {
+                test.keys("s");
+            }
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 40)).unwrap();
+            terminal
+                .draw(|frame| {
+                    ovim::ui::Renderer::render_to_frame(
+                        frame,
+                        &mut test.editor,
+                        &mut Default::default(),
+                    )
+                })
+                .unwrap();
+            let text = test.editor.buffer().rope().to_string();
+            assert!(!text.contains("source_020"));
+            let line = text
+                .lines()
+                .position(|line| line.contains("changed_030"))
+                .unwrap();
+            test.editor
+                .buffer_mut()
+                .cursor_mut()
+                .set_position(line, ovim_core::unicode::GraphemeCol(0));
+            let row = line.saturating_sub(test.editor.scroll_offset());
+            // Expansion must never reread this now-different worktree.
+            fs::write(root.join("code.rs"), "unrelated live content\n").unwrap();
+            test.keys("K");
+            assert!(test
+                .editor
+                .buffer()
+                .rope()
+                .to_string()
+                .contains("source_020"));
+            assert!(current_line(&test).contains("changed_030"));
+            assert_eq!(
+                test.editor
+                    .buffer()
+                    .cursor()
+                    .line()
+                    .saturating_sub(test.editor.scroll_offset()),
+                row
+            );
+            test.keys("J");
+            let expanded = test.editor.buffer().rope().to_string();
+            assert!(expanded.contains("source_040"));
+            assert!(!expanded.contains("unrelated live content"));
+            terminal
+                .draw(|frame| {
+                    ovim::ui::Renderer::render_to_frame(
+                        frame,
+                        &mut test.editor,
+                        &mut Default::default(),
+                    )
+                })
+                .unwrap();
+            let screen: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(screen.contains("changed_030"), "{screen}");
+            if curated {
+                assert_eq!(
+                    test.editor.diff_review().unwrap().custom().unwrap(),
+                    &custom
+                );
+            }
+            let context_row = expanded
+                .lines()
+                .position(|line| line.contains("source_020"))
+                .unwrap();
+            test.editor
+                .buffer_mut()
+                .cursor_mut()
+                .set_position(context_row, ovim_core::unicode::GraphemeCol(0));
+            test.editor.diff_review_open_at_cursor();
+            assert!(test
+                .editor
+                .buffer()
+                .rope()
+                .to_string()
+                .contains("source_020"));
+            assert!(!test
+                .editor
+                .buffer()
+                .rope()
+                .to_string()
+                .contains("unrelated live content"));
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn paired_context_stays_with_each_file_and_stops_at_capture_gaps() {
+    use ovim_core::native_diff::{context::DiffContext, SourceWindow};
+    let dir = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let repo = Repository::init(&root).unwrap();
+    repo.set_head("refs/heads/main").unwrap();
+    let old: Vec<_> = (1..=60).map(|i| format!("old_source_{i:03}();")).collect();
+    let new: Vec<_> = (1..=80).map(|i| format!("new_source_{i:03}();")).collect();
+    fs::write(root.join("old.rs"), old.join("\n") + "\n").unwrap();
+    fs::write(root.join("new.rs"), new.join("\n") + "\n").unwrap();
+    commit_all(&repo, "base");
+    let mut old_after = old.clone();
+    old_after.remove(29);
+    let mut new_after = new.clone();
+    new_after.insert(49, "old_source_030();".into());
+    fs::write(root.join("old.rs"), old_after.join("\n") + "\n").unwrap();
+    fs::write(root.join("new.rs"), new_after.join("\n") + "\n").unwrap();
+    let snapshot = review_snapshot(&root, &ReviewBase::explicit("HEAD")).unwrap();
+    let old_block = snapshot
+        .blocks
+        .iter()
+        .find(|b| b.kind == PatchLineKind::Removed)
+        .unwrap();
+    let new_block = snapshot
+        .blocks
+        .iter()
+        .find(|b| b.kind == PatchLineKind::Added)
+        .unwrap();
+    let custom = snapshot
+        .reassign(&[DiffPairing {
+            label: Some("Moved statement".into()),
+            old: ChangeRef {
+                block_id: old_block.id.clone(),
+                offset: None,
+                count: None,
+            },
+            new: ChangeRef {
+                block_id: new_block.id.clone(),
+                offset: None,
+                count: None,
+            },
+        }])
+        .unwrap();
+    let id = format!("section:{}", custom.sections[0].id);
+    let mut partial = snapshot.clone();
+    for source in partial
+        .sources
+        .iter_mut()
+        .flat_map(|file| [&mut file.old, &mut file.new])
+        .flatten()
+    {
+        source.complete = false;
+        source.windows = vec![SourceWindow {
+            start_line: 28,
+            lines: source.windows[0].lines[27..32].to_vec(),
+        }];
+    }
+    let mut context = DiffContext::new(&partial, Some(&custom));
+    assert!(context.expand(&partial, &id, true));
+    let view = context.view(&partial, &id).unwrap();
+    assert_eq!(
+        view.before.old.iter().map(|l| l.number).collect::<Vec<_>>(),
+        [28, 29]
+    );
+    assert!(view.before.new.is_empty());
+    assert!(!view.can_expand_up);
+    assert!(!context.expand(&partial, "not-a-region", true));
+
+    for split in [false, true] {
+        let mut test = EditorTest::new("");
+        test.editor.open_file(root.join("old.rs")).unwrap();
+        test.editor
+            .open_custom_diff_review("Move", custom.clone())
+            .unwrap();
+        if split {
+            test.keys("s");
+        }
+        assert!(test.editor.expand_diff_context(&id, true));
+        assert!(test.editor.expand_diff_context(&id, false));
+        let text = test.editor.buffer().rope().to_string();
+        assert!(text.contains("old_source_020"));
+        assert!(text.contains("new_source_040"));
+        assert_eq!(
+            test.editor.diff_review().unwrap().custom().unwrap(),
+            &custom
+        );
+        if !split {
+            assert!(
+                text.find("old_source_040").unwrap() < text.find("new_source_040").unwrap(),
+                "old surrounding code must finish before new source begins: {text}"
+            );
+        }
+        for _ in 0..20 {
+            test.editor.expand_diff_context(&id, true);
+            test.editor.expand_diff_context(&id, false);
+        }
+        let view = test
+            .editor
+            .diff_review()
+            .unwrap()
+            .context_view(&id)
+            .unwrap();
+        assert!(!view.can_expand_up && !view.can_expand_down);
+        assert_eq!(view.before.old.first().unwrap().number, 1);
+        assert_eq!(view.after.old.last().unwrap().number, 60);
+        assert_eq!(view.after.new.last().unwrap().number, 81);
+    }
+}

@@ -13,6 +13,7 @@ import {
     hideEqualChanges,
     isEqualOnly,
     sectionsForFile,
+    unifiedSections as combineUnifiedSections,
     sectionsWithMoves,
     type FlowDiffLine,
     type FlowDiffFile,
@@ -48,6 +49,7 @@ export type FlowDiffProps = {
             | "open_saved_overlay"
             | "return_to_live_diff",
     ) => void;
+    onExpandContext?: (id: string, up: boolean) => void;
     onCoreKey?: (key: ":" | " ") => void;
 };
 
@@ -476,6 +478,129 @@ export default function FlowDiff(props: FlowDiffProps) {
         }
     }
 
+    let expansionAnchor: Array<{
+        scroller: HTMLElement;
+        file: string;
+        section: string;
+        sourceSelector?: string;
+        top: number;
+    }> = [];
+    function expandContext(
+        item: FlowDiffFile,
+        section: FlowSection,
+        up: boolean,
+    ) {
+        const context = item.hunks[section.hunkIndex]?.context;
+        if (
+            !context ||
+            !(up ? context.canExpandUp : context.canExpandDown) ||
+            !props.onExpandContext
+        )
+            return;
+        expansionAnchor = [];
+        for (const [scroller, elements] of [
+            [leftScroller, leftSections],
+            [rightScroller, rightSections],
+            [unifiedScroller, unifiedSections],
+        ] as const) {
+            if (!scroller) continue;
+            // Anchor the original code, not newly revealed lines or a disappearing gap.
+            const original = fileSections(item).find(
+                (s) =>
+                    s.hunkIndex === section.hunkIndex &&
+                    s.kind !== "gap" &&
+                    !s.expanded,
+            );
+            const element =
+                original && elements.get(sectionKey(item.id, original.id));
+            const source =
+                element?.querySelector<HTMLElement>(
+                    ".flow-code-line.removed, .flow-code-line.added",
+                ) ?? element?.querySelector<HTMLElement>(".flow-code-line");
+            if (element && original)
+                expansionAnchor.push({
+                    scroller,
+                    file: item.id,
+                    section: original.id,
+                    sourceSelector: source?.dataset.sourceLine
+                        ? `[data-source-line="${source.dataset.sourceLine}"][data-source-side="${source.dataset.sourceSide}"]`
+                        : undefined,
+                    top: (source ?? element).getBoundingClientRect().top,
+                });
+        }
+        props.onExpandContext(context.id, up);
+    }
+    createEffect(() => {
+        props.review;
+        if (!expansionAnchor.length) return;
+        requestAnimationFrame(() => {
+            for (const anchor of expansionAnchor) {
+                const elements =
+                    anchor.scroller === leftScroller
+                        ? leftSections
+                        : anchor.scroller === rightScroller
+                          ? rightSections
+                          : unifiedSections;
+                const element = elements.get(
+                    sectionKey(anchor.file, anchor.section),
+                );
+                const source = anchor.sourceSelector
+                    ? element?.querySelector<HTMLElement>(anchor.sourceSelector)
+                    : undefined;
+                if (element)
+                    setScrollTop(
+                        anchor.scroller,
+                        anchor.scroller.scrollTop +
+                            (source ?? element).getBoundingClientRect().top -
+                            anchor.top,
+                    );
+            }
+            expansionAnchor = [];
+        });
+    });
+    const contextControls = (item: FlowDiffFile, section: FlowSection) => {
+        const boundary = (up: boolean) => {
+            const sameHunk = (
+                layout() === "unified"
+                    ? combineUnifiedSections(fileSections(item))
+                    : fileSections(item)
+            ).filter(
+                (s) => s.hunkIndex === section.hunkIndex && s.kind !== "gap",
+            );
+            return (up ? sameHunk[0] : sameHunk.at(-1))?.id === section.id;
+        };
+        return (
+            <For each={[true, false]}>
+                {(up) => (
+                    <Show
+                        when={
+                            props.onExpandContext &&
+                            boundary(up) &&
+                            (up
+                                ? item.hunks[section.hunkIndex]?.context
+                                      ?.canExpandUp
+                                : item.hunks[section.hunkIndex]?.context
+                                      ?.canExpandDown)
+                        }
+                    >
+                        <button
+                            type="button"
+                            class={`flow-expand-context ${up ? "up" : "down"}`}
+                            aria-label={`Show more context ${up ? "above" : "below"}`}
+                            title={`Show 10 more lines ${up ? "above (K)" : "below (J)"}`}
+                            onClick={(event) => {
+                                event.stopPropagation();
+                                expandContext(item, section, up);
+                            }}
+                        >
+                            {up ? "↑" : "↓"}
+                        </button>
+                    </Show>
+                )}
+            </For>
+        );
+    };
+
     const sectionView = (
         section: FlowSection,
         side: Side,
@@ -498,6 +623,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                     )
                 }
             >
+                {contextControls(item, section)}
                 <Show when={section.kind === "gap"}>
                     <div class="flow-gap">
                         <span>···</span>
@@ -567,7 +693,7 @@ export default function FlowDiff(props: FlowDiffProps) {
             file={item}
             line={line}
             side={side}
-            counterpart={counterpart}
+            counterpart={line.kind === "context" ? undefined : counterpart}
             syntax={props.syntax}
             onNavigateReviewLine={props.onNavigateReviewLine}
             onOpenSource={props.onOpenSource}
@@ -719,6 +845,16 @@ export default function FlowDiff(props: FlowDiffProps) {
         if (event.key === "N") {
             event.preventDefault();
             stepChange(-1);
+            return;
+        }
+        if (event.key === "K" || event.key === "J") {
+            event.preventDefault();
+            const item = file();
+            const section =
+                sections().find((s) => s.id === activeSectionId()) ||
+                sections().find((s) => s.kind === "change");
+            if (item && section)
+                expandContext(item, section, event.key === "K");
             return;
         }
         if (event.key === "w") {
@@ -1080,7 +1216,11 @@ export default function FlowDiff(props: FlowDiffProps) {
                                                     </div>
                                                 }
                                             >
-                                                <For each={fileSections(item)}>
+                                                <For
+                                                    each={combineUnifiedSections(
+                                                        fileSections(item),
+                                                    )}
+                                                >
                                                     {(section) => (
                                                         <div
                                                             class={`flow-unified-section ${section.kind}`}
@@ -1107,6 +1247,10 @@ export default function FlowDiff(props: FlowDiffProps) {
                                                                 )
                                                             }
                                                         >
+                                                            {contextControls(
+                                                                item,
+                                                                section,
+                                                            )}
                                                             <Show
                                                                 when={
                                                                     section.kind ===
@@ -1144,7 +1288,29 @@ export default function FlowDiff(props: FlowDiffProps) {
                                                             <For
                                                                 each={
                                                                     section.kind ===
-                                                                    "context"
+                                                                        "context" &&
+                                                                    (!section.expanded ||
+                                                                        ((item.oldPath ||
+                                                                            item.path) ===
+                                                                            item.path &&
+                                                                            section
+                                                                                .left
+                                                                                .length ===
+                                                                                section
+                                                                                    .right
+                                                                                    .length &&
+                                                                            section.left.every(
+                                                                                (
+                                                                                    line,
+                                                                                    index,
+                                                                                ) =>
+                                                                                    line.text ===
+                                                                                    section
+                                                                                        .right[
+                                                                                        index
+                                                                                    ]
+                                                                                        ?.text,
+                                                                            )))
                                                                         ? []
                                                                         : section.left
                                                                 }

@@ -22,6 +22,7 @@ export type FlowSection = {
     right: FlowDiffLine[];
     move?: FlowDiffMove;
     equal?: boolean;
+    expanded?: boolean;
 };
 
 /** Keep move cards anchored to their exact canonical change lines. */
@@ -81,8 +82,16 @@ export function sectionsForFile(file: FlowDiffFile): FlowSection[] {
     let previousNewEnd = 1;
 
     file.hunks.forEach((hunk, hunkIndex) => {
-        const skippedOld = Math.max(0, hunk.oldStart - previousOldEnd);
-        const skippedNew = Math.max(0, hunk.newStart - previousNewEnd);
+        const skippedOld = Math.max(
+            0,
+            (hunk.context?.before.old[0]?.number ?? hunk.oldStart) -
+                previousOldEnd,
+        );
+        const skippedNew = Math.max(
+            0,
+            (hunk.context?.before.new[0]?.number ?? hunk.newStart) -
+                previousNewEnd,
+        );
         if ((skippedOld || skippedNew) && file.status !== "reassigned") {
             sections.push({
                 id: `gap-${hunkIndex}`,
@@ -94,12 +103,35 @@ export function sectionsForFile(file: FlowDiffFile): FlowSection[] {
             });
         }
 
+        const contextSection = (edge: "before" | "after") => {
+            const context = hunk.context?.[edge];
+            if (!context || (!context.old.length && !context.new.length))
+                return;
+            const line = (
+                source: { number: number; text: string },
+                side: "old" | "new",
+            ): GuiDiffLine => ({
+                kind: "context",
+                text: source.text,
+                [side === "old" ? "oldLine" : "newLine"]: source.number,
+            });
+            sections.push({
+                id: `h${hunkIndex}-${edge}`,
+                kind: "context",
+                hunkIndex,
+                expanded: true,
+                left: context.old.map((source) => line(source, "old")),
+                right: context.new.map((source) => line(source, "new")),
+            });
+        };
+        contextSection("before");
+        let runIndex = 0;
         let run: FlowSection | undefined;
         for (const line of hunk.lines) {
             const kind = line.kind === "context" ? "context" : "change";
             if (!run || run.kind !== kind) {
                 run = {
-                    id: `h${hunkIndex}-s${sections.length}`,
+                    id: `h${hunkIndex}-s${runIndex++}`,
                     kind,
                     hunkIndex,
                     left: [],
@@ -110,8 +142,13 @@ export function sectionsForFile(file: FlowDiffFile): FlowSection[] {
             if (line.kind !== "added") run.left.push(line);
             if (line.kind !== "removed") run.right.push(line);
         }
-        previousOldEnd = hunk.oldStart + hunk.oldCount;
-        previousNewEnd = hunk.newStart + hunk.newCount;
+        contextSection("after");
+        previousOldEnd =
+            (hunk.context?.after.old.at(-1)?.number ??
+                hunk.oldStart + hunk.oldCount - 1) + 1;
+        previousNewEnd =
+            (hunk.context?.after.new.at(-1)?.number ??
+                hunk.newStart + hunk.newCount - 1) + 1;
     });
 
     return sections;
@@ -335,4 +372,34 @@ export function mappedScrollTop(
         Math.min(1, (sourceTop - from.top) / Math.max(1, from.height)),
     );
     return to.top + progress * to.height;
+}
+
+/** A paired excerpt has two independent source streams. In unified layout,
+ * keep each stream's context with its changes instead of interleaving files. */
+export function unifiedSections(sections: FlowSection[]): FlowSection[] {
+    const combined = new Set<number>();
+    return sections.flatMap((section) => {
+        if (section.kind === "gap") return [section];
+        const hunk = sections.filter(
+            (s) => s.hunkIndex === section.hunkIndex && s.kind !== "gap",
+        );
+        const original = hunk.filter((s) => !s.expanded);
+        if (
+            !hunk.some((s) => s.expanded) ||
+            !original.length ||
+            original.some((s) => s.kind === "context")
+        )
+            return [section];
+        if (combined.has(section.hunkIndex)) return [];
+        combined.add(section.hunkIndex);
+        return [
+            {
+                ...original[0],
+                kind: "change" as const,
+                expanded: true,
+                left: hunk.flatMap((s) => s.left),
+                right: hunk.flatMap((s) => s.right),
+            },
+        ];
+    });
 }

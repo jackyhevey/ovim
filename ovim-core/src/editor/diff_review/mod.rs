@@ -59,6 +59,9 @@ pub struct DiffReviewState {
     /// regenerated from the worktree when the review is revisited.
     custom: Option<CustomReview>,
     custom_title: Option<String>,
+    context_snapshot: native_diff::ReviewSnapshot,
+    context: native_diff::context::DiffContext,
+    context_rows: Vec<Option<String>>,
     /// True when the custom view is attached to the current live Git patch.
     live_overlay: bool,
     /// Text width the side-by-side layout was laid out for.
@@ -93,6 +96,10 @@ impl DiffReviewState {
     /// The source patch retained by the review, independent of terminal layout.
     pub fn patch(&self) -> &ReviewPatch {
         &self.patch
+    }
+
+    pub fn context_view(&self, id: &str) -> Option<native_diff::context::DiffContextView> {
+        self.context.view(&self.context_snapshot, id)
     }
 
     pub fn custom(&self) -> Option<&CustomReview> {
@@ -490,11 +497,16 @@ impl Editor {
             Some(spec) => ReviewBase::explicit(spec),
             None => self.resolve_review_base_for_path(&root_hint)?,
         };
-        let patch = native_diff::review_patch(&root_hint, &base)?;
+        let context_snapshot = native_diff::review_snapshot(&root_hint, &base)?;
+        let patch = context_snapshot.patch.clone();
 
         let layout = self.ui_panels.diff_review_layout;
         let (area_width, width) = self.diff_review_widths();
         let overlay = self.active_overlay_for_patch(&patch);
+        let context_snapshot = overlay
+            .as_ref()
+            .map(|(_, custom)| custom.snapshot.clone())
+            .unwrap_or(context_snapshot);
         let rendered = if let Some((title, custom)) = &overlay {
             render::render_custom(
                 custom,
@@ -530,6 +542,12 @@ impl Editor {
             patch_line_ranges: patch_line_ranges(&patch),
             code_highlights: Vec::new(),
             custom_targets: Vec::new(),
+            context: native_diff::context::DiffContext::new(
+                &context_snapshot,
+                overlay.as_ref().map(|(_, custom)| custom),
+            ),
+            context_snapshot,
+            context_rows: Vec::new(),
             custom: overlay.as_ref().map(|(_, custom)| custom.clone()),
             custom_title: overlay.as_ref().map(|(title, _)| title.clone()),
             live_overlay: overlay.is_some(),
@@ -614,6 +632,9 @@ impl Editor {
             layout,
             patch_line_ranges: patch_line_ranges(&patch),
             patch,
+            context: native_diff::context::DiffContext::new(&custom.snapshot, Some(&custom)),
+            context_snapshot: custom.snapshot.clone(),
+            context_rows: Vec::new(),
             custom: Some(custom),
             custom_title: Some(title.to_string()),
             live_overlay: false,
@@ -669,13 +690,23 @@ impl Editor {
             Some(spec) => Ok(ReviewBase::explicit(spec)),
             None => self.resolve_review_base_for_path(&root),
         }?;
-        let patch = native_diff::review_patch(&root, &base)?;
+        let context_snapshot = native_diff::review_snapshot(&root, &base)?;
+        let patch = context_snapshot.patch.clone();
 
         let overlay = self.active_overlay_for_patch(&patch);
+        let context_snapshot = overlay
+            .as_ref()
+            .map(|(_, custom)| custom.snapshot.clone())
+            .unwrap_or(context_snapshot);
         let anchor = self.diff_review_anchor(index, true);
         {
             let state = self.ui_panels.diff_review.as_mut().expect("review state");
             state.patch_line_ranges = patch_line_ranges(&patch);
+            state.context = native_diff::context::DiffContext::new(
+                &context_snapshot,
+                overlay.as_ref().map(|(_, custom)| custom),
+            );
+            state.context_snapshot = context_snapshot;
             state.patch = patch;
             state.custom = overlay.as_ref().map(|(_, custom)| custom.clone());
             state.custom_title = overlay.as_ref().map(|(title, _)| title.clone());
@@ -692,6 +723,75 @@ impl Editor {
             self.set_status_message(message);
         }
         Ok(())
+    }
+
+    /// Reveal ten captured source lines at the selected region's edge.
+    pub fn expand_diff_context(&mut self, id: &str, up: bool) -> bool {
+        let Some(index) = self.review_buffer_index() else {
+            return false;
+        };
+        let anchor = self.diff_review_anchor(index, false);
+        let cursor_line = self.buffer().cursor().line();
+        let cursor_col = self.buffer().cursor().col();
+        let source_cell = self
+            .ui_panels
+            .diff_review
+            .as_ref()
+            .and_then(|state| state.row(cursor_line))
+            .and_then(|row| row.cell_at(cursor_col.0));
+        let screen_row = self
+            .buffer()
+            .cursor()
+            .line()
+            .saturating_sub(self.scroll_offset());
+        let state = self.ui_panels.diff_review.as_mut().expect("review state");
+        if !state.context.expand(&state.context_snapshot, id, up) {
+            return false;
+        }
+        self.rerender_diff_review(anchor);
+        if let Some(cell) = source_cell {
+            let row = self.ui_panels.diff_review.as_ref().and_then(|state| {
+                state.rows.iter().position(|row| {
+                    [row.left, row.right]
+                        .into_iter()
+                        .flatten()
+                        .any(|candidate| {
+                            candidate.patch_line == cell.patch_line
+                                && candidate.info == cell.info
+                                && candidate.src_glyph == cell.src_glyph
+                        })
+                })
+            });
+            if let Some(row) = row {
+                self.buffer_mut().cursor_mut().set_position(row, cursor_col);
+            }
+        }
+        let offset = self.buffer().cursor().line().saturating_sub(screen_row);
+        self.viewport.scroll_offset = offset;
+        if let Some(window) = self
+            .window_manager
+            .as_mut()
+            .and_then(|wm| wm.focused_window_mut())
+        {
+            window.set_scroll_offset(offset);
+        }
+        self.viewport.preserve_after_input();
+        true
+    }
+
+    pub fn expand_diff_context_at_cursor(&mut self, up: bool) {
+        let line = self.buffer().cursor().line();
+        let id = self.ui_panels.diff_review.as_ref().and_then(|state| {
+            state
+                .context_rows
+                .get(line)
+                .cloned()
+                .flatten()
+                .or_else(|| state.context_rows.iter().skip(line).find_map(Clone::clone))
+        });
+        if !id.is_some_and(|id| self.expand_diff_context(&id, up)) {
+            self.set_status_message("No more captured context in this direction");
+        }
     }
 
     /// `w` in a curated review hides equal same-file pairs in either layout.
@@ -832,11 +932,11 @@ impl Editor {
         let line = cursor.line();
         let col = cursor.col().0;
 
-        if state.custom.is_some() {
+        if state.custom.is_some() || state.custom_target_at(line, col).is_some() {
             let target = state.custom_target_at(line, col);
             match target {
                 Some((path, source_line, side)) => {
-                    if let Err(error) = self.open_custom_review_source(&path, source_line, side) {
+                    if let Err(error) = self.open_captured_review_source(&path, source_line, side) {
                         self.review_toast(
                             ToastLevel::Error,
                             format!("Could not open {path}: {error:#}"),
@@ -912,9 +1012,15 @@ impl Editor {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No branch review is open"))?;
         if let Some(custom) = &state.custom {
-            let valid = custom_saved_line(custom, path, line, side).is_some();
+            let valid = snapshot_saved_line(&custom.snapshot, path, line, side).is_some();
             anyhow::ensure!(valid, "Source is not in this review: {path}:{line}");
-            return self.open_custom_review_source(path, line, side);
+            return self.open_captured_review_source(path, line, side);
+        }
+        if state
+            .context
+            .contains_expanded_line(path, line, side == "old")
+        {
+            return self.open_captured_review_source(path, line, side);
         }
         let file = state
             .patch
@@ -965,7 +1071,7 @@ impl Editor {
         Ok(())
     }
 
-    fn open_custom_review_source(
+    fn open_captured_review_source(
         &mut self,
         path: &str,
         line: usize,
@@ -984,12 +1090,9 @@ impl Editor {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No diff review is open"))?;
         let root = state.patch.root.clone();
-        let custom = state
-            .custom
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No custom review is open"))?;
+        let snapshot = state.context_snapshot.clone();
         anyhow::ensure!(side == "old" || side == "new", "Unknown diff side: {side}");
-        let saved_line = custom_saved_line(&custom, path, line, side)
+        let saved_line = snapshot_saved_line(&snapshot, path, line, side)
             .ok_or_else(|| anyhow::anyhow!("Source is not in this review: {path}:{line}"))?;
         let current_matches = side == "new"
             && std::fs::read_to_string(root.join(path))
@@ -999,7 +1102,7 @@ impl Editor {
                 == Some(saved_line);
         self.go_to_review_origin();
         if !current_matches {
-            let (excerpt, target_line) = custom_source_excerpt(&custom, path, line, side)?;
+            let (excerpt, target_line) = snapshot_source_excerpt(&snapshot, path, line, side)?;
             let label = if side == "old" { "Before" } else { "After" };
             self.open_diff_buffer_in_new_tab(&format!("{label} excerpt · {path}"), &excerpt);
             self.buffer_mut()
@@ -1218,7 +1321,6 @@ impl Editor {
                 ),
             }
         };
-        self.buffers[index].replace_content(&rendered.text);
         self.buffers[index].set_display_name(rendered.title.clone());
         self.apply_rendered_review(rendered);
 
@@ -1242,10 +1344,22 @@ impl Editor {
     }
 
     /// Installs a fresh render into the state and the review buffer.
-    fn apply_rendered_review(&mut self, rendered: Rendered) {
+    fn apply_rendered_review(&mut self, mut rendered: Rendered) {
         let Some(index) = self.review_buffer_index() else {
             return;
         };
+        let tab_width = self.diff_review_tab_width();
+        let state = self.ui_panels.diff_review.as_mut().expect("review state");
+        state.context_rows = render::expand_context(
+            &mut rendered,
+            &state.context,
+            &state.context_snapshot,
+            state.custom.is_some(),
+            state.layout,
+            state.layout_width,
+            tab_width,
+        );
+        self.buffers[index].replace_content(&rendered.text);
         self.buffers[index].set_forced_highlights(rendered.highlights);
         let state = self.ui_panels.diff_review.as_mut().expect("review state");
         state.rows = rendered.rows;
@@ -1431,18 +1545,17 @@ fn patch_line_ranges(patch: &ReviewPatch) -> Vec<(usize, usize)> {
 }
 
 /// Finds saved source text without consulting files that may have changed since capture.
-fn custom_saved_line<'a>(
-    custom: &'a CustomReview,
+fn snapshot_saved_line<'a>(
+    snapshot: &'a native_diff::ReviewSnapshot,
     path: &str,
     line: usize,
     side: &str,
 ) -> Option<&'a str> {
-    custom
-        .snapshot
+    snapshot
         .source_for(path, side)
         .and_then(|source| source.line(line))
         .or_else(|| {
-            let patch = &custom.snapshot.patch;
+            let patch = &snapshot.patch;
             patch
                 .text
                 .lines()
@@ -1475,21 +1588,21 @@ fn custom_saved_line<'a>(
 
 /// Builds a numbered excerpt from saved source, falling back to the canonical
 /// patch for reviews captured before surrounding source was retained.
-fn custom_source_excerpt(
-    custom: &CustomReview,
+fn snapshot_source_excerpt(
+    snapshot: &native_diff::ReviewSnapshot,
     path: &str,
     requested_line: usize,
     side: &str,
 ) -> anyhow::Result<(String, usize)> {
     let mut source = BTreeMap::new();
-    if let Some(saved) = custom.snapshot.source_for(path, side) {
+    if let Some(saved) = snapshot.source_for(path, side) {
         for window in &saved.windows {
             for (offset, text) in window.lines.iter().enumerate() {
                 source.insert(window.start_line + offset, text.as_str());
             }
         }
     }
-    let patch = &custom.snapshot.patch;
+    let patch = &snapshot.patch;
     for (text, entry) in patch.text.lines().zip(&patch.lines) {
         let Some(file) = entry.file.and_then(|index| patch.files.get(index)) else {
             continue;

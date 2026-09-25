@@ -2635,6 +2635,17 @@ function App() {
                                   }
                                 : undefined
                         }
+                        onExpandContext={
+                            review().managed
+                                ? (id, up) => {
+                                      void mutate("gui_diff_action", {
+                                          pane: props.pane.index,
+                                          bufferId: props.pane.bufferId,
+                                          action: `${up ? "expand_up" : "expand_down"}:${id}`,
+                                      });
+                                  }
+                                : undefined
+                        }
                         onAction={
                             review().managed
                                 ? (key) => {

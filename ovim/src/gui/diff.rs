@@ -111,6 +111,8 @@ pub struct GuiDiffFile {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuiDiffHunk {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<ovim_core::native_diff::context::DiffContextView>,
     pub header: String,
     pub old_start: usize,
     pub old_count: usize,
@@ -198,6 +200,7 @@ fn project_review_patch(title: &str, review: &DiffReviewState) -> GuiDiffReview 
                 let (old_start, old_count, new_start, new_count) =
                     parse_hunk_header(text).unwrap_or((0, 0, 0, 0));
                 file.hunks.push(GuiDiffHunk {
+                    context: review.context_view(&format!("hunk:{index}")),
                     header: text.to_string(),
                     old_start,
                     old_count,
@@ -382,6 +385,7 @@ fn project_guided_files(review: &DiffReviewState, custom: &CustomReview) -> Vec<
                 Vec::new()
             } else {
                 vec![GuiDiffHunk {
+                    context: review.context_view(&format!("section:{}", section.id)),
                     header,
                     old_start,
                     old_count: lines.iter().filter(|line| line.old_line.is_some()).count(),
@@ -599,6 +603,7 @@ fn project_standalone(title: &str, path: &str, content: &str) -> GuiDiffReview {
             old_line = old_start;
             new_line = new_start;
             file.hunks.push(GuiDiffHunk {
+                context: None,
                 header: text.to_string(),
                 old_start,
                 old_count,
@@ -774,6 +779,20 @@ pub fn perform_diff_action(
         "return_to_live_diff" if managed => editor
             .return_to_live_diff_review()
             .map_err(|error| format!("{error:#}"))?,
+        action
+            if managed
+                && (action.starts_with("expand_up:") || action.starts_with("expand_down:")) =>
+        {
+            let (direction, id) = action.split_once(':').expect("context action");
+            if editor
+                .diff_review()
+                .and_then(|review| review.context_view(id))
+                .is_none()
+            {
+                return Err("Unknown diff context region".to_string());
+            }
+            editor.expand_diff_context(id, direction == "expand_up");
+        }
         "close" if managed => editor.close_diff_review(),
         "close" => editor.close_current_tab(),
         _ => return Err(format!("Unsupported diff action: {action}")),
@@ -879,6 +898,55 @@ mod tests {
             &parents,
         )
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn context_actions_validate_identity_and_project_captured_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let repo = Repository::init(root).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let mut lines: Vec<_> = (1..=60)
+            .map(|line| format!("source_{line:03}();"))
+            .collect();
+        fs::write(root.join("source.rs"), lines.join("\n") + "\n").unwrap();
+        commit(&repo);
+        lines[29] = "changed();".into();
+        fs::write(root.join("source.rs"), lines.join("\n") + "\n").unwrap();
+        let mut editor = Editor::new();
+        editor.open_file(root.join("source.rs")).unwrap();
+        editor.open_diff_review(Some("HEAD")).unwrap();
+        editor.init_window_manager(100, 40);
+        let buffer_id = editor.buffer().id();
+        let initial = project_diff(&editor, editor.buffer()).unwrap();
+        let context = initial.files[0].hunks[0].context.as_ref().unwrap();
+        assert!(context.can_expand_up && context.can_expand_down);
+        let action = format!("expand_up:{}", context.id);
+        assert!(perform_diff_action(&mut editor, 0, buffer_id + 1, &action).is_err());
+        assert!(perform_diff_action(&mut editor, 0, buffer_id, "expand_up:missing").is_err());
+        fs::write(root.join("source.rs"), "different worktree\n").unwrap();
+        perform_diff_action(&mut editor, 0, buffer_id, &action).unwrap();
+        let projected = project_diff(&editor, editor.buffer()).unwrap();
+        let hunk = &projected.files[0].hunks[0];
+        assert_eq!(
+            hunk.lines.iter().map(|line| &line.text).collect::<Vec<_>>(),
+            initial.files[0].hunks[0]
+                .lines
+                .iter()
+                .map(|line| &line.text)
+                .collect::<Vec<_>>()
+        );
+        let context = hunk.context.as_ref().unwrap();
+        assert_eq!(context.before.old.len(), 10);
+        assert_eq!(context.before.old[0].number, 17);
+        assert_eq!(context.before.old[0].text, "source_017();");
+        open_diff_source(&mut editor, 0, buffer_id, "source.rs", 17, "new").unwrap();
+        assert!(editor.buffer().rope().to_string().contains("source_017();"));
+        assert!(!editor
+            .buffer()
+            .rope()
+            .to_string()
+            .contains("different worktree"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

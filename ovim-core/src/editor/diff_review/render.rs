@@ -35,7 +35,7 @@ const MIN_SPLIT_TEXT_WIDTH: usize = 8;
 const MAX_WRAP_ROWS: usize = 12;
 
 const KEY_HINT: &str =
-    "# Enter open at cursor · ]c [c hunk · ]f [f file · o overlay · O saved · r refresh · q close · <Space>gf fetch base";
+    "# Enter open at cursor · ]c [c hunk · ]f [f file · o overlay · O saved · K/J context ↑/↓ · r refresh · q close · <Space>gf fetch base";
 
 /// How the patch body is laid out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -546,7 +546,7 @@ pub fn render_custom(
     let toolbar = render_toolbar(layout, &mut builder);
     targets.resize(builder.len(), None);
     builder.header(
-        "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · w hide equal · r refresh/redraw · q close",
+        "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · w hide equal · K/J context ↑/↓ · r refresh/redraw · q close",
         Some(HighlightGroup::Comment),
     );
     targets.push(None);
@@ -1530,4 +1530,250 @@ mod tests {
         assert_eq!(DiffLayout::parse("unified"), Some(DiffLayout::Unified));
         assert_eq!(DiffLayout::parse("nope"), None);
     }
+}
+
+/// Insert source context at existing code boundaries, without control or spacer rows.
+/// Canonical patch indices and their syntax mappings remain untouched.
+pub fn expand_context(
+    rendered: &mut Rendered,
+    context: &crate::native_diff::context::DiffContext,
+    snapshot: &crate::native_diff::ReviewSnapshot,
+    guided: bool,
+    layout: DiffLayout,
+    width: usize,
+    tab_width: usize,
+) -> Vec<Option<String>> {
+    use std::collections::{BTreeMap, HashMap};
+    type Insertion = (String, Builder, Vec<Option<CustomTarget>>);
+    let mut insertions: BTreeMap<usize, Vec<Insertion>> = BTreeMap::new();
+    let mut ids = vec![None; rendered.rows.len()];
+    let geometry = SplitGeometry::new(&snapshot.patch, width);
+    let mut source_rows: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (index, row) in rendered.rows.iter().enumerate() {
+        for cell in [row.left, row.right].into_iter().flatten() {
+            source_rows.entry(cell.patch_line).or_default().push(index);
+        }
+    }
+    for region in context.regions(guided) {
+        let mut positions: Vec<_> = region
+            .patch_lines
+            .iter()
+            .filter_map(|line| source_rows.get(line))
+            .flatten()
+            .copied()
+            .collect();
+        positions.sort_unstable();
+        positions.dedup();
+        let (Some(&first), Some(&last)) = (positions.first(), positions.last()) else {
+            continue;
+        };
+        ids[first..=last].fill(Some(region.id.clone()));
+        let Some(view) = context.view(snapshot, &region.id) else {
+            continue;
+        };
+        let (old_path, new_path) = context.paths(&region.id);
+        let separate = layout == DiffLayout::Unified
+            && guided
+            && positions.iter().all(|&row| {
+                rendered.rows[row]
+                    .info()
+                    .is_some_and(|info| info.kind != PatchLineKind::Context)
+            });
+        let mut edges = Vec::new();
+        if separate {
+            for old in [true, false] {
+                let side_rows: Vec<_> = positions
+                    .iter()
+                    .copied()
+                    .filter(|&row| {
+                        rendered.rows[row].info().is_some_and(|info| {
+                            info.kind
+                                == if old {
+                                    PatchLineKind::Removed
+                                } else {
+                                    PatchLineKind::Added
+                                }
+                        })
+                    })
+                    .collect();
+                if let (Some(&first), Some(&last)) = (side_rows.first(), side_rows.last()) {
+                    for (position, edge) in [(first, &view.before), (last + 1, &view.after)] {
+                        edges.push((
+                            position,
+                            crate::native_diff::context::ContextEdge {
+                                old: if old { edge.old.clone() } else { Vec::new() },
+                                new: if old { Vec::new() } else { edge.new.clone() },
+                            },
+                        ));
+                    }
+                }
+            }
+        } else {
+            edges.extend([(first, view.before), (last + 1, view.after)]);
+        }
+        for (position, edge) in edges {
+            if edge.old.is_empty() && edge.new.is_empty() {
+                continue;
+            }
+            let mut builder = Builder::default();
+            let mut targets = Vec::new();
+            let pairs: Vec<_> = if layout == DiffLayout::Split
+                || (old_path == new_path
+                    && edge.old.len() == edge.new.len()
+                    && edge
+                        .old
+                        .iter()
+                        .zip(&edge.new)
+                        .all(|(old, new)| old.text == new.text))
+            {
+                (0..edge.old.len().max(edge.new.len()))
+                    .map(|i| (edge.old.get(i), edge.new.get(i)))
+                    .collect()
+            } else {
+                edge.old
+                    .iter()
+                    .map(|line| (Some(line), None))
+                    .chain(edge.new.iter().map(|line| (None, Some(line))))
+                    .collect()
+            };
+            for (old, new) in pairs {
+                let target = CustomTarget {
+                    old: old
+                        .zip(old_path)
+                        .map(|(line, path)| (path.to_string(), line.number)),
+                    new: new
+                        .zip(new_path)
+                        .map(|(line, path)| (path.to_string(), line.number)),
+                };
+                let old_glyphs =
+                    old.map(|line| layout_body(&line.text, tab_width, layout == DiffLayout::Split));
+                let new_glyphs =
+                    new.map(|line| layout_body(&line.text, tab_width, layout == DiffLayout::Split));
+                let runs = |glyphs: &Option<Vec<Glyph<'_>>>| {
+                    glyphs.as_ref().map(|g| {
+                        if layout == DiffLayout::Split {
+                            chunk_glyphs(g, geometry.text_width)
+                        } else {
+                            std::iter::once(0..g.len()).collect()
+                        }
+                    })
+                };
+                let old_runs = runs(&old_glyphs);
+                let new_runs = runs(&new_glyphs);
+                let count = old_runs
+                    .as_ref()
+                    .map_or(0, Vec::len)
+                    .max(new_runs.as_ref().map_or(0, Vec::len))
+                    .clamp(1, MAX_WRAP_ROWS);
+                for row_index in 0..count {
+                    let mut row = RowBuilder::default();
+                    let cell = |row: &mut RowBuilder, old_side: bool| {
+                        let (line, glyphs, runs, path) = if old_side {
+                            (old?, old_glyphs.as_ref()?, old_runs.as_ref()?, old_path)
+                        } else {
+                            (new?, new_glyphs.as_ref()?, new_runs.as_ref()?, new_path)
+                        };
+                        Some(push_cell(
+                            row,
+                            CellSpec {
+                                info: PatchLine {
+                                    kind: PatchLineKind::Context,
+                                    file: snapshot.patch.files.iter().position(|f| {
+                                        Some(f.path.as_str()) == path
+                                            || f.old_path.as_deref() == path
+                                    }),
+                                    old_line: old.map(|l| l.number),
+                                    new_line: new.map(|l| l.number),
+                                },
+                                patch_line: usize::MAX,
+                                glyphs,
+                                segment: runs
+                                    .get(row_index)
+                                    .cloned()
+                                    .unwrap_or(glyphs.len()..glyphs.len()),
+                                code: &[],
+                                number: (layout == DiffLayout::Split && row_index == 0)
+                                    .then_some(line.number),
+                                number_width: if layout == DiffLayout::Split {
+                                    geometry.number_width
+                                } else {
+                                    0
+                                },
+                                marker: Some(' '),
+                                pad_to: (layout == DiffLayout::Split)
+                                    .then_some(geometry.text_width),
+                                elided: row_index + 1 == count && runs.len() > count,
+                            },
+                        ))
+                    };
+                    let review_row = if layout == DiffLayout::Split {
+                        let left = cell(&mut row, true);
+                        if left.is_none() {
+                            row.pad(geometry.number_width + 3 + geometry.text_width);
+                        }
+                        row.push(&format!(" {SEPARATOR} "), Some(HighlightGroup::Punctuation));
+                        let right = cell(&mut row, false);
+                        ReviewRow { left, right }
+                    } else {
+                        ReviewRow::single(cell(&mut row, new.is_none()).expect("context source"))
+                    };
+                    builder.push(row, review_row);
+                    targets.push(Some(target.clone()));
+                }
+            }
+            insertions
+                .entry(position)
+                .or_default()
+                .push((region.id.clone(), builder, targets));
+        }
+    }
+    if insertions.is_empty() {
+        return ids;
+    }
+    let original: Vec<_> = rendered.text.lines().map(str::to_string).collect();
+    let mut text = String::new();
+    let mut rows = Vec::new();
+    let mut highlights = Vec::new();
+    let mut targets = Vec::new();
+    let mut result_ids = Vec::new();
+    let mut mapping = vec![0; original.len()];
+    for index in 0..=original.len() {
+        if let Some(entries) = insertions.remove(&index) {
+            for (id, builder, context_targets) in entries {
+                result_ids.extend(std::iter::repeat_n(Some(id), builder.rows.len()));
+                text.push_str(&builder.text);
+                rows.extend(builder.rows);
+                highlights.extend(builder.highlights);
+                targets.extend(context_targets);
+            }
+        }
+        if let Some(line) = original.get(index) {
+            mapping[index] = rows.len();
+            text.push_str(line);
+            text.push('\n');
+            rows.push(rendered.rows[index].clone());
+            highlights.push(rendered.highlights[index].clone());
+            targets.push(rendered.custom_targets.get(index).cloned().flatten());
+            result_ids.push(ids[index].clone());
+        }
+    }
+    let remap = |line: &mut usize| {
+        if let Some(mapped) = mapping.get(*line) {
+            *line = *mapped;
+        }
+    };
+    for line in &mut rendered.hunk_lines {
+        remap(line);
+    }
+    for line in &mut rendered.file_lines {
+        remap(line);
+    }
+    for (line, _) in &mut rendered.stat_rows {
+        remap(line);
+    }
+    rendered.text = text;
+    rendered.rows = rows;
+    rendered.highlights = highlights;
+    rendered.custom_targets = targets;
+    result_ids
 }
