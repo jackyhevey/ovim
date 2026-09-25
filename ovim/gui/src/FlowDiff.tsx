@@ -10,6 +10,8 @@ import {
 import type { JSX } from "solid-js";
 import {
     mappedScrollTop,
+    hideEqualChanges,
+    isEqualOnly,
     sectionsForFile,
     sectionsWithMoves,
     type FlowDiffLine,
@@ -50,6 +52,7 @@ export type FlowDiffProps = {
 };
 
 export default function FlowDiff(props: FlowDiffProps) {
+    const [hideEqual, setHideEqual] = createSignal(false);
     const [exporting, setExporting] = createSignal(false);
     const [exportMessage, setExportMessage] = createSignal("");
     const [exportFailed, setExportFailed] = createSignal(false);
@@ -82,6 +85,7 @@ export default function FlowDiff(props: FlowDiffProps) {
             view: effectiveView(),
             reconstruction: reconstruction(),
             traceMoves: traceMoves(),
+            hideEqual: hideEqual(),
         };
         setExporting(true);
         setExportMessage("");
@@ -121,20 +125,50 @@ export default function FlowDiff(props: FlowDiffProps) {
     const rightSections = new Map<string, HTMLElement>();
     const unifiedSections = new Map<string, HTMLElement>();
 
-    const visibleFiles = createMemo(() =>
+    const sourceFiles = createMemo(() =>
         effectiveView() === "guided" && props.review.guidedFiles?.length
             ? props.review.guidedFiles
             : props.review.files,
     );
     const sectionKey = (fileId: string, sectionId: string) =>
         `${fileId}\0${sectionId}`;
+    const sectionsByFile = createMemo(
+        () =>
+            new Map(
+                sourceFiles().map((item) => {
+                    const sections =
+                        props.review.custom &&
+                        effectiveView() === "files" &&
+                        traceMoves() &&
+                        props.review.moves?.length
+                            ? sectionsWithMoves(
+                                  item,
+                                  props.review.moves,
+                                  reconstruction(),
+                              )
+                            : sectionsForFile(item);
+                    return [
+                        item.id,
+                        hideEqual()
+                            ? hideEqualChanges(
+                                  item,
+                                  sections,
+                                  effectiveView() === "files"
+                                      ? props.review.moves
+                                      : [],
+                              )
+                            : sections,
+                    ];
+                }),
+            ),
+    );
     const fileSections = (item: FlowDiffFile) =>
-        props.review.custom &&
-        effectiveView() === "files" &&
-        traceMoves() &&
-        props.review.moves?.length
-            ? sectionsWithMoves(item, props.review.moves, reconstruction())
-            : sectionsForFile(item);
+        sectionsByFile().get(item.id) ?? [];
+    const visibleFiles = createMemo(() =>
+        sourceFiles().filter(
+            (item) => !hideEqual() || !isEqualOnly(item, fileSections(item)),
+        ),
+    );
     const allSections = createMemo(() =>
         visibleFiles().flatMap((item) =>
             fileSections(item).map((section) => ({ file: item, section })),
@@ -497,6 +531,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                     }
                 >
                     <MoveOverlay
+                        hideEqual={hideEqual()}
                         move={section.move!}
                         reconstruction={reconstruction()}
                         file={item}
@@ -550,7 +585,10 @@ export default function FlowDiff(props: FlowDiffProps) {
                     <span class="flow-renamed">from {item.oldPath}</span>
                 </Show>
             </div>
-            <span class="flow-file-stats">
+            <span
+                class="flow-file-stats"
+                title="Original patch additions and deletions"
+            >
                 <b>+{item.additions}</b>
                 <i>−{item.deletions}</i>
             </span>
@@ -573,6 +611,7 @@ export default function FlowDiff(props: FlowDiffProps) {
     onCleanup(() => resizeObserver?.disconnect());
     createEffect(() => {
         layout();
+        allSections();
         queueMicrotask(() => {
             resizeObserver?.disconnect();
             if (bridge) resizeObserver?.observe(bridge);
@@ -680,6 +719,11 @@ export default function FlowDiff(props: FlowDiffProps) {
         if (event.key === "N") {
             event.preventDefault();
             stepChange(-1);
+            return;
+        }
+        if (event.key === "w") {
+            event.preventDefault();
+            setHideEqual((value) => !value);
             return;
         }
         if (event.key === "s") {
@@ -794,6 +838,15 @@ export default function FlowDiff(props: FlowDiffProps) {
                             →
                         </button>
                     </div>
+                    <button
+                        type="button"
+                        class="flow-equal-toggle"
+                        aria-pressed={hideEqual()}
+                        title="Hide equal same-file changes, ignoring spaces and tabs (w)"
+                        onClick={() => setHideEqual((value) => !value)}
+                    >
+                        Hide equal changes
+                    </button>
                     <div
                         class="flow-layout-switch"
                         role="group"
@@ -984,7 +1037,9 @@ export default function FlowDiff(props: FlowDiffProps) {
                 when={visibleFiles().length}
                 fallback={
                     <div class="flow-empty">
-                        No changed files in this comparison.
+                        {hideEqual() && sourceFiles().length
+                            ? "No unequal changes"
+                            : "No changed files in this comparison."}
                     </div>
                 }
             >
@@ -1153,6 +1208,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                                                                 }
                                                             >
                                                                 <MoveOverlay
+                                                                    hideEqual={hideEqual()}
                                                                     move={
                                                                         section.move!
                                                                     }

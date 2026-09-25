@@ -69,6 +69,14 @@ and the review keys below. `Enter` or `gf` opens the active change in the GUI.
 `:` and `<Space>` return to Ovim's command input.
 Text can be selected and copied directly from either pane.
 
+In the GUI, press `w` or click **Hide equal changes** to hide same-file pairs
+that are equal after ignoring spaces and tabs, including equal sections paired
+by the agent in a curated diff. Real edits within a pair remain visible.
+Cross-file pairs stay visible even when their contents match. This applies to
+both layouts, Guided sections, change navigation, and image exports. Toggle it
+off to restore the complete review. The original patch and its change totals
+are unchanged.
+
 | Key | Action |
 |---|---|
 | `<Space>gd` | Open the review, return to it from a file, or leave it |

@@ -1,5 +1,8 @@
 import {
     replacementParts,
+    hideEqualChanges,
+    equalPairedLines,
+    isEqualOnly,
     sectionsForFile,
     sectionsWithMoves,
     moveLocation,
@@ -17,6 +20,7 @@ export type DiffExportOptions = {
     view: DiffExportView;
     reconstruction: Reconstruction;
     traceMoves?: boolean;
+    hideEqual?: boolean;
 };
 
 export type DiffExportPage = {
@@ -205,6 +209,7 @@ function moveRows(
     move: FlowDiffMove,
     reconstruction: Reconstruction,
     anchorLines: FlowDiffLine[],
+    hidden?: ReturnType<typeof equalPairedLines>,
 ): ExportRow[] {
     const endpoint = move[reconstruction];
     const side = reconstruction;
@@ -289,13 +294,20 @@ function moveRows(
             throw new Error(
                 `Canonical move line ${anchor.startLine + offset} is missing from this file.`,
             );
-        const sourceCells = codeCells(source, side, canonical, Boolean(source));
-        const anchorCells = codeCells(
-            canonical,
-            anchorSide,
-            source,
-            Boolean(canonical),
-        );
+        const hiddenLine = (
+            line: FlowDiffLine | undefined,
+            lineSide: Reconstruction,
+        ) =>
+            line &&
+            (lineSide === "old"
+                ? hidden?.oldLines.has(line.oldLine!)
+                : hidden?.newLines.has(line.newLine!));
+        const sourceCells = hiddenLine(source, side)
+            ? []
+            : codeCells(source, side, canonical, Boolean(source));
+        const anchorCells = hiddenLine(canonical, anchorSide)
+            ? []
+            : codeCells(canonical, anchorSide, source, Boolean(canonical));
         for (
             let index = 0;
             index < Math.max(sourceCells.length, anchorCells.length);
@@ -335,7 +347,7 @@ function fileBlock(
     file: FlowDiffFile,
     moves: FlowDiffMove[],
     options: DiffExportOptions,
-): FileBlock {
+): FileBlock | undefined {
     const pathLines = wrapWords(file.path, 78);
     const header: ExportRow & { kind: "file" } = {
         kind: "file",
@@ -366,10 +378,14 @@ function fileBlock(
         });
         return { file, header, rows };
     }
-    const sections =
+    const rawSections =
         options.view === "files" && options.traceMoves && moves.length
             ? sectionsWithMoves(file, moves, options.reconstruction)
             : sectionsForFile(file);
+    const sections = options.hideEqual
+        ? hideEqualChanges(file, rawSections, moves)
+        : rawSections;
+    if (options.hideEqual && isEqualOnly(file, sections)) return undefined;
     if (!sections.length)
         rows.push({
             kind: "note",
@@ -413,7 +429,16 @@ function fileBlock(
                         number < anchor.startLine + anchor.lineCount
                     );
                 });
-            rows.push(...moveRows(section.move, sourceSide, anchorLines));
+            rows.push(
+                ...moveRows(
+                    section.move,
+                    sourceSide,
+                    anchorLines,
+                    options.hideEqual
+                        ? equalPairedLines(file, [section.move])
+                        : undefined,
+                ),
+            );
             continue;
         }
         const count = Math.max(section.left.length, section.right.length);
@@ -576,10 +601,7 @@ export function buildDiffExportPages(
     if (!files)
         throw new Error("Guided review is unavailable for this comparison.");
     if (options.view === "guided") assertGuidedCoverage(review.files, files);
-    const moves =
-        options.view === "files" && options.traceMoves
-            ? review.moves || []
-            : [];
+    const moves = options.view === "files" ? review.moves || [] : [];
     const titleLines = wrapWords(review.title, 116);
     const bodyTop = 151 + titleLines.length * 24;
     if (bodyTop > PAGE_HEIGHT / 2)
@@ -648,6 +670,7 @@ export function buildDiffExportPages(
     };
     for (const file of files) {
         const block = fileBlock(file, moves, options);
+        if (!block) continue;
         append(block.header, block);
         for (const row of block.rows) append(row, block);
     }
@@ -660,7 +683,7 @@ export function buildDiffExportPages(
         0,
     );
     const moveCount = review.moves?.length ?? 0;
-    const coverage = `${review.files.length} files · ${moveCount} possible moved-code matches · +${additions} −${deletions}`;
+    const coverage = `${options.hideEqual ? "Equal same-file changes hidden · original patch: " : ""}${review.files.length} files · ${moveCount} possible moved-code matches · +${additions} −${deletions}`;
     const scope = options.view === "guided" ? "Guided sections" : "Files";
     const stem = safeStem(review.title);
     const pageCount = drafts.length;
@@ -675,7 +698,18 @@ export function buildDiffExportPages(
                     `<text x="${MARGIN}" y="${72 + lineIndex * 24}" fill="#18253c" font-family="${MONO}" font-size="20" font-weight="700">${xml(line)}</text>`,
             )
             .join("");
-        const rows = draft.rows.map(({ row, y }) => rowSvg(row, y)).join("");
+        const rows = draft.rows.length
+            ? draft.rows.map(({ row, y }) => rowSvg(row, y)).join("")
+            : rowSvg(
+                  {
+                      kind: "note",
+                      height: 28,
+                      text: options.hideEqual
+                          ? "No unequal changes"
+                          : "No changes",
+                  },
+                  bodyTop,
+              );
         const footer = sourceLines
             .map(
                 (line, lineIndex) =>

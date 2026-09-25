@@ -1,3 +1,4 @@
+import { diffArrays } from "diff";
 import type { GuiDiffDocument, GuiDiffHunk, GuiDiffLine } from "./types";
 
 export type FlowDiffLine = GuiDiffLine;
@@ -20,6 +21,7 @@ export type FlowSection = {
     left: FlowDiffLine[];
     right: FlowDiffLine[];
     move?: FlowDiffMove;
+    equal?: boolean;
 };
 
 /** Keep move cards anchored to their exact canonical change lines. */
@@ -113,6 +115,171 @@ export function sectionsForFile(file: FlowDiffFile): FlowSection[] {
     });
 
     return sections;
+}
+
+function compareLines(before: FlowDiffLine[], after: FlowDiffLine[]) {
+    const normalized = (line: FlowDiffLine) =>
+        line.text.replace(/[ \t\r\f\v]/g, "");
+    return diffArrays(before.map(normalized), after.map(normalized), {
+        maxEditLength: 1000,
+    });
+}
+
+/** The agent's same-file pairings may connect distant hunks. Use their source
+ * coordinates to hide both endpoints in Files view as well as in Guided view.
+ */
+export function equalPairedLines(file: FlowDiffFile, moves: FlowDiffMove[]) {
+    const oldLines = new Set<number>();
+    const newLines = new Set<number>();
+    const lines = file.hunks.flatMap((hunk) => hunk.lines);
+    for (const move of moves) {
+        if (move.old.path !== file.path || move.new.path !== file.path)
+            continue;
+        const before = lines.filter(
+            (line) =>
+                line.kind === "removed" &&
+                line.oldLine !== undefined &&
+                line.oldLine >= move.old.startLine &&
+                line.oldLine < move.old.startLine + move.old.lineCount,
+        );
+        const after = lines.filter(
+            (line) =>
+                line.kind === "added" &&
+                line.newLine !== undefined &&
+                line.newLine >= move.new.startLine &&
+                line.newLine < move.new.startLine + move.new.lineCount,
+        );
+        // Do not compare partial pairings when projecting a subset of the patch.
+        if (
+            before.length !== move.old.lineCount ||
+            after.length !== move.new.lineCount
+        )
+            continue;
+        let oldIndex = 0,
+            newIndex = 0;
+        for (const part of compareLines(before, after) ?? []) {
+            if (!part.added && !part.removed) {
+                for (let i = 0; i < part.count; i++) {
+                    oldLines.add(before[oldIndex + i].oldLine!);
+                    newLines.add(after[newIndex + i].newLine!);
+                }
+            }
+            if (!part.added) oldIndex += part.count;
+            if (!part.removed) newIndex += part.count;
+        }
+    }
+    return { oldLines, newLines };
+}
+
+/** Collapse equal lines after ignoring horizontal whitespace, preserving source
+ * coordinates and the original patch. Re-diff each replacement so cosmetic
+ * edits do not obscure real changes inside the same block. Unpaired insertions and
+ * deletions remain changes; cross-file moves retain their useful correspondence.
+ */
+export function hideEqualChanges(
+    file: FlowDiffFile,
+    sections: FlowSection[],
+    moves: FlowDiffMove[] = [],
+): FlowSection[] {
+    // Cross-file correspondence remains useful even when the text is equal.
+    if (file.oldPath && file.oldPath !== file.path) return sections;
+    const paired = equalPairedLines(file, moves);
+    return sections.flatMap((original) => {
+        const left = original.left.filter(
+            (line) => !paired.oldLines.has(line.oldLine!),
+        );
+        const right = original.right.filter(
+            (line) => !paired.newLines.has(line.newLine!),
+        );
+        const hidden =
+            original.left.length +
+            original.right.length -
+            left.length -
+            right.length;
+        const section = hidden ? { ...original, left, right } : original;
+        if (hidden && !left.length && !right.length)
+            return [
+                {
+                    id: original.id,
+                    kind: "gap" as const,
+                    equal: true,
+                    hunkIndex: original.hunkIndex,
+                    label: "Equal same-file pairing hidden",
+                    left: [],
+                    right: [],
+                },
+            ];
+        if (
+            section.kind !== "change" ||
+            section.move ||
+            !section.left.length ||
+            !section.right.length
+        )
+            return [section];
+        const diff = compareLines(section.left, section.right);
+        // Very dissimilar blocks stay fully visible if the bounded comparison
+        // cannot finish. Never discard a change without proving equality.
+        if (!diff) return [section];
+        let oldIndex = 0;
+        let newIndex = 0;
+        const result: FlowSection[] = [];
+        let change: FlowSection | undefined;
+        for (const part of diff) {
+            const count = part.count;
+            if (!part.added && !part.removed) {
+                change = undefined;
+                result.push({
+                    id: `${section.id}-ws-${oldIndex}-${newIndex}`,
+                    kind: "gap",
+                    equal: true,
+                    hunkIndex: section.hunkIndex,
+                    label: `${count} ${count === 1 ? "line" : "lines"} unchanged ignoring whitespace`,
+                    left: [],
+                    right: [],
+                });
+                oldIndex += count;
+                newIndex += count;
+                continue;
+            }
+            if (!change) {
+                change = {
+                    id: `${section.id}-edit-${oldIndex}-${newIndex}`,
+                    kind: "change",
+                    hunkIndex: section.hunkIndex,
+                    left: [],
+                    right: [],
+                };
+                result.push(change);
+            }
+            if (part.removed) {
+                change.left.push(
+                    ...section.left.slice(oldIndex, oldIndex + count),
+                );
+                oldIndex += count;
+            } else {
+                change.right.push(
+                    ...section.right.slice(newIndex, newIndex + count),
+                );
+                newIndex += count;
+            }
+        }
+        return result;
+    });
+}
+
+/** A wholly equal paired section should disappear, not leave an empty card.
+ * Metadata and binary changes always remain available for review.
+ */
+export function isEqualOnly(
+    file: FlowDiffFile,
+    sections: FlowSection[],
+): boolean {
+    return (
+        !file.binary &&
+        !file.metadata.length &&
+        sections.some((section) => section.equal) &&
+        !sections.some((section) => section.kind === "change")
+    );
 }
 
 export type InlinePart = { text: string; changed: boolean };

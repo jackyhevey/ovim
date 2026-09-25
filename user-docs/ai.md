@@ -884,6 +884,13 @@ continuous review, or **Files** to see changes in file order. The terminal shows
 both source paths. Old-side navigation opens a labeled snapshot excerpt.
 Older saved reviews and large files may have limited surrounding context.
 
+Press `w` or click **Hide equal changes** to hide equal same-file pairs, treating
+spaces and tabs as insignificant. Entire equal sections disappear; real edits
+inside mixed pairs stay visible. This follows the agent's pairings even across
+separate hunks in **Files**, and also works in **Guided**, both layouts, navigation,
+and image exports. Cross-file pairs remain visible so the relocation is clear.
+Toggle it off to restore every pair; the saved review and change totals are preserved.
+
 Use **Export image** in the GUI to save the complete **Files** or **Guided** view,
 including files and sections outside the viewport. Short reviews produce one PNG;
 longer reviews produce a ZIP of numbered PNG pages. Images include descriptions,

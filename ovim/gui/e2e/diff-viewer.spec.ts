@@ -1010,3 +1010,234 @@ test("exports long reviews as one ZIP containing every numbered PNG page", async
         ]);
     }
 });
+
+for (const width of [1440, 760]) {
+    test(`hide equal agent pairings across hunks at ${width}px`, async ({
+        page,
+    }, testInfo) => {
+        await page.setViewportSize({ width, height: 900 });
+        const same: GuiDiffDocument["files"][number] = {
+            id: "src/same.ts",
+            path: "src/same.ts",
+            status: "modified",
+            additions: 1,
+            deletions: 1,
+            binary: false,
+            metadata: [],
+            hunks: [
+                {
+                    header: "@@ -10 +10,0 @@",
+                    oldStart: 10,
+                    oldCount: 1,
+                    newStart: 10,
+                    newCount: 0,
+                    lines: [
+                        {
+                            kind: "removed",
+                            text: "sameFilePair();",
+                            oldLine: 10,
+                        },
+                    ],
+                },
+                {
+                    header: "@@ -40,0 +40 @@",
+                    oldStart: 40,
+                    oldCount: 0,
+                    newStart: 40,
+                    newCount: 1,
+                    lines: [
+                        {
+                            kind: "added",
+                            text: "  sameFilePair( );",
+                            newLine: 40,
+                        },
+                    ],
+                },
+            ],
+        };
+        const cross: GuiDiffDocument["files"][number] = {
+            ...same,
+            id: "cross",
+            path: "src/new.ts",
+            oldPath: "src/old.ts",
+            status: "reassigned",
+            hunks: [
+                {
+                    header: "Moved between files",
+                    oldStart: 5,
+                    oldCount: 1,
+                    newStart: 20,
+                    newCount: 1,
+                    lines: [
+                        {
+                            kind: "removed",
+                            text: "crossFilePair();",
+                            oldLine: 5,
+                        },
+                        {
+                            kind: "added",
+                            text: "crossFilePair();",
+                            newLine: 20,
+                        },
+                    ],
+                },
+            ],
+        };
+        const removed = {
+            ...cross,
+            id: "old",
+            path: "src/old.ts",
+            oldPath: undefined,
+            status: "deleted",
+            additions: 0,
+            hunks: [
+                {
+                    ...cross.hunks[0],
+                    newCount: 0,
+                    lines: cross.hunks[0].lines.slice(0, 1),
+                },
+            ],
+        };
+        const added = {
+            ...cross,
+            id: "new",
+            oldPath: undefined,
+            status: "added",
+            deletions: 0,
+            hunks: [
+                {
+                    ...cross.hunks[0],
+                    oldCount: 0,
+                    lines: cross.hunks[0].lines.slice(1),
+                },
+            ],
+        };
+        await setup(page, {
+            title: "Diff · Agent paired equal code",
+            layout: "split",
+            managed: true,
+            custom: true,
+            files: [same, removed, added],
+            guidedFiles: [
+                {
+                    ...same,
+                    status: "reassigned",
+                    oldPath: same.path,
+                    label: "Same-file pair",
+                    hunks: [
+                        {
+                            ...same.hunks[0],
+                            newStart: 40,
+                            newCount: 1,
+                            lines: same.hunks.flatMap((h) => h.lines),
+                        },
+                    ],
+                },
+                { ...cross, label: "Cross-file move" },
+            ],
+            moves: [
+                {
+                    id: "same",
+                    old: {
+                        path: same.path,
+                        startLine: 10,
+                        lineCount: 1,
+                        contextWindows: [],
+                        contextComplete: false,
+                    },
+                    new: {
+                        path: same.path,
+                        startLine: 40,
+                        lineCount: 1,
+                        contextWindows: [],
+                        contextComplete: false,
+                    },
+                },
+            ],
+        });
+        const diff = page.getByRole("region", {
+            name: "Diff review",
+            exact: true,
+        });
+        const equalLines = page
+            .locator(".flow-code-line")
+            .filter({ hasText: "sameFilePair" });
+        const movedLines = page
+            .locator(".flow-code-line")
+            .filter({ hasText: "crossFilePair" });
+        await expect(equalLines).toHaveCount(2);
+        await diff.focus();
+        await page.keyboard.press("w");
+        const toggle = page.getByRole("button", { name: "Hide equal changes" });
+        await expect(toggle).toHaveAttribute("aria-pressed", "true");
+        await expect(equalLines).toHaveCount(0);
+        await expect(movedLines).toHaveCount(2);
+        await page.getByRole("button", { name: "Guided", exact: true }).click();
+        await expect(equalLines).toHaveCount(0);
+        await expect(movedLines).toHaveCount(2);
+        await expect(page.getByText("1 / 1", { exact: true })).toBeVisible();
+        await diff.focus();
+        await page.keyboard.press("s");
+        await expect(page.locator(".flow-unified-scroll")).toBeVisible();
+        await expect(equalLines).toHaveCount(0);
+        await expect(movedLines).toHaveCount(2);
+        await page.screenshot({
+            path: testInfo.outputPath("equal-pairs-hidden.png"),
+        });
+        await toggle.click();
+        await expect(equalLines).toHaveCount(2);
+        await expect(movedLines).toHaveCount(2);
+    });
+}
+
+test("an entirely equal curated review has a visible empty state and can be restored", async ({
+    page,
+}, testInfo) => {
+    await page.setViewportSize({ width: 760, height: 700 });
+    const file: GuiDiffDocument["files"][number] = {
+        id: "equal",
+        path: "src/equal.ts",
+        oldPath: "src/equal.ts",
+        status: "reassigned",
+        additions: 1,
+        deletions: 1,
+        binary: false,
+        metadata: [],
+        hunks: [
+            {
+                header: "Equal pair",
+                oldStart: 1,
+                oldCount: 1,
+                newStart: 10,
+                newCount: 1,
+                lines: [
+                    { kind: "removed", text: "same();", oldLine: 1 },
+                    { kind: "added", text: " same( );", newLine: 10 },
+                ],
+            },
+        ],
+    };
+    await setup(page, {
+        title: "Diff · Equal pair",
+        layout: "split",
+        managed: true,
+        custom: true,
+        files: [file],
+        guidedFiles: [file],
+    });
+    const toggle = page.getByRole("button", { name: "Hide equal changes" });
+    await toggle.click();
+    await expect(page.locator(".flow-empty")).toHaveText("No unequal changes");
+    await expect(page.locator(".flow-empty")).toBeVisible();
+    await expect(
+        page.getByRole("button", { name: "Next change" }),
+    ).toBeDisabled();
+    const download = page.waitForEvent("download");
+    await page.getByRole("button", { name: "Export image" }).click();
+    expect((await download).suggestedFilename()).toMatch(/\.png$/);
+    await page.screenshot({
+        path: testInfo.outputPath("equal-review-empty.png"),
+    });
+    await toggle.click();
+    await expect(page.locator(".flow-code-line")).toHaveCount(2);
+});

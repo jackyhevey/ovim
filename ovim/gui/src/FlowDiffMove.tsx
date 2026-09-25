@@ -1,4 +1,4 @@
-import { For, Show, createEffect } from "solid-js";
+import { For, Show, createEffect, createMemo } from "solid-js";
 import { FileLine, type Side } from "./FlowDiffCode";
 import type {
     FlowDiffFile,
@@ -6,7 +6,7 @@ import type {
     FlowDiffMove,
     Reconstruction,
 } from "./FlowDiffModel";
-import { moveLocation } from "./FlowDiffModel";
+import { moveLocation, equalPairedLines } from "./FlowDiffModel";
 
 export function pairedMoveLine(
     move: FlowDiffMove,
@@ -37,10 +37,22 @@ export function pairedMoveLine(
 export function MoveOverlay(props: {
     move: FlowDiffMove;
     reconstruction: Reconstruction;
+    hideEqual?: boolean;
     file: FlowDiffFile;
     syntax?: Record<string, string>;
     onOpenSource?: (path: string, line: number, side: Side) => void;
 }) {
+    const hidden = createMemo(() =>
+        props.hideEqual
+            ? equalPairedLines(props.file, [props.move])
+            : undefined,
+    );
+    const visibleLines = (lines: FlowDiffLine[]) =>
+        lines.filter((line) =>
+            props.reconstruction === "old"
+                ? !hidden()?.oldLines.has(line.oldLine!)
+                : !hidden()?.newLines.has(line.newLine!),
+        );
     const endpoint = () =>
         props.reconstruction === "old" ? props.move.old : props.move.new;
     let scroller: HTMLDivElement | undefined;
@@ -111,7 +123,7 @@ export function MoveOverlay(props: {
                                     ··· context omitted ···
                                 </div>
                             </Show>
-                            <For each={window.lines}>
+                            <For each={visibleLines(window.lines)}>
                                 {(line) => {
                                     const number =
                                         props.reconstruction === "old"

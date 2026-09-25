@@ -133,6 +133,7 @@
     color: var(--text-primary);
 }
 
+.flow-equal-toggle[aria-pressed="true"],
 .flow-layout-switch button[aria-pressed="true"],
 .flow-view-switch button[aria-pressed="true"],
 .flow-reconstruction-switch button[aria-pressed="true"] {
@@ -715,4 +716,14 @@
     .flow-diff * {
         scroll-behavior: auto !important;
     }
+}
+
+.flow-equal-toggle {
+    min-height: 27px;
+    padding: 0 9px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2);
+    background: transparent;
+    color: var(--text-secondary);
+    white-space: nowrap;
 }
