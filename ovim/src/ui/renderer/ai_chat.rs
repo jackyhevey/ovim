@@ -2826,6 +2826,57 @@ mod tests {
     }
 
     #[test]
+    fn assistant_code_blocks_wrap_without_losing_content() {
+        let theme = crate::syntax::Theme::default();
+        for language in ["rust", "unknownlang12345", ""] {
+            for code in [
+                "let greeting = \"hei 👋 世界 verden\";",
+                "alpha beta gamma delta epsilon",
+                "abcdefghijklmnopqrstuvwxyz0123456789",
+            ] {
+                let message = ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: format!("```{language}\n{code}\n```"),
+                    model: None,
+                    timestamp: std::time::Instant::now(),
+                    images: vec![],
+                    tool_calls: vec![],
+                    tool_call_id: None,
+                    provider_state: vec![],
+                };
+                for width in [12, 24, 80] {
+                    let bubble = render_chat_bubble(
+                        &message, width, false, false, false, 0, None, &theme, false,
+                    );
+                    let rows = bubble
+                        .lines
+                        .iter()
+                        .skip(1)
+                        .map(|line| {
+                            assert!(line.width() <= width);
+                            styled_row_text(&line.spans)["▍ ".len()..]
+                                .trim()
+                                .to_string()
+                        })
+                        .collect::<Vec<_>>();
+                    let rendered = rows.join(" ");
+                    assert!(!rendered.contains("..."));
+                    assert!(!rendered.contains('…'));
+                    let without_whitespace = |text: &str| {
+                        text.chars()
+                            .filter(|character| !character.is_whitespace())
+                            .collect::<String>()
+                    };
+                    assert_eq!(without_whitespace(&rendered), without_whitespace(code));
+                    if code.starts_with("alpha") && width == 12 {
+                        assert_eq!(rows, ["alpha", "beta gamma", "delta", "epsilon"]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn chat_split_uses_user_width_and_preserves_minimum_buffer() {
         let area = Rect::new(0, 0, 100, 24);
         let (buffer, chat) = compute_chat_split(area, true, Some(55));

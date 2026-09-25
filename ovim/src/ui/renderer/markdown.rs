@@ -457,7 +457,6 @@ fn render_code_line_with_highlights(
     line: &str,
     highlights: &[(Range<usize>, HighlightGroup)],
     theme: &Theme,
-    max_width: usize,
 ) -> Line<'static> {
     use unicode_segmentation::UnicodeSegmentation;
 
@@ -481,20 +480,12 @@ fn render_code_line_with_highlights(
 
     // Highlight ranges are BYTE offsets relative to the line start (see
     // `highlights_for_all_lines`), so group lookups use grapheme byte
-    // positions, and truncation counts display columns (wide glyphs = 2).
-    let budget = max_width.saturating_sub(2);
-    let mut used = 0usize;
-    let mut truncated = false;
+    // positions. Preserve the full line for the caller’s style-aware wrapping.
     let mut run_group: Option<HighlightGroup> = None;
     let mut run_text = String::new();
     let mut run_started = false;
 
     for (byte_idx, grapheme) in line.grapheme_indices(true) {
-        let width = crate::display::grapheme_display_width(grapheme);
-        if used + width > budget {
-            truncated = true;
-            break;
-        }
         let group = highlights
             .iter()
             .find(|(range, _)| range.contains(&byte_idx))
@@ -508,20 +499,11 @@ fn render_code_line_with_highlights(
         run_started = true;
         run_group = group;
         run_text.push_str(grapheme);
-        used += width;
     }
     if !run_text.is_empty() {
         spans.push(Span::styled(run_text, style_for(run_group)));
     }
 
-    if truncated {
-        spans.push(Span::styled(
-            "...",
-            Style::default()
-                .fg(colors::CODE_BLOCK_FG)
-                .bg(colors::CODE_BLOCK_BG),
-        ));
-    }
     spans.push(Span::styled(
         " ",
         Style::default().bg(colors::CODE_BLOCK_BG),
@@ -699,7 +681,8 @@ fn render_table(
     lines
 }
 
-/// Convert parsed markdown elements to styled ratatui Lines
+/// Convert parsed markdown elements to styled ratatui Lines.
+/// Text is preserved in full; callers wrap the styled lines to their viewport.
 pub fn render_markdown(
     elements: &[MarkdownElement],
     max_width: usize,
@@ -776,25 +759,16 @@ pub fn render_markdown(
                     // Try to render with syntax highlighting
                     if let (Some(hl), Some(theme)) = (&highlights, theme) {
                         if let Some(line_hl) = hl.get(line_idx) {
-                            lines.push(render_code_line_with_highlights(
-                                code_line, line_hl, theme, max_width,
-                            ));
+                            lines.push(render_code_line_with_highlights(code_line, line_hl, theme));
                             continue;
                         }
                     }
 
                     // Fallback: plain green style
-                    let available = max_width.saturating_sub(2);
-                    let truncated = if UnicodeWidthStr::width(code_line) > available {
-                        let prefix = crate::ui::renderer::helpers::truncate_to_width(
-                            code_line,
-                            max_width.saturating_sub(5),
-                        );
-                        format!(" {prefix}... ")
-                    } else {
-                        format!(" {} ", code_line)
-                    };
-                    lines.push(Line::from(Span::styled(truncated, code_block_style)));
+                    lines.push(Line::from(Span::styled(
+                        format!(" {code_line} "),
+                        code_block_style,
+                    )));
                 }
             }
             MarkdownElement::Table { headers, rows } => {
@@ -1129,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn test_narrow_unicode_code_block_does_not_panic() {
+    fn test_narrow_unicode_code_block_preserves_content() {
         let elements = parse_markdown("```text\nlet greeting = \"hei 👋 verden\";\n```");
         let lines = render_markdown(&elements, 12, None);
         assert!(!lines.is_empty());
@@ -1138,6 +1112,6 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>();
-        assert!(rendered.contains("..."));
+        assert_eq!(rendered, " let greeting = \"hei 👋 verden\"; ");
     }
 }
