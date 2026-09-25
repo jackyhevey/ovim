@@ -115,12 +115,15 @@ async fn saved_moves_follow_exact_live_diff_and_recover_after_undo() {
                 block_id: removed.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
             new: ChangeRef {
                 block_id: added.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
+            related_to: None,
         }])
         .unwrap();
 
@@ -231,12 +234,15 @@ async fn custom_review_keeps_cross_file_sources_and_a_frozen_layout() {
                 block_id: removed.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
             new: ChangeRef {
                 block_id: added.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
+            related_to: None,
         }])
         .unwrap();
 
@@ -1603,12 +1609,15 @@ async fn w_hides_equal_same_file_pairs_in_both_terminal_layouts_without_changing
                 block_id: old.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
             new: ChangeRef {
                 block_id: new.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
+            related_to: None,
         }])
         .unwrap();
     let mut test = open_editor_on(&fixture, "a.txt");
@@ -1699,12 +1708,15 @@ async fn w_hides_equal_cross_file_pairs_in_both_terminal_layouts_without_changin
                 block_id: old.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
             new: ChangeRef {
                 block_id: new.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
+            related_to: None,
         }])
         .unwrap();
     let mut test = open_editor_on(&fixture, "moved.txt");
@@ -1975,12 +1987,15 @@ async fn paired_context_stays_with_each_file_and_stops_at_capture_gaps() {
                 block_id: old_block.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
             new: ChangeRef {
                 block_id: new_block.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
+            related_to: None,
         }])
         .unwrap();
     let id = format!("section:{}", custom.sections[0].id);

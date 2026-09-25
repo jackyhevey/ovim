@@ -280,7 +280,7 @@ fn project_custom_review(
                 custom,
                 &review_lines,
                 &patch_lines,
-                &pairing.old,
+                pairing.old.as_ref()?,
                 PatchLineKind::Removed,
             )?;
             let new = project_move_endpoint(
@@ -288,12 +288,15 @@ fn project_custom_review(
                 custom,
                 &review_lines,
                 &patch_lines,
-                &pairing.new,
+                pairing.new.as_ref()?,
                 PatchLineKind::Added,
             )?;
             Some(GuiDiffMove {
                 id: format!("pair_{index}"),
-                label: pairing.label.clone(),
+                label: custom
+                    .sections
+                    .get(index)
+                    .and_then(|section| section.label.clone()),
                 old,
                 new,
             })
@@ -401,7 +404,12 @@ fn project_guided_files(review: &DiffReviewState, custom: &CustomReview) -> Vec<
                 path,
                 old_path: section.old_path.clone(),
                 status: if section.is_reassigned {
-                    "reassigned".to_string()
+                    match (section.old_path.is_some(), section.new_path.is_some()) {
+                        (true, false) => "deletion",
+                        (false, true) => "addition",
+                        _ => "reassigned",
+                    }
+                    .to_string()
                 } else {
                     canonical
                         .map(|file| file.status.clone())
@@ -901,6 +909,107 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn one_sided_sections_and_copy_references_survive_restart_and_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let repo = Repository::init(root).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        fs::write(root.join("anchor.rs"), "fn anchor() {}\n").unwrap();
+        fs::write(root.join("old.rs"), "duplicate_check();\nrespondent();\n").unwrap();
+        commit(&repo);
+        fs::remove_file(root.join("old.rs")).unwrap();
+        fs::write(root.join("new.rs"), "respondent();\nrespondent();\n").unwrap();
+        let snapshot = review_snapshot(root, &ReviewBase::explicit("HEAD")).unwrap();
+        let old = snapshot
+            .blocks
+            .iter()
+            .find(|b| b.kind == PatchLineKind::Removed)
+            .unwrap();
+        let new = snapshot
+            .blocks
+            .iter()
+            .find(|b| b.kind == PatchLineKind::Added)
+            .unwrap();
+        let reference = |id: &str, offset| ChangeRef {
+            block_id: id.into(),
+            offset: Some(offset),
+            count: Some(1),
+        };
+        let specs = vec![
+            DiffPairing {
+                label: Some("Remove duplicate permission check".into()),
+                old: Some(reference(&old.id, 0)),
+                new: None,
+                related_to: None,
+            },
+            DiffPairing {
+                label: Some("Move respondent lookup".into()),
+                old: Some(reference(&old.id, 1)),
+                new: Some(reference(&new.id, 0)),
+                related_to: None,
+            },
+            DiffPairing {
+                label: Some("Additional respondent copy".into()),
+                old: None,
+                new: Some(reference(&new.id, 1)),
+                related_to: Some(reference(&old.id, 1)),
+            },
+        ];
+        let custom = snapshot.reassign(&specs).unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let store = ovim_core::native_diff::store::ReviewStore::new(storage.path().to_path_buf());
+        let mut editor = Editor::default();
+        editor.set_diff_review_store(Some(store.clone()));
+        editor.open_file(root.join("anchor.rs")).unwrap();
+        editor
+            .open_custom_diff_review("Explain deletion and copy", custom)
+            .unwrap();
+        drop(editor);
+        let mut editor = Editor::default();
+        editor.set_diff_review_store(Some(store));
+        editor.open_file(root.join("anchor.rs")).unwrap();
+        editor.open_diff_review(Some("HEAD")).unwrap();
+        let projected = project_diff(&editor, editor.buffer()).unwrap();
+        assert_eq!(
+            projected.moves.len(),
+            1,
+            "A reference must not become an equal-filter pairing"
+        );
+        let guided = &projected.guided_files;
+        assert_eq!(guided[0].status, "deletion");
+        assert_eq!(guided[0].additions, 0);
+        assert_eq!(guided[0].deletions, 1);
+        assert_eq!(guided[2].status, "addition");
+        assert!(guided[2].old_path.is_none());
+        assert!(guided[2]
+            .label
+            .as_ref()
+            .unwrap()
+            .contains("Related source (before): old.rs:2"));
+        assert_eq!(guided.iter().map(|f| f.additions).sum::<usize>(), 2);
+        assert_eq!(guided.iter().map(|f| f.deletions).sum::<usize>(), 2);
+        if let Some(path) = std::env::var_os("OVIM_SECTION_QA_FIXTURE") {
+            fs::write(path, serde_json::to_vec_pretty(&projected).unwrap()).unwrap();
+        }
+        editor.toggle_diff_review_equal_changes();
+        for _ in 0..2 {
+            let text = editor.buffer().rope().to_string();
+            assert!(text.contains("Deletion · Remove duplicate permission check"));
+            assert!(text.contains("Addition · Additional respondent copy"));
+            assert!(text.contains("duplicate_check();"));
+            assert_eq!(text.matches("respondent();").count(), 1, "{text}");
+            editor
+                .diff_review()
+                .unwrap()
+                .custom()
+                .unwrap()
+                .validate_coverage()
+                .unwrap();
+            editor.toggle_diff_review_layout();
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn context_actions_validate_identity_and_project_captured_source() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
@@ -986,12 +1095,15 @@ mod tests {
                 block_id: old.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
             new: ChangeRef {
                 block_id: new.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
+            related_to: None,
         }];
         let custom = snapshot.reassign(&pairings).unwrap();
         let storage = tempfile::tempdir().unwrap();
@@ -1112,12 +1224,15 @@ mod tests {
                 block_id: removed.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
             new: ChangeRef {
                 block_id: added.id.clone(),
                 offset: None,
                 count: None,
-            },
+            }
+            .into(),
+            related_to: None,
         }];
         let custom = snapshot.reassign(&pairings).unwrap();
         let mut editor = Editor::default();

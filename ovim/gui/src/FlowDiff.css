@@ -265,12 +265,14 @@
     text-transform: uppercase;
 }
 
-.flow-status.added {
+.flow-status.added,
+.flow-status.addition {
     color: var(--success);
     background: color-mix(in srgb, var(--success) 13%, transparent);
 }
 
-.flow-status.deleted {
+.flow-status.deleted,
+.flow-status.deletion {
     color: var(--error);
     background: color-mix(in srgb, var(--error) 13%, transparent);
 }

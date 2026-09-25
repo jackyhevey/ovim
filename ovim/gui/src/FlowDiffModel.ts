@@ -75,6 +75,15 @@ export function sectionsWithMoves(
     });
 }
 
+/** These statuses describe owned review slices, not whole-file Git statuses. */
+export function isCuratedSection(file: FlowDiffFile): boolean {
+    return (
+        file.status === "reassigned" ||
+        file.status === "deletion" ||
+        file.status === "addition"
+    );
+}
+
 /** A section is the smallest unit whose two edges need to stay related. */
 export function sectionsForFile(file: FlowDiffFile): FlowSection[] {
     const sections: FlowSection[] = [];
@@ -92,7 +101,7 @@ export function sectionsForFile(file: FlowDiffFile): FlowSection[] {
             (hunk.context?.before.new[0]?.number ?? hunk.newStart) -
                 previousNewEnd,
         );
-        if ((skippedOld || skippedNew) && file.status !== "reassigned") {
+        if ((skippedOld || skippedNew) && !isCuratedSection(file)) {
             sections.push({
                 id: `gap-${hunkIndex}`,
                 kind: "gap",

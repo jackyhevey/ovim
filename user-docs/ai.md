@@ -530,8 +530,10 @@ The private MCP connection also exposes editor tools:
   Questions return to the running Claude turn. Completed walkthroughs support replay.
 - `read_diff` reads a saved snapshot of the comparison used by `<leader>gd`,
   respecting `pullbase` and its directory overrides.
-- `show_custom_diff` pairs removed and added ranges from that snapshot, including
-  across files. The review opens immediately and can be reopened from chat.
+- `show_custom_diff` arranges snapshot ranges into labelled replacements,
+  deletions, and additions, including across files. Related-source references
+  explain copies without assigning a source line twice. The review opens
+  immediately and can be reopened from chat.
 
 The connection is bound to the originating editor turn and cannot discover or
 control other Ovim sessions. It closes when that turn ends. Claude's normal
@@ -929,9 +931,52 @@ a replacement patch. Finish edits before reading the diff; after further edits,
 read a fresh snapshot. Continue reading with `snapshot_id` and `next_cursor`
 until `next_cursor` is null. Like `<leader>gd`, the snapshot uses files on disk,
 not unsaved buffer edits. Pairings accept an optional zero-based `offset` and `count`
-on each side to select part of a block. Reusing the same changed line in multiple
-pairings is rejected. Binary and metadata-only changes remain visible, and
-incomplete diffs exceeding the review size limit cannot be reassigned.
+on each side to select part of a block. The `pairings` array is an ordered list
+of sections: use both `old` and `new` for a replacement, `old` alone for a
+labelled deletion, or `new` alone for an addition. At least one side is required.
+Splitting an existing block into disjoint slices lets a deleted check stand apart
+from a nearby but unrelated addition. Pair lengths need not match.
+
+A section may also include `related_to`, using the same block/range syntax.
+This displays a snapshot-derived source location to explain a copy, extraction,
+or deduplication. It is only a reference: it does not assign the referenced lines
+again, classify code as unchanged, or establish semantic equivalence. Several
+sections may reference the same source, including a range already owned by
+another section. A section cannot reference its own lines.
+
+For example, after reading the corresponding blocks:
+
+```json
+{
+  "snapshot_id": "<snapshot returned by read_diff>",
+  "title": "Respondent lookup cleanup",
+  "pairings": [
+    {
+      "label": "Remove duplicate permission check",
+      "old": {"block_id": "removed_10", "offset": 0, "count": 1}
+    },
+    {
+      "label": "Move respondent lookup",
+      "old": {"block_id": "removed_10", "offset": 1, "count": 1},
+      "new": {"block_id": "added_30", "offset": 0, "count": 1}
+    },
+    {
+      "label": "Additional respondent copy",
+      "new": {"block_id": "added_30", "offset": 1, "count": 1},
+      "related_to": {"block_id": "removed_10", "offset": 1, "count": 1}
+    }
+  ]
+}
+```
+
+The GUI's **Guided** view and both terminal layouts display these sections;
+**Files** retains canonical file order. Every canonical added and removed line
+must occur exactly once, with its original text, kind, and source path. Reusing
+owned ranges, wrong-side assignments, invalid references, and altered lines are
+rejected. Unassigned changes remain visible automatically. One-sided sections
+stay visible with **Hide equal changes**; a reference is never an equal pairing.
+Labels cannot change these rules. Binary and metadata-only changes remain visible,
+and incomplete diffs exceeding the review size limit cannot be reassigned.
 
 ## Legacy `ai.toml` (Still Supported)
 

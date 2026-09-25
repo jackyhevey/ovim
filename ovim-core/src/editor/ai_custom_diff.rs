@@ -490,7 +490,8 @@ impl Editor {
         Ok(json!({
             "title": saved.title,
             "snapshot_id": args.snapshot_id,
-            "pairings": saved.pairings.len(),
+            "sections": saved.pairings.len(),
+            "pairings": saved.pairings.iter().filter(|section| section.old.is_some() && section.new.is_some()).count(),
             "ovim_custom_diff_id": call.id,
             "opened": true,
         }))

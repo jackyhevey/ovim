@@ -1358,7 +1358,10 @@ export default function FlowDiff(props: FlowDiffProps) {
                                                 fallback={
                                                     <div class="flow-empty compact">
                                                         No text changes in this
-                                                        file.
+                                                        {effectiveView() ===
+                                                        "guided"
+                                                            ? " section."
+                                                            : " file."}
                                                     </div>
                                                 }
                                             >
@@ -1561,7 +1564,10 @@ export default function FlowDiff(props: FlowDiffProps) {
                                                 fallback={
                                                     <div class="flow-empty compact">
                                                         No text changes in this
-                                                        file.
+                                                        {effectiveView() ===
+                                                        "guided"
+                                                            ? " section."
+                                                            : " file."}
                                                     </div>
                                                 }
                                             >
@@ -1639,7 +1645,10 @@ export default function FlowDiff(props: FlowDiffProps) {
                                                 fallback={
                                                     <div class="flow-empty compact">
                                                         No text changes in this
-                                                        file.
+                                                        {effectiveView() ===
+                                                        "guided"
+                                                            ? " section."
+                                                            : " file."}
                                                     </div>
                                                 }
                                             >

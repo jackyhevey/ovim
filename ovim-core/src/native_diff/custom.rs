@@ -80,12 +80,23 @@ pub struct ChangeRef {
     pub count: Option<usize>,
 }
 
+/// An ordered review section. The historical `pairings` wire name is retained:
+/// either side alone owns a deletion/addition, and both sides own a replacement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiffPairing {
     pub label: Option<String>,
-    pub old: ChangeRef,
-    pub new: ChangeRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub old: Option<ChangeRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub new: Option<ChangeRef>,
+    /// Explanatory cross-reference only; never consumes or duplicates source lines.
+    #[serde(
+        default,
+        rename = "related_to",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub related_to: Option<ChangeRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,19 +363,103 @@ impl ReviewSnapshot {
         let raw: Vec<&str> = self.patch.text.lines().collect();
 
         for (index, pairing) in pairings.iter().enumerate() {
-            let old = self.select(&pairing.old, PatchLineKind::Removed, &mut assigned)?;
-            let new = self.select(&pairing.new, PatchLineKind::Added, &mut assigned)?;
-            let old_file = self.block(&pairing.old.block_id)?.file;
-            let new_file = self.block(&pairing.new.block_id)?.file;
-            let old_path = self.patch.files.get(old_file).map(old_path);
-            let new_path = self.patch.files.get(new_file).map(|file| file.path.clone());
+            ensure!(
+                pairing.old.is_some() || pairing.new.is_some(),
+                "A section must own removed or added lines"
+            );
+            ensure!(
+                pairing
+                    .label
+                    .as_deref()
+                    .is_none_or(|label| !label.contains(['\n', '\r'])),
+                "Section labels must be single lines"
+            );
+            let old = pairing
+                .old
+                .as_ref()
+                .map(|reference| self.select(reference, PatchLineKind::Removed, &mut assigned))
+                .transpose()?
+                .unwrap_or_default();
+            let new = pairing
+                .new
+                .as_ref()
+                .map(|reference| self.select(reference, PatchLineKind::Added, &mut assigned))
+                .transpose()?
+                .unwrap_or_default();
+            let old_path = pairing
+                .old
+                .as_ref()
+                .map(|reference| {
+                    self.block(&reference.block_id)
+                        .map(|block| old_path(&self.patch.files[block.file]))
+                })
+                .transpose()?;
+            let new_path = pairing
+                .new
+                .as_ref()
+                .map(|reference| {
+                    self.block(&reference.block_id)
+                        .map(|block| self.patch.files[block.file].path.clone())
+                })
+                .transpose()?;
+            let mut label = pairing.label.clone();
+            if let Some(reference) = &pairing.related_to {
+                let block = self.block(&reference.block_id)?;
+                let range = self.reference_range(reference)?;
+                // Owned selections are contiguous canonical ranges. Test intervals,
+                // rather than comparing every reference line to every owned line.
+                let overlaps = |owned: &[usize]| {
+                    owned
+                        .first()
+                        .zip(owned.last())
+                        .is_some_and(|(start, end)| range.start <= *end && range.end > *start)
+                };
+                ensure!(
+                    !overlaps(&old) && !overlaps(&new),
+                    "Related source must be outside this section's owned lines"
+                );
+                let source = &self.patch.files[block.file];
+                let path = if block.kind == PatchLineKind::Removed {
+                    source
+                        .old_path
+                        .clone()
+                        .unwrap_or_else(|| source.path.clone())
+                } else {
+                    source.path.clone()
+                };
+                let start = block
+                    .start_line
+                    .checked_add(reference.offset.unwrap_or(0))
+                    .context("Invalid source coordinate")?;
+                let end = start
+                    .checked_add(range.len() - 1)
+                    .context("Invalid source coordinate")?;
+                let side = if block.kind == PatchLineKind::Removed {
+                    "before"
+                } else {
+                    "after"
+                };
+                let location = if start == end {
+                    start.to_string()
+                } else {
+                    format!("{start}–{end}")
+                };
+                let description = format!(
+                    "Related source ({side}): {}:{location}",
+                    path.escape_debug()
+                );
+                label = Some(match label {
+                    Some(label) if !label.is_empty() => format!("{label} · {description}"),
+                    _ => description,
+                });
+            }
             let mut lines = Vec::with_capacity(old.len() + new.len());
             for patch_line in old.into_iter().chain(new) {
                 lines.push(section_line(&self.patch, &raw, patch_line));
             }
             sections.push(ReviewSection {
                 id: format!("pair_{index}"),
-                label: pairing.label.clone(),
+                label,
                 old_path,
                 new_path,
                 is_reassigned: true,
@@ -398,9 +493,23 @@ impl ReviewSnapshot {
         let block = self.block(&reference.block_id)?;
         ensure!(
             block.kind == expected,
-            "Block '{}' is on the wrong side of the pairing",
+            "Block '{}' is on the wrong side of the section",
             reference.block_id
         );
+        let range = self.reference_range(reference)?;
+        let start = range.start;
+        let end = range.end;
+        for slot in &mut assigned[start..end] {
+            if *slot {
+                bail!("Section reuses a changed line from block '{}'", block.id);
+            }
+            *slot = true;
+        }
+        Ok((start..end).collect())
+    }
+
+    fn reference_range(&self, reference: &ChangeRef) -> Result<std::ops::Range<usize>> {
+        let block = self.block(&reference.block_id)?;
         let offset = reference.offset.unwrap_or(0);
         ensure!(
             offset < block.line_count,
@@ -409,22 +518,19 @@ impl ReviewSnapshot {
             block.line_count
         );
         let count = reference.count.unwrap_or(block.line_count - offset);
-        ensure!(count > 0, "Pairing range cannot be empty");
+        ensure!(count > 0, "Source range cannot be empty");
         ensure!(
             count <= block.line_count - offset,
             "Range exceeds block '{}'; its length is {}",
             block.id,
             block.line_count
         );
-        let start = block.patch_line_start + offset;
-        let end = start + count;
-        for slot in &mut assigned[start..end] {
-            if *slot {
-                bail!("Pairing reuses a changed line from block '{}'", block.id);
-            }
-            *slot = true;
-        }
-        Ok((start..end).collect())
+        let start = block
+            .patch_line_start
+            .checked_add(offset)
+            .context("Invalid block range")?;
+        let end = start.checked_add(count).context("Invalid block range")?;
+        Ok(start..end)
     }
 
     fn residual_sections(&self, raw: &[&str], assigned: &[bool]) -> Vec<ReviewSection> {
@@ -793,6 +899,19 @@ impl CustomReview {
                     "Review section changed a canonical patch line"
                 );
                 if matches!(line.kind, PatchLineKind::Added | PatchLineKind::Removed) {
+                    let file = source
+                        .file
+                        .and_then(|file| self.snapshot.patch.files.get(file))
+                        .context("Changed source has no file")?;
+                    let correct_path = if line.kind == PatchLineKind::Removed {
+                        section.old_path.as_deref() == Some(old_path(file).as_str())
+                    } else {
+                        section.new_path.as_deref() == Some(file.path.as_str())
+                    };
+                    ensure!(
+                        correct_path,
+                        "Review section changed a canonical source path"
+                    );
                     counts[line.source_patch_line] =
                         counts[line.source_patch_line].saturating_add(1);
                 }
@@ -962,8 +1081,9 @@ mod tests {
         assert_eq!(snapshot.blocks.len(), 2);
         let pair = DiffPairing {
             label: Some("Moved alpha".into()),
-            old: reference(&snapshot.blocks[0].id, 0, 1),
-            new: reference(&snapshot.blocks[1].id, 0, 1),
+            old: reference(&snapshot.blocks[0].id, 0, 1).into(),
+            new: reference(&snapshot.blocks[1].id, 0, 1).into(),
+            related_to: None,
         };
         let review = snapshot.reassign(&[pair]).unwrap();
         assert_eq!(review.sections[0].old_path.as_deref(), Some("old.rs"));
@@ -992,24 +1112,173 @@ mod tests {
         let new = &snapshot.blocks[1].id;
         let pair = DiffPairing {
             label: None,
-            old: reference(old, 0, 1),
-            new: reference(new, 0, 1),
+            old: reference(old, 0, 1).into(),
+            new: reference(new, 0, 1).into(),
+            related_to: None,
         };
         assert!(snapshot.reassign(&[pair.clone(), pair]).is_err());
         assert!(snapshot
             .reassign(&[DiffPairing {
                 label: None,
-                old: reference(new, 0, 1),
-                new: reference(old, 0, 1),
+                old: reference(new, 0, 1).into(),
+                new: reference(old, 0, 1).into(),
+
+                related_to: None,
             }])
             .is_err());
         assert!(snapshot
             .reassign(&[DiffPairing {
                 label: None,
-                old: reference(old, 1, 2),
-                new: reference(new, 0, 1),
+                old: reference(old, 1, 2).into(),
+                new: reference(new, 0, 1).into(),
+
+                related_to: None,
             }])
             .is_err());
+    }
+
+    #[test]
+    fn labelled_slices_and_shared_references_preserve_exact_ownership() {
+        let mut patch = fixture();
+        patch.text = patch.text.replace("+beta", "+alpha");
+        let snapshot = ReviewSnapshot::from_patch(patch).unwrap();
+        let old = &snapshot.blocks[0].id;
+        let new = &snapshot.blocks[1].id;
+        let specs = vec![
+            DiffPairing {
+                label: Some("Remove duplicate".into()),
+                old: Some(reference(old, 1, 1)),
+                new: None,
+                related_to: Some(reference(old, 0, 1)),
+            },
+            DiffPairing {
+                label: Some("Primary move".into()),
+                old: Some(reference(old, 0, 1)),
+                new: Some(reference(new, 0, 1)),
+                related_to: None,
+            },
+            DiffPairing {
+                label: Some("Additional copy".into()),
+                old: None,
+                new: Some(reference(new, 1, 1)),
+                related_to: Some(reference(old, 0, 1)),
+            },
+        ];
+        let review = snapshot.reassign(&specs).unwrap();
+        review.validate_coverage().unwrap();
+        let owned = review
+            .sections
+            .iter()
+            .flat_map(|s| &s.lines)
+            .filter(|l| matches!(l.kind, PatchLineKind::Added | PatchLineKind::Removed))
+            .map(|l| l.source_patch_line)
+            .collect::<Vec<_>>();
+        assert_eq!(owned, vec![3, 2, 6, 7]);
+        assert!(review.sections[0].new_path.is_none());
+        assert!(review.sections[2].old_path.is_none());
+        assert!(review.sections[0]
+            .label
+            .as_ref()
+            .unwrap()
+            .contains("Related source (before): old.rs:1"));
+        assert!(review.sections[2]
+            .label
+            .as_ref()
+            .unwrap()
+            .contains("Related source (before): old.rs:1"));
+        // References never grant eligibility for the equal-pair filter.
+        assert!(review.sections[0].equal_change_lines().is_empty());
+        assert!(review.sections[2].equal_change_lines().is_empty());
+        assert_eq!(review.sections[1].equal_change_lines().len(), 2);
+        let saved = crate::native_diff::store::SavedReview {
+            title: "Review".into(),
+            snapshot,
+            pairings: specs,
+        };
+        let replay: crate::native_diff::store::SavedReview =
+            serde_json::from_str(&serde_json::to_string(&saved).unwrap()).unwrap();
+        assert_eq!(replay.into_custom().unwrap().1, review);
+        for change in 0..4 {
+            let mut broken = review.clone();
+            match change {
+                0 => {
+                    broken.sections[0].lines.clear();
+                }
+                1 => {
+                    let duplicate = broken.sections[0].lines[0].clone();
+                    broken.sections[0].lines.push(duplicate);
+                }
+                2 => broken.sections[0].lines[0].text = "invented".into(),
+                _ => broken.sections[0].old_path = Some("unrelated.rs".into()),
+            }
+            assert!(broken.validate_coverage().is_err());
+        }
+    }
+
+    #[test]
+    fn one_sided_sections_reject_empty_wrong_side_overlap_and_invalid_references() {
+        let snapshot = ReviewSnapshot::from_patch(fixture()).unwrap();
+        let old = &snapshot.blocks[0].id;
+        let new = &snapshot.blocks[1].id;
+        let deletion = DiffPairing {
+            label: None,
+            old: Some(reference(old, 0, 1)),
+            new: None,
+            related_to: None,
+        };
+        for spec in [
+            DiffPairing {
+                old: None,
+                ..deletion.clone()
+            },
+            DiffPairing {
+                old: Some(reference(new, 0, 1)),
+                ..deletion.clone()
+            },
+            DiffPairing {
+                old: None,
+                new: Some(reference(old, 0, 1)),
+                ..deletion.clone()
+            },
+            DiffPairing {
+                related_to: Some(reference(old, 0, 1)),
+                ..deletion.clone()
+            },
+            DiffPairing {
+                related_to: Some(reference(new, 2, 1)),
+                ..deletion.clone()
+            },
+            DiffPairing {
+                related_to: Some(reference(new, 0, 0)),
+                ..deletion.clone()
+            },
+            DiffPairing {
+                related_to: Some(reference("invented", 0, 1)),
+                ..deletion.clone()
+            },
+        ] {
+            assert!(snapshot.reassign(&[spec]).is_err());
+        }
+        assert!(snapshot
+            .reassign(&[deletion.clone(), deletion.clone()])
+            .is_err());
+        let paired = DiffPairing {
+            new: Some(reference(new, 0, 1)),
+            ..deletion.clone()
+        };
+        assert!(snapshot.reassign(&[deletion.clone(), paired]).is_err());
+        // Leaving everything else unassigned still retains the entire snapshot.
+        let review = snapshot.reassign(&[deletion]).unwrap();
+        review.validate_coverage().unwrap();
+        assert_eq!(
+            review
+                .sections
+                .iter()
+                .flat_map(|s| &s.lines)
+                .filter(|l| l.kind == PatchLineKind::Added)
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -1050,8 +1319,10 @@ mod tests {
         let review = snapshot
             .reassign(&[DiffPairing {
                 label: None,
-                old: reference(&snapshot.blocks[0].id, 0, 2),
-                new: reference(&snapshot.blocks[1].id, 0, 2),
+                old: reference(&snapshot.blocks[0].id, 0, 2).into(),
+                new: reference(&snapshot.blocks[1].id, 0, 2).into(),
+
+                related_to: None,
             }])
             .unwrap();
         assert!(review.sections.iter().any(|section| {
@@ -1140,8 +1411,10 @@ mod tests {
         let review = snapshot
             .reassign(&[DiffPairing {
                 label: Some("Move and edit".into()),
-                old: reference(&old.id, 0, old.line_count),
-                new: reference(&new.id, 0, new.line_count),
+                old: reference(&old.id, 0, old.line_count).into(),
+                new: reference(&new.id, 0, new.line_count).into(),
+
+                related_to: None,
             }])
             .unwrap();
         review.validate_coverage().unwrap();

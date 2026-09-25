@@ -1374,3 +1374,56 @@ test("guided diff search owns slash and find typing, wraps matches and keeps sho
     await expect(input).toBeFocused();
     await expect(page.locator(".flow-search-current")).toHaveCount(1);
 });
+
+// Set OVIM_SECTION_QA_FIXTURE to the JSON emitted by the native projection test
+// to run this same rendered flow against a freshly restored Rust review.
+for (const width of [1440, 760]) test(`labelled deletions and referenced copies stay separate at ${width}px when equal pairs hide`, async ({page}, testInfo) => {
+    await page.setViewportSize({width, height: 900});
+    const oldLines: GuiDiffLine[] = [
+        {kind: "removed", text: "duplicate_check();", oldLine: 120},
+        {kind: "removed", text: "respondent();", oldLine: 121},
+    ];
+    const newLines: GuiDiffLine[] = [
+        {kind: "added", text: "respondent();", newLine: 300},
+        {kind: "added", text: "respondent();", newLine: 301},
+    ];
+    const file = (id: string, path: string, status: string, lines: GuiDiffLine[], oldPath?: string, label?: string): GuiDiffDocument["files"][number] => ({
+        id, path, status, oldPath, label, binary: false, metadata: [],
+        additions: lines.filter(l => l.kind === "added").length,
+        deletions: lines.filter(l => l.kind === "removed").length,
+        hunks: [{header: "Selected source slice", oldStart: lines.find(l => l.oldLine)?.oldLine || 0, oldCount: lines.filter(l => l.oldLine).length,
+            newStart: lines.find(l => l.newLine)?.newLine || 0, newCount: lines.filter(l => l.newLine).length, lines}],
+    });
+    const fallback: GuiDiffDocument = {title: "Explain deletion and copy", layout: "split", managed: true, custom: true,
+        files: [file("old", "old.rs", "deleted", oldLines), file("new", "new.rs", "added", newLines)],
+        guidedFiles: [
+            file("pair_0", "old.rs", "deletion", [oldLines[0]], "old.rs", "Remove duplicate permission check"),
+            file("pair_1", "new.rs", "reassigned", [oldLines[1], newLines[0]], "old.rs", "Move respondent lookup"),
+            file("pair_2", "new.rs", "addition", [newLines[1]], undefined, "Additional respondent copy · Related source (before): old.rs:121–121"),
+        ]};
+    const document: GuiDiffDocument = process.env.OVIM_SECTION_QA_FIXTURE
+        ? JSON.parse(await readFile(process.env.OVIM_SECTION_QA_FIXTURE, "utf8")) : fallback;
+    await setup(page, document);
+    await page.getByRole("button", {name: "Guided", exact: true}).click();
+    const code = page.locator(".flow-code-line");
+    await expect(code.filter({hasText: "respondent();"})).toHaveCount(3);
+    await expect(code.filter({hasText: "duplicate_check();"})).toHaveCount(1);
+    await page.getByRole("button", {name: "Hide equal changes", exact: true}).click();
+    for (const layout of ["Side by side", "Unified"]) {
+        await page.getByRole("button", {name: layout, exact: true}).click();
+        await expect(code.filter({hasText: "respondent();"})).toHaveCount(1);
+        await expect(code.filter({hasText: "duplicate_check();"})).toHaveCount(1);
+        await expect(page.locator(".flow-status.deletion").first()).toBeVisible();
+        await expect(page.locator(".flow-status.addition").first()).toBeVisible();
+        await expect(page.locator(".flow-file-heading").filter({hasText: "Related source (before): old.rs:"}).first()).toBeVisible();
+        await expect(page.locator(".flow-gap").filter({hasText: /\d+ unchanged lines/})).toHaveCount(0);
+        const overflow = await page.locator(".flow-diff").evaluate(element => element.scrollWidth > element.clientWidth + 1);
+        expect(overflow).toBe(false);
+        const pending = page.waitForEvent("download");
+        await page.getByRole("button", {name: "Export image", exact: true}).click();
+        const download = await pending;
+        expect(download.suggestedFilename()).toMatch(/guided\.png$/);
+        await download.saveAs(testInfo.outputPath(`annotated-${layout}.png`));
+        await page.screenshot({path: testInfo.outputPath(`annotated-${layout}-gui.png`)});
+    }
+});

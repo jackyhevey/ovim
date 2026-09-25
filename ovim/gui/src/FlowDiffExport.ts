@@ -388,7 +388,10 @@ function fileBlock(
         rows.push({
             kind: "note",
             height: 28,
-            text: "No text changes in this file.",
+            text:
+                options.view === "guided"
+                    ? "No text changes in this section."
+                    : "No text changes in this file.",
         });
     const renderedMoves = new Set<string>();
     for (const section of options.layout === "unified"

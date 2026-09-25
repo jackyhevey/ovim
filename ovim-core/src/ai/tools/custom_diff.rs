@@ -29,7 +29,7 @@ pub fn read_diff_definition() -> ToolDefinition {
 pub fn show_custom_diff_definition() -> ToolDefinition {
     ToolDefinition {
         name: SHOW_CUSTOM_DIFF.into(),
-        description: "Open a replayable review immediately and return without waiting for dismissal. First call read_diff to obtain Ovim's configured pullbase comparison and block references. Pair related removals and additions, including across files; unassigned changes remain visible automatically. Each old reference must name a removed block and each new reference an added block. Optional offset and count select a zero-based slice of a block; disjoint slices can be paired separately. The review uses the frozen snapshot even if the workspace changes afterward, preserving every canonical added and removed line from that snapshot.".into(),
+        description: "Open a replayable review immediately without waiting for dismissal. First read every page of read_diff's frozen comparison. The pairings array defines ordered sections: provide old (removed block) and new (added block) for a replacement, old alone for a deletion, or new alone for an addition. At least one side is required. Use zero-based offset and positive count to split a block into disjoint semantic slices; pair lengths may differ. Label deletions explicitly (for example, 'Remove duplicate permission check') instead of pairing them with unrelated nearby additions. For copied or extracted code, assign each changed line once, then use related_to to reference an existing removed or added range: for example an old/new pair for the primary move, followed by a new-only section labelled 'Additional copy' with related_to pointing to the original old range. related_to is an explanatory source reference, not another pairing, and cannot overlap this section's own lines; it does not consume, duplicate, hide, or prove equivalence of code. Several sections may reference the same source. Labels describe intent but cannot change addition/deletion kinds. Unassigned changes, metadata, and binary changes remain visible automatically. Overlapping ownership, invalid ranges, and wrong-side references are rejected. GUI Guided view and the terminal show these sections; Files keeps canonical file order. All content comes from the frozen snapshot, never agent-authored code.".into(),
         required_scope: RequiredScope { file_scope: FileScope::Project, shell: false, network: false },
         side_effect: SideEffect::Navigation,
         custom_input_schema: Some(StrictJsonSchema::new(json!({
@@ -44,9 +44,10 @@ pub fn show_custom_diff_definition() -> ToolDefinition {
                         "properties": {
                             "label": { "type": "string", "maxLength": 200 },
                             "old": { "$ref": "#/$defs/reference" },
-                            "new": { "$ref": "#/$defs/reference" }
+                            "new": { "$ref": "#/$defs/reference" },
+                            "related_to": { "$ref": "#/$defs/reference", "description": "Explanatory reference to a removed or added range outside this section. Does not own its lines or imply equality." }
                         },
-                        "required": ["old", "new"]
+                        "anyOf": [{"required": ["old"]}, {"required": ["new"]}]
                     }
                 }
             },
@@ -64,5 +65,49 @@ pub fn show_custom_diff_definition() -> ToolDefinition {
             }
         })).expect("valid show_custom_diff schema")),
         parameters: vec![],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn section_schema_and_runtime_shape_agree() {
+        let definition = show_custom_diff_definition();
+        let schema = definition.custom_input_schema.unwrap();
+        let reference = json!({"block_id": "removed_1", "offset": 0, "count": 1});
+        for section in [
+            json!({"old": reference}),
+            json!({"new": reference}),
+            json!({"old": reference, "new": reference}),
+            json!({"new": reference, "related_to": reference}),
+        ] {
+            schema
+                .validate_instance(
+                    &json!({"snapshot_id":"s", "title":"Review", "pairings":[section]}),
+                )
+                .unwrap();
+            let parsed: crate::native_diff::DiffPairing =
+                serde_json::from_value(section.clone()).unwrap();
+            assert_eq!(
+                parsed.related_to.is_some(),
+                section.get("related_to").is_some()
+            );
+        }
+        for section in [
+            json!({}),
+            json!({"label":"Deleted"}),
+            json!({"related_to":reference}),
+            json!({"old":null}),
+            json!({"old":reference,"kind":"context"}),
+            json!({"old":reference,"text":"invented"}),
+            json!({"old":reference,"related_to":{"block_id":"x","count":0}}),
+        ] {
+            assert!(schema
+                .validate_instance(
+                    &json!({"snapshot_id":"s", "title":"Review", "pairings":[section]})
+                )
+                .is_err());
+        }
     }
 }

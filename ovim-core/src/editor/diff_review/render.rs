@@ -717,8 +717,18 @@ pub fn render_custom(
 fn section_heading(section: &ReviewSection) -> String {
     let old = section.old_path.as_deref().unwrap_or("∅");
     let new = section.new_path.as_deref().unwrap_or("∅");
-    let label = section.label.as_deref().unwrap_or("Change");
-    format!("── {label} · {old} → {new}")
+    let kind = match (section.old_path.is_some(), section.new_path.is_some()) {
+        (true, false) => "Deletion",
+        (false, true) => "Addition",
+        _ => "Change",
+    };
+    let label = section.label.as_deref().unwrap_or(kind);
+    let prefix = if kind != "Change" && label != kind {
+        format!("{kind} · ")
+    } else {
+        String::new()
+    };
+    format!("── {prefix}{label} · {old} → {new}")
 }
 
 fn is_source_line(kind: PatchLineKind) -> bool {
