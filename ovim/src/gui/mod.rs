@@ -11,6 +11,8 @@ pub mod app;
 #[cfg(feature = "gui")]
 pub mod browser;
 mod diff;
+#[cfg(all(feature = "gui", target_os = "macos"))]
+mod mac_arrow_keys;
 #[cfg(feature = "gui")]
 mod menu;
 #[cfg(feature = "gui")]

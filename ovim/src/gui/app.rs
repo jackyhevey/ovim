@@ -669,6 +669,24 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
             let menu = super::menu::install(app)?;
             app.manage(menu);
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(target_os = "macos")]
+                {
+                    if let Err(error) = window.with_webview(|webview| {
+                        if let Err(error) = super::mac_arrow_keys::install(webview) {
+                            let _ = std::io::stderr().write_all(
+                                format!("Failed to install macOS arrow-key handler: {error:#}\n")
+                                    .as_bytes(),
+                            );
+                        }
+                    }) {
+                        let _ = std::io::stderr().write_all(
+                            format!(
+                                "Failed to access the main webview for arrow keys: {error:#}\n"
+                            )
+                            .as_bytes(),
+                        );
+                    }
+                }
                 let browser_host = app.state::<BrowserHost>().inner().clone();
                 browser_host
                     .attach(window.as_ref().window())

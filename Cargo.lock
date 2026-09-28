@@ -4281,6 +4281,8 @@ dependencies = [
  "mathjax-svg-rs",
  "mlua",
  "nix 0.29.0",
+ "objc2",
+ "objc2-app-kit",
  "open",
  "ovim-core",
  "portable-pty",

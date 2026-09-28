@@ -61,10 +61,14 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 sysinfo = "0.32"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", optional = true }
+objc2-app-kit = { version = "0.3", default-features = false, optional = true, features = ["NSApplication", "NSEvent", "NSMenu", "NSResponder"] }
+
 [features]
 default = ["lua", "gui"]
 lua = ["mlua", "ovim-core/lua"]
-gui = ["dep:tauri", "dep:portable-pty", "dep:rfd"]
+gui = ["dep:tauri", "dep:portable-pty", "dep:rfd", "dep:objc2", "dep:objc2-app-kit"]
 key-debug = []
 metrics = ["prometheus", "ovim-core/metrics"]
 # Statically link OpenSSL for portable release binaries
