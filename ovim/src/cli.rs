@@ -117,12 +117,28 @@ impl FileArg {
     }
 }
 
+/// Arguments of the standalone `ovim-gui` desktop binary.
+///
+/// Mirrors `ovim gui` so both entry points accept and document the same options.
+#[derive(Parser, Debug)]
+#[command(name = "ovim-gui", version)]
+#[command(about = "Oxidized Vim — the native GUI editor", long_about = None)]
+pub struct GuiCli {
+    /// File or directory to open (files support FILE:LINE:COL syntax)
+    #[arg(value_name = "FILE")]
+    pub file: Option<String>,
+
+    /// Resume persisted AI conversations instead of starting fresh chats
+    #[arg(long)]
+    pub resume: bool,
+}
+
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Open Ovim's native Tauri GUI
     #[command(next_help_heading = "Editor")]
     Gui {
-        /// File or directory to open
+        /// File or directory to open (files support FILE:LINE:COL syntax)
         #[arg(value_name = "FILE")]
         file: Option<String>,
 
@@ -621,6 +637,19 @@ mod tests {
 
         let resumed = Cli::try_parse_from(["ovim", "--resume"]).unwrap();
         assert!(resumed.resume);
+    }
+
+    #[test]
+    fn gui_binary_prints_help_and_accepts_the_gui_subcommand_options() {
+        let help = GuiCli::try_parse_from(["ovim-gui", "--help"]).unwrap_err();
+        assert_eq!(help.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert!(help.to_string().contains("--resume"));
+
+        let cli = GuiCli::try_parse_from(["ovim-gui", "src/main.rs:4:2", "--resume"]).unwrap();
+        assert_eq!(cli.file.as_deref(), Some("src/main.rs:4:2"));
+        assert!(cli.resume);
+
+        assert!(GuiCli::try_parse_from(["ovim-gui", "a.rs", "b.rs"]).is_err());
     }
 
     #[test]
