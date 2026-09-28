@@ -246,6 +246,13 @@ export interface GuiCodeExplanation {
               startLine: number;
               endLine: number;
               comment: string;
+          }
+        | {
+              kind: "diff";
+              title: string;
+              oldPath?: string;
+              newPath?: string;
+              comment: string;
           };
     discussion:
         | {

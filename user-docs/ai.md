@@ -525,9 +525,11 @@ The private MCP connection also exposes editor tools:
 - `open_file` shows an existing file in the current workspace, optionally at a
   line/column, preserving unsaved buffers. File creation and paths escaping the
   workspace (including symlink escapes) are rejected.
-- `explain_with_codebase` presents the normal interactive concept/code
+- `explain_with_codebase` presents an interactive concept/code/diff
   walkthrough. Claude waits until you finish, dismiss it, or ask a question.
   Questions return to the running Claude turn. Completed walkthroughs support replay.
+  Diff pages use `read_diff` snapshot IDs and old/new block slices, and show only
+  the selected change alongside its explanation.
 - `read_diff` reads a saved snapshot of the comparison used by `<leader>gd`,
   respecting `pullbase` and its directory overrides.
 - `show_custom_diff` arranges snapshot ranges into labelled replacements,

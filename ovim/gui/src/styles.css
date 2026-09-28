@@ -2912,7 +2912,8 @@ kbd {
     padding: clamp(20px, 5vw, 72px);
     background: color-mix(in srgb, var(--canvas) 72%, transparent);
 }
-.walkthrough-layer.code {
+.walkthrough-layer.code,
+.walkthrough-layer.diff {
     align-items: flex-end;
     justify-content: center;
     padding: 22px clamp(18px, 7vw, 100px);
@@ -3146,7 +3147,8 @@ kbd {
     .status-wrap {
         display: none;
     }
-    .walkthrough-layer.code {
+    .walkthrough-layer.code,
+    .walkthrough-layer.diff {
         padding: 14px;
     }
     .walkthrough-card > footer {

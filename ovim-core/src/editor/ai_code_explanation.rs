@@ -1,5 +1,6 @@
 use crate::ai::chat_types::ToolCallInfo;
 use crate::ai::tools::ToolResult;
+use crate::native_diff::ChangeRef;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -111,6 +112,18 @@ impl Editor {
                 end_line: *end_line,
                 comment: comment.clone(),
             },
+            CodeExplanationStep::Diff {
+                title,
+                old_path,
+                new_path,
+                comment,
+                ..
+            } => CodeExplanationPageView::Diff {
+                title: title.clone(),
+                old_path: old_path.clone(),
+                new_path: new_path.clone(),
+                comment: comment.clone(),
+            },
         };
         Some(CodeExplanationView {
             current: pending.current + 1,
@@ -169,6 +182,7 @@ impl Editor {
                     snapshot: Some(snapshot),
                     ..
                 } if seen.insert(absolute_path.clone()) => Some(snapshot.len()),
+                CodeExplanationStep::Diff { patch, .. } => Some(patch.len()),
                 _ => None,
             })
             .sum::<usize>();
@@ -934,28 +948,79 @@ impl Editor {
                 steps.push(CodeExplanationStep::Concept { title, body });
                 continue;
             }
+            if page_type == "diff" {
+                let title = required_step_string(raw, "title", step_number)?;
+                if title.contains(['\n', '\r'])
+                    || title.chars().count() > MAX_WALKTHROUGH_CONCEPT_TITLE_CHARS
+                {
+                    return Err(ToolResult::Error(format!(
+                        "step {step_number} diff title must be a single line of at most {MAX_WALKTHROUGH_CONCEPT_TITLE_CHARS} characters"
+                    )));
+                }
+                let comment = required_step_string(raw, "comment", step_number)?;
+                self.validate_code_explanation_comment(&comment, step_number, presentation_width)?;
+                let snapshot_id = required_step_string(raw, "snapshot_id", step_number)?;
+                let old = raw
+                    .get("old")
+                    .map(|reference| {
+                        serde_json::from_value::<ChangeRef>(reference.clone()).map_err(|error| {
+                            ToolResult::Error(format!(
+                                "step {step_number} invalid old diff reference: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                let new = raw
+                    .get("new")
+                    .map(|reference| {
+                        serde_json::from_value::<ChangeRef>(reference.clone()).map_err(|error| {
+                            ToolResult::Error(format!(
+                                "step {step_number} invalid new diff reference: {error}"
+                            ))
+                        })
+                    })
+                    .transpose()?;
+                let (old_path, new_path, patch) = self
+                    .load_walkthrough_diff_section(&snapshot_id, old, new)
+                    .map_err(|error| ToolResult::Error(format!("step {step_number}: {error}")))?;
+                let line_count = patch.lines().count();
+                if line_count > safe_range {
+                    return Err(ToolResult::Error(format!(
+                        "step {step_number} diff occupies {line_count} lines (maximum {safe_range}); use smaller old/new offset and count slices"
+                    )));
+                }
+                let wrap_width =
+                    (self.options.wrap && self.render_cache.last_text_width > 0).then(|| {
+                        self.render_cache.last_text_width.saturating_add(
+                            self.render_cache
+                                .last_chat_area
+                                .map_or(0, |area| area.width as usize),
+                        )
+                    });
+                let metrics =
+                    self.code_explanation_source_metrics(&patch, 1, line_count, wrap_width);
+                if let Some(rows) = metrics.visual_rows.filter(|rows| *rows > safe_range) {
+                    return Err(ToolResult::Error(format!(
+                        "step {step_number} diff occupies {rows} visual rows after soft wrapping (maximum {safe_range}); use smaller old/new offset and count slices"
+                    )));
+                }
+                steps.push(CodeExplanationStep::Diff {
+                    title,
+                    old_path,
+                    new_path,
+                    patch: Arc::from(patch),
+                    comment,
+                });
+                continue;
+            }
             if page_type != "code" {
                 return Err(ToolResult::Error(format!(
-                    "step {step_number} has unsupported type {page_type:?}; expected 'concept' or 'code'"
+                    "step {step_number} has unsupported type {page_type:?}; expected 'concept', 'code', or 'diff'"
                 )));
             }
             let path = required_step_string(raw, "path", step_number)?;
             let comment = required_step_string(raw, "comment", step_number)?;
-            if comment.len() > MAX_WALKTHROUGH_COMMENT_BYTES {
-                return Err(ToolResult::Error(format!(
-                    "step {step_number} comment exceeds {MAX_WALKTHROUGH_COMMENT_BYTES} bytes"
-                )));
-            }
-            let comment_rows = comment_rows_for_viewport(
-                presentation_width,
-                &comment,
-                self.indent_options().tab_width,
-            );
-            if comment_rows > MAX_WALKTHROUGH_COMMENT_ROWS {
-                return Err(ToolResult::Error(format!(
-                    "step {step_number} comment wraps to {comment_rows} rows; keep it within {MAX_WALKTHROUGH_COMMENT_ROWS} rows or split the explanation into focused steps"
-                )));
-            }
+            self.validate_code_explanation_comment(&comment, step_number, presentation_width)?;
             let start_line = required_step_line(raw, "start_line", step_number)?;
             let end_line = raw
                 .get("end_line")
@@ -1077,6 +1142,27 @@ impl Editor {
         Ok(steps)
     }
 
+    fn validate_code_explanation_comment(
+        &self,
+        comment: &str,
+        step_number: usize,
+        presentation_width: Option<u16>,
+    ) -> Result<(), ToolResult> {
+        if comment.len() > MAX_WALKTHROUGH_COMMENT_BYTES {
+            return Err(ToolResult::Error(format!(
+                "step {step_number} comment exceeds {MAX_WALKTHROUGH_COMMENT_BYTES} bytes"
+            )));
+        }
+        let rows =
+            comment_rows_for_viewport(presentation_width, comment, self.indent_options().tab_width);
+        if rows > MAX_WALKTHROUGH_COMMENT_ROWS {
+            return Err(ToolResult::Error(format!(
+                "step {step_number} comment wraps to {rows} rows; keep it within {MAX_WALKTHROUGH_COMMENT_ROWS} rows or split the explanation into focused steps"
+            )));
+        }
+        Ok(())
+    }
+
     fn ai_code_explanation_presentation_width(&self) -> Option<u16> {
         self.render_cache.last_buffer_area.map(|buffer| {
             buffer.width.saturating_add(
@@ -1177,39 +1263,56 @@ impl Editor {
             pending.presentation_buffer_id = None;
         }
 
-        let CodeExplanationStep::Code {
-            absolute_path,
-            snapshot,
-            start_line,
-            end_line,
-            ..
-        } = step
-        else {
-            self.ai_state.active_selection = None;
-            return Ok(());
-        };
-
-        let source = match snapshot {
-            Some(snapshot) => snapshot,
-            None => Arc::from(
-                self.capture_code_explanation_source(&absolute_path)
-                    .map_err(|error| {
-                        ToolResult::Error(format!(
-                            "cannot read uncached walkthrough source '{}': {error}",
-                            absolute_path.display()
-                        ))
-                    })?,
+        let (source, syntax_path, display_name, selection) = match step {
+            CodeExplanationStep::Code {
+                absolute_path,
+                snapshot,
+                start_line,
+                end_line,
+                ..
+            } => {
+                let source = match snapshot {
+                    Some(snapshot) => snapshot,
+                    None => Arc::from(
+                        self.capture_code_explanation_source(&absolute_path)
+                            .map_err(|error| {
+                                ToolResult::Error(format!(
+                                    "cannot read uncached walkthrough source '{}': {error}",
+                                    absolute_path.display()
+                                ))
+                            })?,
+                    ),
+                };
+                let display_name = absolute_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Code")
+                    .to_string();
+                (
+                    source,
+                    absolute_path.to_string_lossy().into_owned(),
+                    display_name,
+                    Some((start_line, end_line)),
+                )
+            }
+            CodeExplanationStep::Diff { patch, .. } => (
+                patch,
+                "walkthrough.diff".to_string(),
+                "Selected diff".to_string(),
+                None,
             ),
+            CodeExplanationStep::Concept { .. } => {
+                self.ai_state.active_selection = None;
+                return Ok(());
+            }
         };
         let mut buffer = crate::buffer::Buffer::new_from_str(&source);
         buffer.set_read_only(true);
-        buffer.enable_syntax_highlighting_for_path(&absolute_path.to_string_lossy());
+        buffer.enable_syntax_highlighting_for_path(&syntax_path);
         // Label the snapshot with the source file's name so the tab bar and
         // status line don't show "[No Name]" — without giving it a file path,
         // which would make it an LSP document and a save target.
-        if let Some(name) = absolute_path.file_name().and_then(|n| n.to_str()) {
-            buffer.set_display_name(name);
-        }
+        buffer.set_display_name(display_name);
         let presentation_buffer_id = buffer.id();
         self.add_buffer(buffer);
         // The virtual snapshot is intentionally not an LSP document or a save target.
@@ -1223,6 +1326,16 @@ impl Editor {
             pending.presentation_buffer_id = Some(presentation_buffer_id);
         }
 
+        let Some((start_line, end_line)) = selection else {
+            self.ai_state.active_selection = None;
+            self.buffer_mut()
+                .cursor_mut()
+                .set_position(0, crate::unicode::GraphemeCol::ZERO);
+            self.viewport.scroll_offset = 0;
+            self.viewport.scroll_subrow = 0;
+            self.mark_dirty();
+            return Ok(());
+        };
         let selected = self.execute_navigation_tool(
             "select_text",
             &json!({
@@ -1374,6 +1487,33 @@ fn walkthrough_question_prompt(
             };
             (range, comment.as_str())
         }
+        CodeExplanationStep::Diff {
+            title,
+            old_path,
+            new_path,
+            comment,
+            patch,
+        } => {
+            let paths = format!(
+                "{} → {}",
+                old_path.as_deref().unwrap_or("/dev/null"),
+                new_path.as_deref().unwrap_or("/dev/null"),
+            );
+            let quoted_comment = comment
+                .lines()
+                .map(|line| format!("> {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let quoted_patch = patch
+                .lines()
+                .map(|line| format!("> {line}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return format!(
+                "> Walkthrough page {} · Diff: {title} ({paths})\n{quoted_comment}\n{quoted_patch}\n\n{question}\n\nAnswer this question in the context of our existing conversation and the frozen diff section. Do not modify files or perform external actions; use read-only investigation only if needed.",
+                step_index + 1,
+            );
+        }
     };
     let quoted_comment = teaching_text
         .lines()
@@ -1410,6 +1550,26 @@ fn required_step_line(
         .filter(|line| *line > 0)
         .map(|line| line as usize)
         .ok_or_else(|| ToolResult::Error(format!("step {step} requires '{field}' >= 1")))
+}
+
+#[cfg(test)]
+mod diff_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn diff_question_quotes_frozen_patch_and_paths() {
+        let step = CodeExplanationStep::Diff {
+            title: "Guard".into(),
+            old_path: Some("before.rs".into()),
+            new_path: Some("after.rs".into()),
+            patch: Arc::from("--- before.rs\n+++ after.rs\n@@ -3,1 +7,1 @@\n-old\n+new\n"),
+            comment: "The new guard rejects empty input.".into(),
+        };
+        let prompt = walkthrough_question_prompt(1, &step, "What changed?");
+        assert!(prompt.contains("before.rs → after.rs"));
+        assert!(prompt.contains("> -old\n> +new"));
+        assert!(prompt.contains("What changed?"));
+    }
 }
 
 #[cfg(test)]

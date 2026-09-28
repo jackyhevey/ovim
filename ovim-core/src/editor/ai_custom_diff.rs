@@ -3,7 +3,7 @@
 use super::Editor;
 use crate::ai::chat_types::ToolCallInfo;
 use crate::ai::tools::ToolResult;
-use crate::native_diff::{self, DiffPairing, ReviewSnapshot};
+use crate::native_diff::{self, ChangeRef, DiffPairing, ReviewSnapshot};
 use crate::run_log::{ArtifactStore, BlobId};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -204,6 +204,68 @@ pub(crate) fn custom_diff_replay_id(content: &str) -> Option<String> {
 }
 
 impl Editor {
+    pub(super) fn load_walkthrough_diff_section(
+        &self,
+        snapshot_id: &str,
+        old: Option<ChangeRef>,
+        new: Option<ChangeRef>,
+    ) -> Result<(Option<String>, Option<String>, String), String> {
+        let artifacts = DiffArtifacts::open(self)?;
+        let snapshot: ReviewSnapshot = artifacts.load("snapshot", snapshot_id)?;
+        if snapshot.id != snapshot_id {
+            return Err("Stored review snapshot identity does not match the request".into());
+        }
+        let pairing = DiffPairing {
+            label: None,
+            message: None,
+            old,
+            new,
+            related_to: None,
+        };
+        let review = snapshot
+            .reassign(&[pairing])
+            .map_err(|error| format!("Invalid diff section: {error:#}"))?;
+        let section = &review.sections[0];
+        let old_path = section.old_path.clone();
+        let new_path = section.new_path.clone();
+        let old_start = section
+            .lines
+            .iter()
+            .find_map(|line| line.old_line)
+            .unwrap_or(0);
+        let new_start = section
+            .lines
+            .iter()
+            .find_map(|line| line.new_line)
+            .unwrap_or(0);
+        let old_count = section
+            .lines
+            .iter()
+            .filter(|line| line.old_line.is_some())
+            .count();
+        let new_count = section
+            .lines
+            .iter()
+            .filter(|line| line.new_line.is_some())
+            .count();
+        let mut patch = format!(
+            "--- {}\n+++ {}\n@@ -{old_start},{old_count} +{new_start},{new_count} @@\n",
+            old_path.as_deref().unwrap_or("/dev/null"),
+            new_path.as_deref().unwrap_or("/dev/null"),
+        );
+        for line in &section.lines {
+            let marker = match line.kind {
+                native_diff::PatchLineKind::Removed => '-',
+                native_diff::PatchLineKind::Added => '+',
+                _ => return Err("Diff section contains an unexpected line kind".into()),
+            };
+            patch.push(marker);
+            patch.push_str(&line.text);
+            patch.push('\n');
+        }
+        Ok((old_path, new_path, patch))
+    }
+
     /// The MCP request ID differs from the provider's chat tool ID. Alias the
     /// retained payload once the provider reports its completed tool call.
     pub(crate) fn bind_editor_custom_diff_result(
@@ -530,7 +592,9 @@ impl Editor {
 mod tests {
     use super::*;
     use crate::ai::chat_types::{ChatOpts, ToolCallInfo};
+    use crate::editor::ai_chat_state::CodeExplanationContinuation;
     use crate::editor::ai_state::AiState;
+    use crate::editor::code_explanation::CodeExplanationPageView;
     use crate::run_log::RunStorageLayout;
     use git2::{Repository, Signature};
 
@@ -594,6 +658,153 @@ mod tests {
         editor.set_ai_conversation_resume_enabled(true);
         editor.open_ai_chat(ChatOpts::default()).unwrap();
         editor
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn walkthrough_diff_uses_only_selected_frozen_slice_and_replays_it() {
+        let repository = tempfile::tempdir().unwrap();
+        let storage = tempfile::tempdir().unwrap();
+        let repo = Repository::init(repository.path()).unwrap();
+        let anchor = repository.path().join("anchor.rs");
+        fs::write(&anchor, "old one\nold two\n").unwrap();
+        commit(&repo);
+        fs::write(&anchor, "new one\nnew two\n").unwrap();
+        let layout = RunStorageLayout::new(storage.path().join("runs"));
+        let mut editor = editor(&anchor, &layout);
+        let ToolResult::Success(result) = editor.execute_read_diff_tool(&json!({})) else {
+            panic!("could not capture diff")
+        };
+        let page: Value = serde_json::from_str(&result).unwrap();
+        let blocks = page["blocks"].as_array().unwrap();
+        let removed = blocks
+            .iter()
+            .find(|block| block["kind"] == "removed")
+            .unwrap();
+        let added = blocks
+            .iter()
+            .find(|block| block["kind"] == "added")
+            .unwrap();
+        let snapshot_id = page["snapshot_id"].as_str().unwrap();
+        assert!(editor
+            .load_walkthrough_diff_section(
+                snapshot_id,
+                Some(ChangeRef {
+                    block_id: removed["block_id"].as_str().unwrap().into(),
+                    offset: Some(2),
+                    count: Some(1),
+                }),
+                None,
+            )
+            .is_err());
+        assert!(editor
+            .load_walkthrough_diff_section(
+                snapshot_id,
+                Some(ChangeRef {
+                    block_id: added["block_id"].as_str().unwrap().into(),
+                    offset: None,
+                    count: None,
+                }),
+                None,
+            )
+            .is_err());
+        let original_buffer_id = editor.buffer().id();
+        for (index, step) in [
+            json!({"type":"diff", "snapshot_id": snapshot_id, "title":"Missing sides", "comment":"Explain."}),
+            json!({"type":"diff", "snapshot_id": snapshot_id, "title":"Wrong side", "comment":"Explain.", "old":{"block_id":added["block_id"]}}),
+            json!({"type":"diff", "snapshot_id": snapshot_id, "title":"Beyond block", "comment":"Explain.", "new":{"block_id":added["block_id"], "offset":2, "count":1}}),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bad = ToolCallInfo {
+                id: format!("bad-diff-{index}"),
+                name: "explain_with_codebase".into(),
+                arguments: json!({"steps":[step]}),
+            };
+            assert!(editor
+                .begin_code_explanation(bad, CodeExplanationContinuation::Replay)
+                .is_err());
+            assert!(!editor.ai_chat_has_pending_code_explanation());
+        }
+        let call = ToolCallInfo {
+            id: "walkthrough-diff".into(),
+            name: "explain_with_codebase".into(),
+            arguments: json!({"steps": [
+                {"type": "concept", "title": "Change", "body": "One change."},
+                {
+                    "type": "diff", "snapshot_id": page["snapshot_id"],
+                    "title": "First line", "comment": "This line changed.",
+                    "old": {"block_id": removed["block_id"], "offset": 0, "count": 1},
+                    "new": {"block_id": added["block_id"], "offset": 0, "count": 1}
+                },
+                {"type": "code", "path": "anchor.rs", "start_line": 1, "comment": "Now see the file."}
+            ]}),
+        };
+        editor
+            .begin_code_explanation(call.clone(), CodeExplanationContinuation::Replay)
+            .unwrap_or_else(|(error, _)| panic!("walkthrough failed: {error:?}"));
+        assert!(editor.move_code_explanation(true));
+        assert!(matches!(editor.ai_code_explanation_view().unwrap().page,
+            CodeExplanationPageView::Diff { ref title, .. } if title == "First line"));
+        let displayed = editor.buffer().rope().to_string();
+        assert!(displayed.contains("-old one"));
+        assert!(displayed.contains("+new one"));
+        assert!(!displayed.contains("old two"));
+        assert!(!displayed.contains("new two"));
+        assert!(editor.buffer().is_read_only());
+        assert!(editor.move_code_explanation(true));
+        assert!(matches!(
+            editor.ai_code_explanation_view().unwrap().page,
+            CodeExplanationPageView::Code { .. }
+        ));
+        assert!(editor.finish_code_explanation(false));
+        assert_eq!(editor.buffer().id(), original_buffer_id);
+        editor.set_last_layout(
+            crate::Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 11,
+            },
+            4,
+            80,
+            0,
+        );
+        let mut oversized = call.clone();
+        oversized.id = "too-tall-diff".into();
+        let error = editor
+            .begin_code_explanation(oversized, CodeExplanationContinuation::Replay)
+            .expect_err("diff page must fit the viewport")
+            .0;
+        assert!(
+            matches!(error, ToolResult::Error(message) if message.contains("offset and count"))
+        );
+        editor.set_last_layout(
+            crate::Rect {
+                x: 0,
+                y: 0,
+                width: 80,
+                height: 24,
+            },
+            4,
+            80,
+            0,
+        );
+        fs::write(&anchor, "different content\n").unwrap();
+        for evict_cache in [false, true] {
+            if evict_cache {
+                let chat = editor.ai_state.chat.as_mut().unwrap();
+                chat.code_explanation_cache.clear();
+                chat.code_explanation_cache_bytes = 0;
+            }
+            editor
+                .begin_code_explanation(call.clone(), CodeExplanationContinuation::Replay)
+                .unwrap_or_else(|(error, _)| panic!("replay failed: {error:?}"));
+            assert!(editor.move_code_explanation(true));
+            assert_eq!(editor.buffer().rope().to_string(), displayed);
+            assert!(editor.finish_code_explanation(false));
+            assert_eq!(editor.buffer().id(), original_buffer_id);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

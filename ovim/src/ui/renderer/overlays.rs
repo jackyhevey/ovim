@@ -779,6 +779,29 @@ pub fn render_ai_code_explanation(frame: &mut Frame, editor: &mut Editor) {
                     false,
                 )
             }
+            ovim_core::editor::CodeExplanationPageView::Diff { title, comment, .. } => {
+                let Some(layout) = ovim_core::editor::CodeExplanationCardLayout::resolve(
+                    buffer.width,
+                    buffer.height,
+                    comment,
+                    editor.indent_options().tab_width,
+                ) else {
+                    return;
+                };
+                (
+                    layout.width,
+                    layout.height,
+                    layout.comment_width,
+                    format!(
+                        " Diff walkthrough {}/{} · {} ",
+                        view.current,
+                        view.total,
+                        truncate_to_width(title, layout.width.saturating_sub(28) as usize)
+                    ),
+                    comment.clone(),
+                    false,
+                )
+            }
         };
     let height_limit = buffer
         .height

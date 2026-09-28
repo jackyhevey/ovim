@@ -1246,6 +1246,23 @@ fn create_ai_chat_snapshot(editor: &Editor) -> Option<ovim::api::AiChatSnapshot>
                         end_line,
                         comment,
                     ),
+                    ovim_core::editor::CodeExplanationPageView::Diff {
+                        title,
+                        old_path,
+                        new_path,
+                        comment,
+                    } => (
+                        "diff".to_string(),
+                        Some(title),
+                        format!(
+                            "{} → {}",
+                            old_path.as_deref().unwrap_or("/dev/null"),
+                            new_path.as_deref().unwrap_or("/dev/null"),
+                        ),
+                        0,
+                        0,
+                        comment,
+                    ),
                 };
                 CodeExplanationSnapshot {
                     current: view.current,

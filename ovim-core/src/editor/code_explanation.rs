@@ -41,6 +41,13 @@ pub enum CodeExplanationStep {
         end_line: usize,
         comment: String,
     },
+    Diff {
+        title: String,
+        old_path: Option<String>,
+        new_path: Option<String>,
+        patch: Arc<str>,
+        comment: String,
+    },
 }
 
 /// Stable presentation data for both the terminal UI and headless snapshots.
@@ -63,6 +70,12 @@ pub enum CodeExplanationPageView {
         path: String,
         start_line: usize,
         end_line: usize,
+        comment: String,
+    },
+    Diff {
+        title: String,
+        old_path: Option<String>,
+        new_path: Option<String>,
         comment: String,
     },
 }

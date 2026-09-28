@@ -681,6 +681,12 @@ pub enum GuiCodeExplanationPage {
         end_line: usize,
         comment: String,
     },
+    Diff {
+        title: String,
+        old_path: Option<String>,
+        new_path: Option<String>,
+        comment: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -3470,6 +3476,17 @@ fn code_explanation(editor: &Editor) -> Option<GuiCodeExplanation> {
             path,
             start_line,
             end_line,
+            comment,
+        },
+        ovim_core::editor::CodeExplanationPageView::Diff {
+            title,
+            old_path,
+            new_path,
+            comment,
+        } => GuiCodeExplanationPage::Diff {
+            title,
+            old_path,
+            new_path,
             comment,
         },
     };

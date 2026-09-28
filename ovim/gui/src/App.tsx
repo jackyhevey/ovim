@@ -351,7 +351,7 @@ export const CodeWalkthrough = (props: {
         let lastGeometry = "";
         measure = () => {
             setTitleBudget(Math.max(8, Math.floor(heading.clientWidth / 8)));
-            if (page().kind !== "code") return;
+            if (page().kind === "concept") return;
             const viewport = dialog
                 .closest(".editor-body")
                 ?.querySelector<HTMLElement>(
@@ -396,6 +396,13 @@ export const CodeWalkthrough = (props: {
     const title = (shorten = false) => {
         const active = page();
         if (active.kind === "concept") return active.title;
+        if (active.kind === "diff") {
+            const paths = [active.oldPath, active.newPath]
+                .filter(Boolean)
+                .join(" → ");
+            const title = paths ? `${active.title} · ${paths}` : active.title;
+            return shorten ? active.title : title;
+        }
         const range = `:${active.startLine}${active.endLine !== active.startLine ? `–${active.endLine}` : ""}`;
         return `${shorten ? walkthroughPath(active.path, titleBudget() - range.length) : active.path}${range}`;
     };
@@ -435,7 +442,9 @@ export const CodeWalkthrough = (props: {
                         <small>
                             {page().kind === "concept"
                                 ? "Concept"
-                                : "Code walkthrough"}{" "}
+                                : page().kind === "diff"
+                                  ? "Diff walkthrough"
+                                  : "Code walkthrough"}{" "}
                             · {props.walkthrough.current} of{" "}
                             {props.walkthrough.total}
                         </small>
@@ -2225,7 +2234,7 @@ function App() {
             return;
         const pane =
             target?.closest<HTMLElement>(".editor-pane") ??
-            (target?.closest(".walkthrough-layer.code")
+            (target?.closest(".walkthrough-layer.code, .walkthrough-layer.diff")
                 ? editorBody.querySelector<HTMLElement>(".editor-pane.focused")
                 : null);
         if (
@@ -2301,9 +2310,10 @@ function App() {
         const page = walkthrough()?.page;
         return Boolean(
             focused &&
-            page?.kind === "code" &&
-            line >= page.startLine &&
-            line <= page.endLine,
+            ((page?.kind === "code" &&
+                line >= page.startLine &&
+                line <= page.endLine) ||
+                page?.kind === "diff"),
         );
     };
 
