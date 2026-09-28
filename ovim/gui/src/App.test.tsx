@@ -737,6 +737,110 @@ describe("Ovim Solid workbench", () => {
         });
     });
 
+    it("keeps a native word selection while chat snapshots arrive", async () => {
+        let finishUpdate!: () => void;
+        const onUpdate = vi.fn(
+            () => new Promise<void>((resolve) => (finishUpdate = resolve)),
+        );
+        const [chat, setChat] = createSignal<GuiAiChat>({
+            ...mockSnapshot.aiChat!,
+            input: "one two three",
+            inputCursor: 13,
+        });
+        render(() => <ChatComposer chat={chat()} onUpdate={onUpdate} />);
+        const input = screen.getByLabelText(
+            "AI chat input",
+        ) as HTMLTextAreaElement;
+        await Promise.resolve();
+        vi.mocked(HTMLElement.prototype.focus).mockRestore();
+        input.focus();
+        input.setSelectionRange(8, 13, "backward");
+        fireEvent.select(input);
+        await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+        expect(onUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({ expectedCursor: 13, cursor: 8 }),
+        );
+
+        // A stale snapshot can arrive before the queued native edit completes.
+        setChat({ ...chat(), activity: "working" });
+        await Promise.resolve();
+        expect(input.selectionStart).toBe(8);
+        expect(input.selectionEnd).toBe(13);
+
+        finishUpdate();
+        await Promise.resolve();
+        setChat({ ...chat(), inputCursor: 8 });
+        await Promise.resolve();
+        expect(input.selectionStart).toBe(8);
+        expect(input.selectionEnd).toBe(13);
+
+        setChat({ ...chat(), activity: "idle" });
+        await Promise.resolve();
+
+        expect(input.selectionStart).toBe(8);
+        expect(input.selectionEnd).toBe(13);
+        expect(input.selectionDirection).toBe("backward");
+
+        const menuButton = document.createElement("button");
+        document.body.append(menuButton);
+        menuButton.focus();
+        expect(document.activeElement).toBe(menuButton);
+        setChat({ ...chat(), activity: "working" });
+        await Promise.resolve();
+
+        expect(input.selectionStart).toBe(8);
+        expect(input.selectionEnd).toBe(13);
+        expect(input.selectionDirection).toBe("backward");
+    });
+
+    it("uses the active end of a forward selection for core cursor updates", async () => {
+        const onUpdate = vi.fn().mockResolvedValue(undefined);
+        render(() => (
+            <ChatComposer
+                chat={{
+                    ...mockSnapshot.aiChat!,
+                    input: "one two three",
+                    inputCursor: 0,
+                }}
+                onUpdate={onUpdate}
+            />
+        ));
+        const input = screen.getByLabelText(
+            "AI chat input",
+        ) as HTMLTextAreaElement;
+        await Promise.resolve();
+        vi.mocked(HTMLElement.prototype.focus).mockRestore();
+        input.focus();
+        input.setSelectionRange(0, 3, "forward");
+        fireEvent.select(input);
+
+        await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+        expect(onUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({ expectedCursor: 0, cursor: 3 }),
+        );
+    });
+
+    it("applies an external core cursor change to the focused composer", async () => {
+        const [chat, setChat] = createSignal<GuiAiChat>({
+            ...mockSnapshot.aiChat!,
+            input: "one two three",
+            inputCursor: 13,
+        });
+        render(() => <ChatComposer chat={chat()} />);
+        const input = screen.getByLabelText(
+            "AI chat input",
+        ) as HTMLTextAreaElement;
+        await Promise.resolve();
+        vi.mocked(HTMLElement.prototype.focus).mockRestore();
+        input.focus();
+
+        setChat({ ...chat(), inputCursor: 4 });
+        await Promise.resolve();
+
+        expect(input.selectionStart).toBe(4);
+        expect(input.selectionEnd).toBe(4);
+    });
+
     it("publishes submit atomically with the latest native draft", async () => {
         const onUpdate = vi.fn().mockResolvedValue(undefined);
         render(() => (

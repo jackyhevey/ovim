@@ -62,6 +62,8 @@ export default function ChatComposer(props: {
               revision: number;
           }
         | undefined;
+    let syncedInput: string | undefined;
+    let syncedCursor: number | undefined;
     let mutations = Promise.resolve();
     const hasActiveRun = () =>
         !props.chat.externalQuestion &&
@@ -99,6 +101,7 @@ export default function ChatComposer(props: {
     const applyRemote = () => {
         const remoteInput = props.chat.input;
         const remoteCursor = props.chat.inputCursor;
+        let acknowledgedLocal = false;
         if (awaiting) {
             const matchesOptimistic =
                 remoteInput === optimisticInput &&
@@ -109,20 +112,37 @@ export default function ChatComposer(props: {
                 (props.revision ?? 0) > awaiting.revision &&
                 remoteInput !== awaiting.base;
             if (!matchesOptimistic && !actionChangedInput) return;
+            acknowledgedLocal = matchesOptimistic;
             awaiting = undefined;
         }
+        const externalChange =
+            syncedInput !== remoteInput || syncedCursor !== remoteCursor;
+        const inputChanged = remoteInput !== optimisticInput;
+        syncedInput = remoteInput;
+        syncedCursor = remoteCursor;
         optimisticInput = remoteInput;
         optimisticCursor = remoteCursor;
         setDraft(remoteInput);
         queueMicrotask(() => {
             if (!input) return;
-            const cursor = utf16OffsetFromUtf8(remoteInput, remoteCursor);
-            input.setSelectionRange(cursor, cursor);
+            // An echo of a native edit, or an unrelated chat snapshot, must
+            // leave the textarea's selection intact, even while focus is in a
+            // menu. An editor action that changes the draft or cursor still
+            // takes effect.
+            if (inputChanged || (externalChange && !acknowledgedLocal)) {
+                const cursor = utf16OffsetFromUtf8(remoteInput, remoteCursor);
+                input.setSelectionRange(cursor, cursor);
+            }
             resize();
         });
     };
 
     createEffect(applyRemote);
+
+    const selectionFocus = () =>
+        input.selectionDirection === "backward"
+            ? input.selectionStart
+            : input.selectionEnd;
 
     const publish = (
         nextInput: string,
@@ -231,19 +251,19 @@ export default function ChatComposer(props: {
                     const target = event.currentTarget;
                     setDraft(target.value);
                     resize();
-                    void publish(target.value, target.selectionStart);
+                    void publish(target.value, selectionFocus());
                 }}
                 onSelect={(event) => {
                     const target = event.currentTarget;
                     const cursor = utf8OffsetFromTextArea(
                         target.value,
-                        target.selectionStart,
+                        selectionFocus(),
                     );
                     if (
                         target.value === optimisticInput &&
                         cursor !== optimisticCursor
                     )
-                        void publish(target.value, target.selectionStart);
+                        void publish(target.value, selectionFocus());
                 }}
                 onKeyDown={(event) => {
                     if (event.isComposing) return;
@@ -255,7 +275,7 @@ export default function ChatComposer(props: {
                     const target = event.currentTarget;
                     void publish(
                         target.value,
-                        target.selectionStart,
+                        selectionFocus(),
                         guiKeyInput(event),
                     );
                 }}
@@ -284,7 +304,7 @@ export default function ChatComposer(props: {
                         }
                         onClick={() => {
                             const key = hasActiveRun() ? "Escape" : "Enter";
-                            void publish(input.value, input.selectionStart, {
+                            void publish(input.value, selectionFocus(), {
                                 key,
                                 shift: false,
                                 control: false,
