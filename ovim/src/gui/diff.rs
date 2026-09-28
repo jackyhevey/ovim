@@ -97,6 +97,8 @@ pub struct GuiDiffFile {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
@@ -180,6 +182,7 @@ fn project_review_patch(title: &str, review: &DiffReviewState) -> GuiDiffReview 
         .map(|file| GuiDiffFile {
             id: file.path.clone(),
             label: None,
+            message: None,
             path: file.path.clone(),
             old_path: file.old_path.clone(),
             status: file.status.clone(),
@@ -401,6 +404,7 @@ fn project_guided_files(review: &DiffReviewState, custom: &CustomReview) -> Vec<
             GuiDiffFile {
                 id: section.id.clone(),
                 label: section.label.clone(),
+                message: section.message.clone(),
                 path,
                 old_path: section.old_path.clone(),
                 status: if section.is_reassigned {
@@ -594,6 +598,7 @@ fn project_standalone(title: &str, path: &str, content: &str) -> GuiDiffReview {
     let mut file = GuiDiffFile {
         id: path.to_string(),
         label: None,
+        message: None,
         path: path.to_string(),
         old_path: None,
         status: "modified".to_string(),
@@ -937,18 +942,21 @@ mod tests {
         };
         let specs = vec![
             DiffPairing {
+                message: Some("The duplicate guard is no longer needed.".into()),
                 label: Some("Remove duplicate permission check".into()),
                 old: Some(reference(&old.id, 0)),
                 new: None,
                 related_to: None,
             },
             DiffPairing {
+                message: None,
                 label: Some("Move respondent lookup".into()),
                 old: Some(reference(&old.id, 1)),
                 new: Some(reference(&new.id, 0)),
                 related_to: None,
             },
             DiffPairing {
+                message: None,
                 label: Some("Additional respondent copy".into()),
                 old: None,
                 new: Some(reference(&new.id, 1)),
@@ -964,12 +972,34 @@ mod tests {
         editor
             .open_custom_diff_review("Explain deletion and copy", custom)
             .unwrap();
+        let opened = project_diff(&editor, editor.buffer()).unwrap();
+        assert_eq!(
+            opened.overlay.as_ref().map(|overlay| overlay.mode),
+            Some("saved")
+        );
+        assert_eq!(opened.guided_files.len(), 5);
+        assert_eq!(opened.guided_files[0].id, "pair_0");
+        assert_eq!(opened.guided_files[1].id, "pair_1");
+        assert_eq!(opened.guided_files[2].id, "pair_2");
+        assert_eq!(
+            opened.guided_files[0].message.as_deref(),
+            Some("The duplicate guard is no longer needed.")
+        );
+        assert!(opened.files.iter().all(|file| file.message.is_none()));
+        assert_eq!(opened.guided_files[0].hunks[0].lines[0].old_line, Some(1));
+        assert_eq!(opened.guided_files[1].hunks[0].lines[0].old_line, Some(2));
+        assert_eq!(opened.guided_files[1].hunks[0].lines[1].new_line, Some(1));
+        assert_eq!(opened.guided_files[2].hunks[0].lines[0].new_line, Some(2));
         drop(editor);
         let mut editor = Editor::default();
         editor.set_diff_review_store(Some(store));
         editor.open_file(root.join("anchor.rs")).unwrap();
         editor.open_diff_review(Some("HEAD")).unwrap();
         let projected = project_diff(&editor, editor.buffer()).unwrap();
+        assert_eq!(
+            projected.overlay.as_ref().map(|overlay| overlay.mode),
+            Some("active")
+        );
         assert_eq!(
             projected.moves.len(),
             1,
@@ -1090,6 +1120,7 @@ mod tests {
             .find(|block| block.kind == PatchLineKind::Added)
             .unwrap();
         let pairings = vec![DiffPairing {
+            message: None,
             label: Some("Parser moved".into()),
             old: ChangeRef {
                 block_id: old.id.clone(),
@@ -1219,6 +1250,7 @@ mod tests {
             .find(|block| block.kind == PatchLineKind::Added && block.line_count == 650)
             .unwrap();
         let pairings = vec![DiffPairing {
+            message: None,
             label: Some("Large move".into()),
             old: ChangeRef {
                 block_id: removed.id.clone(),

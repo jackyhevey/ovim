@@ -521,6 +521,7 @@ pub fn render_custom(
     width: usize,
     tab_width: usize,
     hide_equal: bool,
+    hide_notes: bool,
 ) -> Rendered {
     let patch = &custom.snapshot.patch;
     let bodies = patch_bodies(patch);
@@ -545,8 +546,16 @@ pub fn render_custom(
     targets.push(None);
     let toolbar = render_toolbar(layout, &mut builder);
     targets.resize(builder.len(), None);
+    let has_notes = custom
+        .sections
+        .iter()
+        .any(|section| section.message.is_some());
     builder.header(
-        "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · w hide equal · K/J context ↑/↓ · r refresh/redraw · q close",
+        if has_notes {
+            "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · w hide equal · a notes · K/J context ↑/↓ · r refresh/redraw · q close"
+        } else {
+            "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · w hide equal · K/J context ↑/↓ · r refresh/redraw · q close"
+        },
         Some(HighlightGroup::Comment),
     );
     targets.push(None);
@@ -562,6 +571,17 @@ pub fn render_custom(
         Some(HighlightGroup::Comment),
     );
     targets.push(None);
+    if has_notes {
+        builder.header(
+            if hide_notes {
+                "Agent notes: hidden · a to show"
+            } else {
+                "Agent notes: visible · a to hide"
+            },
+            Some(HighlightGroup::Comment),
+        );
+        targets.push(None);
+    }
     for section in &custom.sections {
         let hidden = if hide_equal {
             section.equal_change_lines()
@@ -589,6 +609,16 @@ pub fn render_custom(
         let header_line = builder.header(&heading, Some(HighlightGroup::DiffHeader));
         targets.push(None);
         hunk_lines.push(header_line);
+        if !hide_notes {
+            if let Some(message) = &section.message {
+                builder.header("  Agent note:", Some(HighlightGroup::Comment));
+                targets.push(None);
+                for line in wrap_agent_message(message, width.saturating_sub(4).max(8), tab_width) {
+                    builder.header(&format!("    {line}"), Some(HighlightGroup::Comment));
+                    targets.push(None);
+                }
+            }
+        }
         for (index, file) in patch.files.iter().enumerate() {
             if file_lines[index] == usize::MAX
                 && (section.new_path.as_deref() == Some(file.path.as_str())
@@ -712,6 +742,37 @@ pub fn render_custom(
         code_highlights: code.into_lines(),
         custom_targets: targets,
     }
+}
+
+/// Wrap prose by display cells while preserving paragraph breaks. Long words
+/// are split at grapheme boundaries so a single URL cannot overflow the view.
+fn wrap_agent_message(message: &str, width: usize, tab_width: usize) -> Vec<String> {
+    let mut rows = Vec::new();
+    for paragraph in message.split('\n') {
+        let mut row = String::new();
+        let mut used = 0;
+        let expanded = paragraph.replace('\t', &" ".repeat(tab_width.max(1)));
+        for token in expanded.split_inclusive(' ') {
+            let token_width = grapheme_indices(token)
+                .map(|(_, glyph)| grapheme_display_width(glyph).max(1))
+                .sum::<usize>();
+            if used > 0 && used + token_width > width && token_width <= width {
+                rows.push(std::mem::take(&mut row));
+                used = 0;
+            }
+            for (_, glyph) in grapheme_indices(token) {
+                let cells = grapheme_display_width(glyph).max(1);
+                if used > 0 && used + cells > width {
+                    rows.push(std::mem::take(&mut row));
+                    used = 0;
+                }
+                row.push_str(glyph);
+                used += cells;
+            }
+        }
+        rows.push(row);
+    }
+    rows
 }
 
 fn section_heading(section: &ReviewSection) -> String {
@@ -1745,6 +1806,21 @@ pub fn expand_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_message_wraps_words_and_unicode_without_exceeding_width() {
+        let message = "Move ordinary words together\n\t日本語👩‍💻longunbrokenword";
+        let rows = wrap_agent_message(message, 12, 4);
+        assert_eq!(rows[0], "Move ");
+        assert!(rows.iter().any(|row| row.contains("ordinary")));
+        assert!(rows.iter().any(|row| row.starts_with("    日本")));
+        assert!(rows.iter().all(|row| {
+            grapheme_indices(row)
+                .map(|(_, glyph)| grapheme_display_width(glyph).max(1))
+                .sum::<usize>()
+                <= 12
+        }));
+    }
 
     #[test]
     fn humanize_buckets() {

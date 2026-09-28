@@ -29,7 +29,7 @@ pub fn read_diff_definition() -> ToolDefinition {
 pub fn show_custom_diff_definition() -> ToolDefinition {
     ToolDefinition {
         name: SHOW_CUSTOM_DIFF.into(),
-        description: "Open a replayable review immediately without waiting for dismissal. First read every page of read_diff's frozen comparison. The pairings array defines ordered sections: provide old (removed block) and new (added block) for a replacement, old alone for a deletion, or new alone for an addition. At least one side is required. Use zero-based offset and positive count to split a block into disjoint semantic slices; pair lengths may differ. Label deletions explicitly (for example, 'Remove duplicate permission check') instead of pairing them with unrelated nearby additions. For copied or extracted code, assign each changed line once, then use related_to to reference an existing removed or added range: for example an old/new pair for the primary move, followed by a new-only section labelled 'Additional copy' with related_to pointing to the original old range. related_to is an explanatory source reference, not another pairing, and cannot overlap this section's own lines; it does not consume, duplicate, hide, or prove equivalence of code. Several sections may reference the same source. Labels describe intent but cannot change addition/deletion kinds. Unassigned changes, metadata, and binary changes remain visible automatically. Overlapping ownership, invalid ranges, and wrong-side references are rejected. GUI Guided view and the terminal show these sections; Files keeps canonical file order. All content comes from the frozen snapshot, never agent-authored code.".into(),
+        description: "Open a replayable, agent-arranged review of a frozen read_diff snapshot. Read every page first, until next_cursor is null. Each pairing is one ordered section: old owns removed lines, new owns added lines, and both show a replacement; at least one side is required. Give it a short label and optionally a message explaining the change to the reader. Keep unrelated additions and deletions in separate sections. Example: {\"snapshot_id\":\"<id>\",\"title\":\"Review\",\"pairings\":[{\"label\":\"Remove duplicate check\",\"message\":\"The shared guard now handles this case.\",\"old\":{\"block_id\":\"removed_1\"}}]}. Use zero-based offset and positive count to split blocks into disjoint slices; pair lengths may differ. Assign each changed line at most once. For a copy or extraction, related_to can point to a source range outside the section; it explains provenance but never owns lines or proves equivalence. Unassigned changes, metadata, and binary changes remain visible automatically. The GUI Guided view and terminal show labels and messages; Files keeps canonical file order. The review opens immediately, and all code comes from the frozen snapshot.".into(),
         required_scope: RequiredScope { file_scope: FileScope::Project, shell: false, network: false },
         side_effect: SideEffect::Navigation,
         custom_input_schema: Some(StrictJsonSchema::new(json!({
@@ -42,7 +42,8 @@ pub fn show_custom_diff_definition() -> ToolDefinition {
                     "items": {
                         "type": "object", "additionalProperties": false,
                         "properties": {
-                            "label": { "type": "string", "maxLength": 200 },
+                            "label": { "type": "string", "maxLength": 200, "description": "Short, single-line section heading." },
+                            "message": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Optional plain text note for the reader, shown above this section in Guided and terminal views. May include newlines and tabs; blank text and unsafe controls are rejected." },
                             "old": { "$ref": "#/$defs/reference" },
                             "new": { "$ref": "#/$defs/reference" },
                             "related_to": { "$ref": "#/$defs/reference", "description": "Explanatory reference to a removed or added range outside this section. Does not own its lines or imply equality." }
@@ -81,6 +82,7 @@ mod tests {
             json!({"new": reference}),
             json!({"old": reference, "new": reference}),
             json!({"new": reference, "related_to": reference}),
+            json!({"old": reference, "message": "Review caller\nthen remove shim"}),
         ] {
             schema
                 .validate_instance(
@@ -102,6 +104,7 @@ mod tests {
             json!({"old":reference,"kind":"context"}),
             json!({"old":reference,"text":"invented"}),
             json!({"old":reference,"related_to":{"block_id":"x","count":0}}),
+            json!({"old":reference,"message":"x".repeat(2001)}),
         ] {
             assert!(schema
                 .validate_instance(

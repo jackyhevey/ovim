@@ -117,6 +117,7 @@ export interface GuiDiffDocument {
     files: Array<{
         id: string;
         label?: string;
+        message?: string;
         path: string;
         oldPath?: string;
         status: string;

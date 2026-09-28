@@ -579,6 +579,7 @@ describe("FlowDiff", () => {
                 review={{
                     ...review,
                     custom: true,
+                    overlay: { mode: "active" },
                     guidedFiles: [guided],
                 }}
             />
@@ -601,6 +602,90 @@ describe("FlowDiff", () => {
                 "Parser moved after validation · src/uneven.ts",
             ),
         ).toHaveLength(2);
+    });
+
+    it("opens saved custom slices in Guided and respects a manual Files choice", () => {
+        const first = {
+            ...review.files[0],
+            id: "slice-first",
+            label: "First slice",
+            hunks: [review.files[0].hunks[0]],
+        };
+        const second = {
+            ...review.files[0],
+            id: "slice-second",
+            label: "Second slice",
+            hunks: [review.files[0].hunks[1]],
+        };
+        const saved: FlowDiffReview = {
+            ...review,
+            title: "Agent review",
+            custom: true,
+            provenance: {
+                baseLabel: "HEAD",
+                comparisonBaseOid: "base",
+                snapshotId: "first-snapshot",
+            },
+            overlay: { mode: "saved" },
+            guidedFiles: [first, second],
+        };
+        const [current, setCurrent] = createSignal(saved);
+        const result = render(() => <FlowDiff review={current()} />);
+
+        expect(
+            result
+                .getByRole("button", { name: "Guided" })
+                .getAttribute("aria-pressed"),
+        ).toBe("true");
+        expect(result.getByText("2 sections")).toBeTruthy();
+        expect(result.getAllByText("First slice · src/uneven.ts")).toHaveLength(
+            2,
+        );
+        expect(
+            result.getAllByText("Second slice · src/uneven.ts"),
+        ).toHaveLength(2);
+
+        fireEvent.click(result.getByRole("button", { name: "Files" }));
+        setCurrent({ ...saved, layout: "unified" });
+        expect(
+            result
+                .getByRole("button", { name: "Files" })
+                .getAttribute("aria-pressed"),
+        ).toBe("true");
+
+        setCurrent({
+            ...saved,
+            provenance: { ...saved.provenance!, snapshotId: "second-snapshot" },
+        });
+        expect(
+            result
+                .getByRole("button", { name: "Guided" })
+                .getAttribute("aria-pressed"),
+        ).toBe("true");
+    });
+
+    it("switches an existing canonical viewer to Guided when a saved review opens", () => {
+        const guided = {
+            ...review.files[0],
+            id: "split-review",
+            label: "Agent slice",
+        };
+        const [current, setCurrent] = createSignal<FlowDiffReview>(review);
+        const result = render(() => <FlowDiff review={current()} />);
+
+        setCurrent({
+            ...review,
+            title: "Agent review",
+            custom: true,
+            overlay: { mode: "saved" },
+            guidedFiles: [guided],
+        });
+        expect(
+            result
+                .getByRole("button", { name: "Guided" })
+                .getAttribute("aria-pressed"),
+        ).toBe("true");
+        expect(result.getByText("1 section")).toBeTruthy();
     });
 
     it("exports canonical files after a guided review is replaced", async () => {

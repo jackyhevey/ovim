@@ -636,6 +636,7 @@ mod tests {
                     "title": "Moved function",
                     "pairings": [{
                         "label": "Function moved and edited",
+                        "message": "The new function handles callers from both paths.",
                         "old": {"block_id": removed["block_id"]},
                         "new": {"block_id": added["block_id"]}
                     }]
@@ -671,9 +672,18 @@ mod tests {
         let saved: SavedCustomDiff = artifacts.load("review", &call.id).unwrap();
         assert_eq!(saved.snapshot.id, snapshot_id);
         assert_eq!(saved.title, "Moved function");
+        assert_eq!(
+            saved.pairings[0].message.as_deref(),
+            Some("The new function handles callers from both paths.")
+        );
         assert!(restored.ai_chat_tool_event_call(&call.id).is_some());
         assert!(restored.replay_custom_diff(&call.id));
         assert!(restored.is_diff_review_buffer());
+        assert!(restored
+            .buffer()
+            .rope()
+            .to_string()
+            .contains("The new function handles callers from both paths."));
     }
 
     #[tokio::test(flavor = "multi_thread")]

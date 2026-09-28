@@ -567,6 +567,7 @@ impl Editor {
                 width,
                 self.diff_review_tab_width(),
                 self.ui_panels.diff_review_hide_equal,
+                self.ui_panels.diff_review_hide_notes,
             )
         } else {
             render::render(
@@ -676,6 +677,7 @@ impl Editor {
             width,
             self.diff_review_tab_width(),
             self.ui_panels.diff_review_hide_equal,
+            self.ui_panels.diff_review_hide_notes,
         );
         if self.mode() == crate::mode::Mode::AiChat {
             self.close_ai_chat();
@@ -876,6 +878,77 @@ impl Editor {
             "Diff review: equal paired changes hidden (ignoring whitespace)"
         } else {
             "Diff review: showing all changes"
+        });
+    }
+
+    /// `a` shows or hides messages attached to curated sections.
+    pub fn toggle_diff_review_notes(&mut self) {
+        let Some(index) = self.review_buffer_index() else {
+            return;
+        };
+        if self
+            .ui_panels
+            .diff_review
+            .as_ref()
+            .and_then(|state| state.custom.as_ref())
+            .is_none_or(|custom| {
+                !custom
+                    .sections
+                    .iter()
+                    .any(|section| section.message.is_some())
+            })
+        {
+            return;
+        }
+        let line = self.buffers[index].cursor().line();
+        let col = self.buffers[index].cursor().col();
+        let source_line = self.ui_panels.diff_review.as_ref().and_then(|state| {
+            state
+                .rows
+                .get(line)
+                .and_then(|row| row.cell_at(col.0))
+                .map(|cell| cell.patch_line)
+        });
+        let section_at_cursor = self.ui_panels.diff_review.as_ref().and_then(|state| {
+            (state.rows.get(line).and_then(ReviewRow::info).is_none())
+                .then(|| {
+                    state
+                        .hunk_lines
+                        .partition_point(|heading| *heading <= line)
+                        .checked_sub(1)
+                })
+                .flatten()
+        });
+        let anchor = self.diff_review_anchor(index, false);
+        self.ui_panels.diff_review_hide_notes = !self.ui_panels.diff_review_hide_notes;
+        self.rerender_diff_review(anchor);
+        let restored = self.ui_panels.diff_review.as_ref().and_then(|state| {
+            source_line
+                .and_then(|source| {
+                    state.rows.iter().position(|row| {
+                        row.left.is_some_and(|cell| cell.patch_line == source)
+                            || row.right.is_some_and(|cell| cell.patch_line == source)
+                    })
+                })
+                .or_else(|| {
+                    section_at_cursor.and_then(|section| state.hunk_lines.get(section).copied())
+                })
+        });
+        if let Some(line) = restored {
+            self.buffers[index].cursor_mut().set_position(
+                line,
+                if source_line.is_some() {
+                    col
+                } else {
+                    GraphemeCol(0)
+                },
+            );
+            self.center_cursor_in_viewport();
+        }
+        self.set_status_message(if self.ui_panels.diff_review_hide_notes {
+            "Diff review: agent notes hidden"
+        } else {
+            "Diff review: agent notes visible"
         });
     }
 
@@ -1373,6 +1446,7 @@ impl Editor {
                     state.layout_width,
                     tab_width,
                     self.ui_panels.diff_review_hide_equal,
+                    self.ui_panels.diff_review_hide_notes,
                 ),
                 None => render::render(
                     &state.patch,

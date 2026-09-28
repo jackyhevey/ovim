@@ -25,6 +25,7 @@ export type DiffExportOptions = {
     reconstruction: Reconstruction;
     traceMoves?: boolean;
     hideEqual?: boolean;
+    showNotes?: boolean;
 };
 
 export type DiffExportImage = {
@@ -362,6 +363,20 @@ function fileBlock(
                 height: 28,
                 text: `Description: ${text}`,
             });
+    if (
+        options.view === "guided" &&
+        options.showNotes !== false &&
+        file.message
+    ) {
+        rows.push({ kind: "note", height: 28, text: "Agent note" });
+        for (const paragraph of file.message.split("\n"))
+            for (const text of wrapWords(paragraph, 130))
+                rows.push({
+                    kind: "note",
+                    height: 28,
+                    text,
+                });
+    }
     if (file.oldPath && file.oldPath !== file.path)
         for (const text of wrapWords(`Before path: ${file.oldPath}`, 130))
             rows.push({ kind: "note", height: 28, text });

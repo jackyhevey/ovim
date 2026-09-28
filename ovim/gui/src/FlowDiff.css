@@ -112,6 +112,29 @@
     color: var(--info);
 }
 
+.flow-agent-note {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+    border-left: 3px solid var(--info);
+    background: color-mix(in srgb, var(--info) 7%, var(--canvas));
+    color: var(--text-primary);
+    font: 12px/1.5 var(--editor-font);
+    min-width: 0;
+}
+
+.flow-agent-note strong {
+    color: var(--info);
+    font-size: 10px;
+}
+
+.flow-agent-note span {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
 .flow-search button,
 .flow-hunk-nav button,
 .flow-view-switch button,

@@ -50,6 +50,14 @@ export type FlowDiffProps = {
     onCoreKey?: (key: ":" | " ") => void;
 };
 
+function defaultReviewView(review: FlowDiffReview): "files" | "guided" {
+    return review.custom &&
+        review.overlay?.mode === "saved" &&
+        review.guidedFiles?.length
+        ? "guided"
+        : "files";
+}
+
 export default function FlowDiff(props: FlowDiffProps) {
     let panel: HTMLElement | undefined;
     let searchInput: HTMLInputElement | undefined;
@@ -88,11 +96,14 @@ export default function FlowDiff(props: FlowDiffProps) {
         );
     });
     const [hideEqual, setHideEqual] = createSignal(false);
+    const [showNotes, setShowNotes] = createSignal(true);
     const [exporting, setExporting] = createSignal(false);
     const [exportMessage, setExportMessage] = createSignal("");
     const [exportFailed, setExportFailed] = createSignal(false);
     const [selectedId, setSelectedId] = createSignal("");
-    const [view, setView] = createSignal<"files" | "guided">("files");
+    const [view, setView] = createSignal<"files" | "guided">(
+        defaultReviewView(props.review),
+    );
     const [layout, setLayout] = createSignal<"split" | "unified">(
         props.review.layout,
     );
@@ -112,6 +123,11 @@ export default function FlowDiff(props: FlowDiffProps) {
             ? "guided"
             : "files",
     );
+    const hasNotes = createMemo(
+        () =>
+            effectiveView() === "guided" &&
+            props.review.guidedFiles?.some((item) => item.message) === true,
+    );
 
     async function exportImages() {
         if (exporting()) return;
@@ -122,6 +138,7 @@ export default function FlowDiff(props: FlowDiffProps) {
             reconstruction: reconstruction(),
             traceMoves: traceMoves(),
             hideEqual: hideEqual(),
+            showNotes: showNotes(),
         };
         setExporting(true);
         setExportMessage("");
@@ -235,11 +252,20 @@ export default function FlowDiff(props: FlowDiffProps) {
 
     createEffect(() => setLayout(props.review.layout));
     createEffect(() => {
-        const identity = props.review.title;
+        const review = props.review;
+        const identity = [
+            review.title,
+            review.custom,
+            review.overlay?.mode ?? "",
+            review.overlay?.mode === "saved"
+                ? (review.provenance?.snapshotId ?? "")
+                : "",
+        ].join("\0");
         if (reviewIdentity && identity !== reviewIdentity) {
             setSelectedId("");
             setActiveSectionId("");
             setActiveHunk(0);
+            setView(defaultReviewView(review));
         }
         reviewIdentity = identity;
     });
@@ -761,6 +787,17 @@ export default function FlowDiff(props: FlowDiffProps) {
         </Show>
     );
 
+    const fileNote = (item: FlowDiffFile) => (
+        <Show
+            when={effectiveView() === "guided" && showNotes() && item.message}
+        >
+            <div class="flow-agent-note" aria-label="Agent note">
+                <strong>Agent note</strong>
+                <span>{item.message}</span>
+            </div>
+        </Show>
+    );
+
     onMount(() => {
         if (typeof ResizeObserver !== "undefined")
             resizeObserver = new ResizeObserver(() => measure());
@@ -950,6 +987,11 @@ export default function FlowDiff(props: FlowDiffProps) {
             setHideEqual((value) => !value);
             return;
         }
+        if (event.key === "a" && hasNotes()) {
+            event.preventDefault();
+            setShowNotes((visible) => !visible);
+            return;
+        }
         if (event.key === "s") {
             event.preventDefault();
             const next = layout() === "split" ? "unified" : "split";
@@ -1020,11 +1062,23 @@ export default function FlowDiff(props: FlowDiffProps) {
                             <button
                                 type="button"
                                 aria-pressed={effectiveView() === "guided"}
+                                title="Read agent-arranged sections and notes"
                                 onClick={() => setView("guided")}
                             >
                                 Guided
                             </button>
                         </div>
+                    </Show>
+                    <Show when={hasNotes()}>
+                        <button
+                            type="button"
+                            class="flow-equal-toggle"
+                            aria-pressed={showNotes()}
+                            title="Show agent notes (a)"
+                            onClick={() => setShowNotes((visible) => !visible)}
+                        >
+                            Notes
+                        </button>
                     </Show>
                     <span class="flow-file-count">
                         {visibleFiles().length}{" "}
@@ -1343,6 +1397,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                                         data-file-id={item.id}
                                     >
                                         {fileHeading(item)}
+                                        {fileNote(item)}
                                         {fileMetadata(item)}
                                         <Show
                                             when={!item.binary}
@@ -1549,6 +1604,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                                         data-file-id={item.id}
                                     >
                                         {fileHeading(item)}
+                                        {fileNote(item)}
                                         {fileMetadata(item)}
                                         <Show
                                             when={!item.binary}
@@ -1630,6 +1686,7 @@ export default function FlowDiff(props: FlowDiffProps) {
                                         data-file-id={item.id}
                                     >
                                         {fileHeading(item)}
+                                        {fileNote(item)}
                                         {fileMetadata(item)}
                                         <Show
                                             when={!item.binary}

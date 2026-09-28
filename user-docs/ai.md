@@ -896,15 +896,19 @@ fragment, including changes in another file. The same navigation works in
 side-by-side and unified layouts. `n` / `N` and `]c` / `[c` also jump between
 changes; `]f` / `[f` jump to file or section boundaries.
 
-Custom reviews first show ordinary file changes. When similar lines
-are matched at different before and after locations, **Show moved-code matches**
+Custom reviews opened by the agent or replayed from chat start in **Guided**,
+where split sections and their explanations appear in the agent's order.
+Opening the regular Git review starts in **Files**, even when a saved overlay
+is applied. Switch views at any time.
+In **Files**, when similar lines are matched at different before and after
+locations, **Show moved-code matches**
 adds an embedded comparison with both paths and line ranges. A match can include
 edits; it does not mean the lines are identical. Switch between **Before context**
 and **After context** to choose which saved surrounding code appears beside the
-change. Scroll inside the comparison to inspect it. Switch to **Guided** to read
-all the agent's paired sections, explanations, and remaining changes in one
-continuous review, or **Files** to see changes in file order. The terminal shows paired sections with
-both source paths. Old-side navigation opens a labeled snapshot excerpt.
+change. Scroll inside the comparison to inspect it. **Guided** reads all the
+agent's paired sections, explanations, and remaining changes in one continuous
+review; **Files** shows changes in file order. The terminal shows paired sections
+with both source paths. Old-side navigation opens a labeled snapshot excerpt.
 Older saved reviews and large files may have limited surrounding context.
 
 In both the GUI and terminal curated review, press `w` (or click **Hide equal
@@ -919,7 +923,7 @@ changes, refreshes, and reopening reviews during the session.
 
 Use **Export image** in the GUI to save the complete **Files** or **Guided** view,
 including files and sections outside the viewport. The export is one dark PNG,
-with the selected layout, pairings, expanded context, and equal-change filter. Images include descriptions,
+with the selected layout, pairings, expanded context, visible agent notes, and equal-change filter. Images include descriptions,
 source paths, line numbers, change totals, and the comparison base when available.
 Moved ranges appear with nearby saved context. The export records the selected
 review, so an outdated saved review retains its original contents. It helps reviewers
@@ -944,6 +948,17 @@ again, classify code as unchanged, or establish semantic equivalence. Several
 sections may reference the same source, including a range already owned by
 another section. A section cannot reference its own lines.
 
+Each pairing may include an optional `message` of up to 2,000 characters of
+plain text. Use it to explain why the before and after ranges belong together
+or what the reader should check. The short `label` remains the section heading.
+Messages can span lines; blank messages and control characters other than tabs
+and newlines are rejected. In **Guided**, an **Agent note** appears above that
+pairing in both GUI layouts and in the terminal. The GUI **Notes** button or
+`a` key shows and hides notes; `a` also works in the terminal. Notes start
+visible when present. The control is absent when the review has no messages,
+and **Files** stays the canonical code view. Hiding notes never changes the
+saved comparison or its change totals.
+
 For example, after reading the corresponding blocks:
 
 ```json
@@ -957,6 +972,7 @@ For example, after reading the corresponding blocks:
     },
     {
       "label": "Move respondent lookup",
+      "message": "The lookup now runs after validation so callers share one guard.",
       "old": {"block_id": "removed_10", "offset": 1, "count": 1},
       "new": {"block_id": "added_30", "offset": 0, "count": 1}
     },

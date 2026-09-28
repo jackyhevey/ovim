@@ -110,6 +110,7 @@ async fn saved_moves_follow_exact_live_diff_and_recover_after_undo() {
         .unwrap();
     let custom = snapshot
         .reassign(&[DiffPairing {
+            message: None,
             label: Some("Move line".into()),
             old: ChangeRef {
                 block_id: removed.id.clone(),
@@ -229,6 +230,7 @@ async fn custom_review_keeps_cross_file_sources_and_a_frozen_layout() {
         .unwrap();
     let custom = snapshot
         .reassign(&[DiffPairing {
+            message: Some("The code now lives in the new file.\nCheck all callers.".into()),
             label: Some("Move old line".to_string()),
             old: ChangeRef {
                 block_id: removed.id.clone(),
@@ -258,9 +260,43 @@ async fn custom_review_keeps_cross_file_sources_and_a_frozen_layout() {
         .rope()
         .to_string()
         .contains("a.txt → b.txt"));
+    assert!(test
+        .editor
+        .buffer()
+        .rope()
+        .to_string()
+        .contains("Agent note:"));
+    let note_line = (0..test.editor.buffer().line_count())
+        .find(|&line| {
+            test.editor
+                .buffer()
+                .line_text(line)
+                .is_some_and(|text| text.contains("Check all callers."))
+        })
+        .unwrap();
+    test.editor
+        .buffer_mut()
+        .cursor_mut()
+        .set_position(note_line, ovim_core::unicode::GraphemeCol(0));
+    test.keys("a");
+    assert!(!test
+        .editor
+        .buffer()
+        .rope()
+        .to_string()
+        .contains("Check all callers."));
+    assert!(current_line(&test).contains("Move old line"));
+    test.keys("a");
+    assert!(test
+        .editor
+        .buffer()
+        .rope()
+        .to_string()
+        .contains("Check all callers."));
     test.editor
         .set_diff_review_layout(ovim_core::editor::DiffLayout::Split);
     let split = test.editor.buffer().rope().to_string();
+    assert!(split.contains("Check all callers."));
     assert!(
         split.lines().any(|line| line.matches("three").count() == 2),
         "{split}"
@@ -1604,6 +1640,7 @@ async fn w_hides_equal_same_file_pairs_in_both_terminal_layouts_without_changing
         .unwrap();
     let custom = snapshot
         .reassign(&[DiffPairing {
+            message: None,
             label: Some("Same-file pair".into()),
             old: ChangeRef {
                 block_id: old.id.clone(),
@@ -1703,6 +1740,7 @@ async fn w_hides_equal_cross_file_pairs_in_both_terminal_layouts_without_changin
         .unwrap();
     let custom = snapshot
         .reassign(&[DiffPairing {
+            message: None,
             label: Some("Cross-file pair".into()),
             old: ChangeRef {
                 block_id: old.id.clone(),
@@ -1982,6 +2020,7 @@ async fn paired_context_stays_with_each_file_and_stops_at_capture_gaps() {
         .unwrap();
     let custom = snapshot
         .reassign(&[DiffPairing {
+            message: None,
             label: Some("Moved statement".into()),
             old: ChangeRef {
                 block_id: old_block.id.clone(),

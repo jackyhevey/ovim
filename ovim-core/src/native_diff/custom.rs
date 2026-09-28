@@ -86,6 +86,9 @@ pub struct ChangeRef {
 #[serde(rename_all = "camelCase")]
 pub struct DiffPairing {
     pub label: Option<String>,
+    /// Optional explanation shown with this section, never part of the patch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub old: Option<ChangeRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -116,6 +119,8 @@ pub struct ReviewSectionLine {
 pub struct ReviewSection {
     pub id: String,
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     pub old_path: Option<String>,
     pub new_path: Option<String>,
     pub is_reassigned: bool,
@@ -374,6 +379,16 @@ impl ReviewSnapshot {
                     .is_none_or(|label| !label.contains(['\n', '\r'])),
                 "Section labels must be single lines"
             );
+            if let Some(message) = &pairing.message {
+                ensure!(
+                    !message.trim().is_empty()
+                        && message.chars().count() <= 2000
+                        && !message
+                            .chars()
+                            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\t')),
+                    "Section message must be 1–2000 characters of safe, nonblank text"
+                );
+            }
             let old = pairing
                 .old
                 .as_ref()
@@ -460,6 +475,7 @@ impl ReviewSnapshot {
             sections.push(ReviewSection {
                 id: format!("pair_{index}"),
                 label,
+                message: pairing.message.clone(),
                 old_path,
                 new_path,
                 is_reassigned: true,
@@ -967,6 +983,7 @@ fn append_residual(
     sections.push(ReviewSection {
         id: format!("residual_{file_index}_{section_index}"),
         label: None,
+        message: None,
         old_path: Some(old_path(file)),
         new_path: Some(file.path.clone()),
         is_reassigned: false,
@@ -1080,6 +1097,7 @@ mod tests {
         let snapshot = ReviewSnapshot::from_patch(fixture()).unwrap();
         assert_eq!(snapshot.blocks.len(), 2);
         let pair = DiffPairing {
+            message: None,
             label: Some("Moved alpha".into()),
             old: reference(&snapshot.blocks[0].id, 0, 1).into(),
             new: reference(&snapshot.blocks[1].id, 0, 1).into(),
@@ -1106,11 +1124,40 @@ mod tests {
     }
 
     #[test]
+    fn section_messages_are_metadata_and_survive_round_trip() {
+        let snapshot = ReviewSnapshot::from_patch(fixture()).unwrap();
+        let mut pairing = DiffPairing {
+            label: Some("Explain the move".into()),
+            message: Some("This replaces the older path.\nReview the caller too.".into()),
+            old: Some(reference(&snapshot.blocks[0].id, 0, 1)),
+            new: Some(reference(&snapshot.blocks[1].id, 0, 1)),
+            related_to: None,
+        };
+        let review = snapshot.reassign(&[pairing.clone()]).unwrap();
+        assert_eq!(review.sections[0].message, pairing.message);
+        assert_eq!(review.snapshot.patch, snapshot.patch);
+        let saved: DiffPairing =
+            serde_json::from_str(&serde_json::to_string(&pairing).unwrap()).unwrap();
+        assert_eq!(saved.message, pairing.message);
+
+        for invalid in ["   ", "unsafe\u{1b}control"] {
+            pairing.message = Some(invalid.into());
+            assert!(snapshot.reassign(&[pairing.clone()]).is_err());
+        }
+        pairing.message = Some("x".repeat(2001));
+        assert!(snapshot.reassign(&[pairing]).is_err());
+        let legacy: DiffPairing =
+            serde_json::from_str("{\"label\":null,\"old\":{\"block_id\":\"old\"}}").unwrap();
+        assert_eq!(legacy.message, None);
+    }
+
+    #[test]
     fn rejects_overlapping_and_invalid_pairings() {
         let snapshot = ReviewSnapshot::from_patch(fixture()).unwrap();
         let old = &snapshot.blocks[0].id;
         let new = &snapshot.blocks[1].id;
         let pair = DiffPairing {
+            message: None,
             label: None,
             old: reference(old, 0, 1).into(),
             new: reference(new, 0, 1).into(),
@@ -1119,6 +1166,7 @@ mod tests {
         assert!(snapshot.reassign(&[pair.clone(), pair]).is_err());
         assert!(snapshot
             .reassign(&[DiffPairing {
+                message: None,
                 label: None,
                 old: reference(new, 0, 1).into(),
                 new: reference(old, 0, 1).into(),
@@ -1128,6 +1176,7 @@ mod tests {
             .is_err());
         assert!(snapshot
             .reassign(&[DiffPairing {
+                message: None,
                 label: None,
                 old: reference(old, 1, 2).into(),
                 new: reference(new, 0, 1).into(),
@@ -1146,18 +1195,21 @@ mod tests {
         let new = &snapshot.blocks[1].id;
         let specs = vec![
             DiffPairing {
+                message: None,
                 label: Some("Remove duplicate".into()),
                 old: Some(reference(old, 1, 1)),
                 new: None,
                 related_to: Some(reference(old, 0, 1)),
             },
             DiffPairing {
+                message: None,
                 label: Some("Primary move".into()),
                 old: Some(reference(old, 0, 1)),
                 new: Some(reference(new, 0, 1)),
                 related_to: None,
             },
             DiffPairing {
+                message: None,
                 label: Some("Additional copy".into()),
                 old: None,
                 new: Some(reference(new, 1, 1)),
@@ -1221,6 +1273,7 @@ mod tests {
         let old = &snapshot.blocks[0].id;
         let new = &snapshot.blocks[1].id;
         let deletion = DiffPairing {
+            message: None,
             label: None,
             old: Some(reference(old, 0, 1)),
             new: None,
@@ -1263,6 +1316,7 @@ mod tests {
             .reassign(&[deletion.clone(), deletion.clone()])
             .is_err());
         let paired = DiffPairing {
+            message: None,
             new: Some(reference(new, 0, 1)),
             ..deletion.clone()
         };
@@ -1318,6 +1372,7 @@ mod tests {
         let snapshot = ReviewSnapshot::from_patch(patch).unwrap();
         let review = snapshot
             .reassign(&[DiffPairing {
+                message: None,
                 label: None,
                 old: reference(&snapshot.blocks[0].id, 0, 2).into(),
                 new: reference(&snapshot.blocks[1].id, 0, 2).into(),
@@ -1410,6 +1465,7 @@ mod tests {
             .unwrap();
         let review = snapshot
             .reassign(&[DiffPairing {
+                message: None,
                 label: Some("Move and edit".into()),
                 old: reference(&old.id, 0, old.line_count).into(),
                 new: reference(&new.id, 0, new.line_count).into(),
@@ -1488,6 +1544,7 @@ mod equal_change_tests {
 
     fn paired(old: &[&str], new: &[&str]) -> ReviewSection {
         ReviewSection {
+            message: None,
             id: "pair".into(),
             label: None,
             old_path: Some("src/a.rs".into()),

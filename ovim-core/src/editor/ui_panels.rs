@@ -50,6 +50,8 @@ pub struct UiPanels {
     pub pending_git_fetch: Option<super::diff_review::PendingGitFetch>,
     /// Hide equal same-file pairs in curated terminal reviews.
     pub diff_review_hide_equal: bool,
+    /// Hide agent messages on saved review sections (visible by default).
+    pub diff_review_hide_notes: bool,
     /// Layout the next review opens in; `s` and the toolbar change it.
     pub diff_review_layout: super::diff_review::DiffLayout,
 }
