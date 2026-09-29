@@ -194,59 +194,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             editor.toggle_file_tree();
             Ok(true)
         }
-        // Shift+F5 - stop the run / debug session
-        KeyCode::F(5) if key_event.modifiers.contains(Modifiers::SHIFT) => {
-            editor.launch_stop();
-            Ok(true)
-        }
-        // Ctrl+F5 - run (no debugger) whatever is at the cursor
-        KeyCode::F(5) if key_event.modifiers.contains(Modifiers::CONTROL) => {
-            editor.launch_at_cursor(crate::launch::LaunchMode::Run);
-            Ok(true)
-        }
-        // F5 - continue (if a session is stopped/running) or debug whatever is at the cursor
-        KeyCode::F(5) => {
-            if editor.is_debug_active() {
-                editor.dap_manager_mut().pending_action =
-                    Some(crate::dap::PendingDebugAction::Continue);
-            } else {
-                editor.launch_at_cursor(crate::launch::LaunchMode::Debug);
-            }
-            Ok(true)
-        }
-        // F9 - toggle breakpoint at cursor line
-        KeyCode::F(9) if !key_event.modifiers.contains(Modifiers::SHIFT) => {
-            editor.toggle_breakpoint();
-            Ok(true)
-        }
-        // Shift+F9 - toggle conditional breakpoint (prompts for condition)
-        KeyCode::F(9) if key_event.modifiers.contains(Modifiers::SHIFT) => {
-            // Enter command mode with ":DebugCondition " pre-filled.
-            editor.clear_command_line();
-            editor.insert_into_command_line("DebugCondition ");
-            editor.set_mode(Mode::Command);
-            Ok(true)
-        }
-        // F10 - step over
-        KeyCode::F(10) => {
-            if editor.is_debug_active() {
-                editor.dap_manager_mut().pending_action =
-                    Some(crate::dap::PendingDebugAction::StepOver);
-            }
-            Ok(true)
-        }
-        // F11 - step in (without Shift) / step out (with Shift)
-        KeyCode::F(11) => {
-            if editor.is_debug_active() {
-                let action = if key_event.modifiers.contains(Modifiers::SHIFT) {
-                    crate::dap::PendingDebugAction::StepOut
-                } else {
-                    crate::dap::PendingDebugAction::StepIn
-                };
-                editor.dap_manager_mut().pending_action = Some(action);
-            }
-            Ok(true)
-        }
+        KeyCode::F(_) => crate::editor::input::debug_keys::try_handle(editor, key_event),
         _ => Ok(false),
     }
 }

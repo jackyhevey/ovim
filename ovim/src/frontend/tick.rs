@@ -200,6 +200,15 @@ async fn process_pending_debug_action(editor: &mut Editor) {
         editor.mark_dirty();
         return;
     }
+    if editor.dap_manager_mut().take_breakpoint_sync_request() && editor.is_debug_active() {
+        let paths: Vec<std::path::PathBuf> =
+            editor.debug_state().breakpoints.keys().cloned().collect();
+        for path in &paths {
+            let _ = editor.debug_sync_breakpoints(path).await;
+        }
+        let _ = editor.dap_manager().sync_exception_breakpoints().await;
+        editor.mark_dirty();
+    }
     let Some(action) = editor.dap_manager_mut().pending_action.take() else {
         return;
     };
@@ -263,15 +272,6 @@ async fn process_pending_debug_action(editor: &mut Editor) {
                     editor.launch_debug_failed(format!("configurationDone failed: {e}"));
                 }
             }
-            editor.mark_dirty();
-        }
-        PendingDebugAction::UpdateBreakpoints => {
-            let paths: Vec<std::path::PathBuf> =
-                editor.debug_state().breakpoints.keys().cloned().collect();
-            for path in &paths {
-                let _ = editor.debug_sync_breakpoints(path).await;
-            }
-            let _ = editor.dap_manager().sync_exception_breakpoints().await;
             editor.mark_dirty();
         }
         PendingDebugAction::RefreshWatches => {

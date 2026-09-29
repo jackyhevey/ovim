@@ -1842,3 +1842,35 @@ async fn a_crashing_adapter_is_reported_as_a_crash_and_takes_the_jvm_down() {
     assert!(!d.inner.test.editor.is_debug_active());
     d.inner.stop_lsp().await;
 }
+
+/// OV-00447: the debug function keys work whichever panel has the keyboard
+/// focus, and an exception filter toggled at a stop reaches the adapter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn function_keys_work_from_the_debug_panel_and_the_run_console() {
+    let mut d = stopped_session(stopped_scenario).await;
+    d.inner.test.keys(" df");
+    assert_eq!(d.inner.test.editor.mode(), Mode::DebugPanel);
+    d.inner.test.press_key(ovim_core::KeyCode::F(10));
+    d.inner
+        .until("next", |s| {
+            !dap_requests(&s.root.join("dap"), "next").is_empty()
+        })
+        .await;
+    d.inner.test.press_key(ovim_core::KeyCode::F(11));
+    d.inner
+        .until("stepIn", |s| {
+            !dap_requests(&s.root.join("dap"), "stepIn").is_empty()
+        })
+        .await;
+    d.inner.test.keys("q");
+    d.inner.test.keys(" rf");
+    assert_eq!(d.inner.test.editor.mode(), Mode::RunConsole);
+    d.inner.test.press_key(ovim_core::KeyCode::F(5));
+    d.inner
+        .until("continue", |s| {
+            !dap_requests(&s.root.join("dap"), "continue").is_empty()
+        })
+        .await;
+    d.inner.test.keys("q");
+    d.inner.stop_lsp().await;
+}

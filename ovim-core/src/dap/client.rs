@@ -137,8 +137,7 @@ impl DebugAdapterClient {
                         // EOF: the adapter is gone. Unless we ended it, that
                         // is a crash (a normal end sends `terminated` first).
                         if !reader_killed.load(Ordering::SeqCst) {
-                            let detail =
-                                adapter_exit_detail(&reader_process, &reader_tail).await;
+                            let detail = adapter_exit_detail(&reader_process, &reader_tail).await;
                             let _ = event_tx.send(DapEvent::AdapterExited { detail }).await;
                         }
                         break;

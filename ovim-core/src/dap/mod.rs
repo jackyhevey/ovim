@@ -97,9 +97,6 @@ pub enum PendingDebugAction {
     Evaluate { expression: String },
     /// Fetch variables for an expanded object reference.
     FetchVariables { var_ref: u64 },
-    /// Re-send breakpoints for every file to a live session (no
-    /// `configurationDone`).
-    UpdateBreakpoints,
     /// Re-evaluate the watch expressions in the selected frame.
     RefreshWatches,
     /// Evaluate an expression for the hover popup (`K`), with its children.
@@ -121,6 +118,10 @@ pub struct DapManager {
     /// Stop was requested. Kept apart from `pending_action` (a single slot
     /// that stop/step/fetch events overwrite) so a stop can never be lost.
     stop_requested: bool,
+    /// Breakpoints or exception filters changed and the live session has to
+    /// hear about it. Also its own flag: a session that keeps stopping queues
+    /// a state fetch every tick, which would overwrite a queued sync.
+    breakpoint_sync_requested: bool,
     /// The launch/attach request for the session being started.
     pub launch_request: Option<DapLaunchRequest>,
     /// Debuggee/adapter output not yet copied into the run console.
@@ -156,6 +157,7 @@ impl DapManager {
             event_tx,
             pending_action: None,
             stop_requested: false,
+            breakpoint_sync_requested: false,
             launch_request: None,
             console_output: Vec::new(),
             session_end: None,
@@ -191,6 +193,16 @@ impl DapManager {
         if matches!(self.pending_action, Some(PendingDebugAction::Start { .. })) {
             self.pending_action = None;
         }
+    }
+
+    /// Asks the event loop to re-send breakpoints and exception filters.
+    pub fn request_breakpoint_sync(&mut self) {
+        self.breakpoint_sync_requested = true;
+    }
+
+    /// True once after [`request_breakpoint_sync`](Self::request_breakpoint_sync).
+    pub fn take_breakpoint_sync_request(&mut self) -> bool {
+        std::mem::take(&mut self.breakpoint_sync_requested)
     }
 
     /// True once after [`request_stop`](Self::request_stop).
@@ -564,6 +576,16 @@ mod tests {
         dap.pending_action = Some(PendingDebugAction::FetchState);
         assert!(dap.take_stop_request());
         assert!(!dap.take_stop_request(), "reported once");
+    }
+
+    #[test]
+    fn a_breakpoint_sync_request_survives_the_pending_slot_being_overwritten() {
+        let mut dap = DapManager::new();
+        dap.request_breakpoint_sync();
+        // A session that keeps stopping queues a state fetch every tick.
+        dap.pending_action = Some(PendingDebugAction::FetchState);
+        assert!(dap.take_breakpoint_sync_request());
+        assert!(!dap.take_breakpoint_sync_request(), "reported once");
     }
 
     #[test]

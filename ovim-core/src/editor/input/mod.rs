@@ -45,6 +45,7 @@ mod substitute_mode;
 /// Dashboard mode handler
 mod dashboard_mode;
 
+mod debug_keys;
 mod debug_panel_mode;
 /// LSP Manager mode handler
 mod lsp_manager_mode;

@@ -48,8 +48,7 @@ impl Editor {
         let lines = self.dap_manager.state.toggle_breakpoint(&path, line);
         if self.dap_manager.is_active() {
             // A live session must learn about the change immediately.
-            self.dap_manager.pending_action =
-                Some(crate::dap::PendingDebugAction::UpdateBreakpoints);
+            self.dap_manager.request_breakpoint_sync();
         }
         self.mark_dirty();
         Some(lines)
@@ -458,8 +457,7 @@ impl Editor {
     /// Tells a live session about changed breakpoints.
     fn after_breakpoint_change(&mut self) {
         if self.dap_manager.is_active() {
-            self.dap_manager.pending_action =
-                Some(crate::dap::PendingDebugAction::UpdateBreakpoints);
+            self.dap_manager.request_breakpoint_sync();
         }
         self.mark_dirty();
     }
