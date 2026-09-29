@@ -349,3 +349,68 @@ fn render_hints(frame: &mut Frame, panel: &SearchReplacePanel, area: Rect) {
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::editor::search_replace::SearchReplacePanel;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn screen(panel: &SearchReplacePanel, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| render_search_replace(frame, panel))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn panel_shows_inputs_toggles_and_a_replacement_preview_per_match() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join("A.java"), "new Circle();\nCircle c;\n").unwrap();
+        let mut editor = crate::editor::Editor::default();
+        editor.open_file(root.join("A.java")).unwrap();
+        editor.open_search_replace(Some("Circle".to_string()));
+        editor.run_search_replace_now();
+        let panel = editor.search_replace_panel_mut().unwrap();
+        panel.replace = crate::editor::SingleLineInput::new("Disc");
+        panel.selected = 2;
+        panel.toggle_selected();
+
+        let text = screen(editor.search_replace_panel().unwrap(), 100, 24);
+        assert!(text.contains("Replace in Files"), "{text}");
+        assert!(text.contains("Find      Circle"), "{text}");
+        assert!(text.contains("Replace   Disc"), "{text}");
+        assert!(text.contains("1 of 2 checked in 1 files"), "{text}");
+        assert!(text.contains("A.java"), "{text}");
+        // Inline preview: the old text, then the new text right after it.
+        assert!(text.contains("new CircleDisc();"), "{text}");
+        assert!(text.contains("[x]"), "{text}");
+        assert!(text.contains("[ ]"), "{text}");
+        assert!(text.contains("M-Enter replace"), "{text}");
+    }
+
+    #[test]
+    fn cursor_sits_at_the_end_of_the_focused_input() {
+        let mut panel = SearchReplacePanel::new(std::path::PathBuf::from("."));
+        panel.find = crate::editor::SingleLineInput::new("abc");
+        panel.find.move_end();
+        let area = Rect::new(0, 0, 100, 30);
+        let (x, y) = cursor_position(area, &panel).unwrap();
+        let inner = get_search_replace_area(area);
+        assert_eq!(y, inner.y + 1);
+        assert_eq!(x, inner.x + 1 + LABEL_WIDTH + 3);
+        panel.focus = SearchReplaceField::Results;
+        assert!(cursor_position(area, &panel).is_none());
+    }
+}

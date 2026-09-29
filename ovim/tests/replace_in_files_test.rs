@@ -91,6 +91,25 @@ async fn replace_in_files_edits_open_and_unopened_files_saves_and_undoes_per_buf
     test.command("ReplaceUndo");
     assert_eq!(project.read("src/B.java"), "new Circle();\nnew Circle();\n");
     assert_eq!(project.read("docs/notes.txt"), "Circle notes\n");
+    // The open buffer was already undone with `u`; it is not undone twice.
+    assert!(status(&test).contains("left 1 alone"), "{}", status(&test));
+    assert_eq!(test.buffer_content(), "class Circle { Circle c; }\n");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn replace_undo_never_undoes_edits_made_after_the_replace() {
+    let project = Project::new(&[("a.txt", "foo\nkeep\n")]);
+    let mut test = editor_in(&project, "a.txt");
+    test.command("SearchReplace /foo/bar/");
+    apply(&mut test);
+    test.keys("Gonew<Esc>");
+    test.command("ReplaceUndo");
+    assert!(status(&test).contains("left 1 alone"), "{}", status(&test));
+    assert_eq!(
+        test.buffer_content(),
+        "bar\nkeep\nnew\n",
+        "the later edit survives"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

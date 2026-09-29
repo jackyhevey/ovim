@@ -64,5 +64,5 @@ pub struct UiPanels {
     /// Recently opened files (session order and optional persistence).
     pub recent: Box<super::project_nav::RecentTracker>,
     /// Buffers touched by the last replace in files, for `:ReplaceUndo`.
-    pub last_replace_buffers: Vec<crate::buffer::BufferId>,
+    pub last_replace_buffers: Vec<(crate::buffer::BufferId, u64)>,
 }

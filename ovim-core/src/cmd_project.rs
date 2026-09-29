@@ -156,10 +156,16 @@ fn replace_apply(editor: &mut Editor) -> CommandResult {
 
 fn replace_undo(editor: &mut Editor) -> CommandResult {
     match editor.undo_last_search_replace() {
-        Ok(count) => ok(format!(
-            "Undid the last replace in {count} file{}",
-            if count == 1 { "" } else { "s" }
-        )),
+        Ok((undone, skipped)) => {
+            let mut message = format!(
+                "Undid the last replace in {undone} file{}",
+                if undone == 1 { "" } else { "s" }
+            );
+            if skipped > 0 {
+                message.push_str(&format!("; left {skipped} alone (changed or undone since)"));
+            }
+            ok(message)
+        }
         Err(message) => err(message),
     }
 }

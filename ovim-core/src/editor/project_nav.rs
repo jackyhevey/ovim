@@ -19,7 +19,12 @@ pub struct RecentTracker {
     last: Option<PathBuf>,
     /// Files visited this session, most recent first.
     pub visits: Vec<PathBuf>,
+    /// Cursor of the current file as of the last store write, and when.
+    flushed: Option<((usize, usize), std::time::Instant)>,
 }
+
+/// The remembered cursor of the current file is refreshed at most this often.
+const CURSOR_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Git root of `path` (or its directory when it is not in a repository).
 pub fn project_root_of(path: &Path) -> PathBuf {
@@ -65,6 +70,7 @@ impl Editor {
             return;
         };
         if self.ui_panels.recent.last.as_ref() == Some(&current) {
+            self.flush_recent_cursor(&current);
             return;
         }
         // Remember where the cursor was in the file we are leaving.
@@ -86,7 +92,29 @@ impl Editor {
         visits.retain(|path| path != &current);
         visits.insert(0, current.clone());
         visits.truncate(200);
+        self.ui_panels.recent.flushed = None;
         self.ui_panels.recent.last = Some(current);
+    }
+
+    /// Keeps the stored cursor of the current file fresh, so a session that
+    /// ends (or crashes) without switching files still reopens at the right spot.
+    fn flush_recent_cursor(&mut self, current: &Path) {
+        let Some(store) = self.ui_panels.recent.store.clone() else {
+            return;
+        };
+        let cursor = (
+            self.buffer().cursor().line(),
+            self.buffer().cursor().col().0,
+        );
+        let recent = &mut self.ui_panels.recent;
+        match recent.flushed {
+            Some((flushed, _)) if flushed == cursor => {}
+            Some((_, at)) if at.elapsed() < CURSOR_FLUSH => {}
+            _ => {
+                store.update_cursor(&project_root_of(current), current, cursor);
+                recent.flushed = Some((cursor, std::time::Instant::now()));
+            }
+        }
     }
 
     fn project_root_for_pickers(&self) -> PathBuf {
@@ -352,6 +380,28 @@ mod tests {
             .unwrap();
         assert!(editor.buffer().file_path().unwrap().ends_with("a.txt"));
         assert_eq!(editor.cursor_position().line, 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn the_cursor_of_the_current_file_is_remembered_without_switching_files() {
+        let project = project(&["a.txt", "b.txt"]);
+        {
+            let mut editor = editor_for(&project);
+            editor.load_file(project.root.join("a.txt")).unwrap();
+            editor.track_recent_file();
+            editor
+                .buffer_mut()
+                .cursor_mut()
+                .set_position(2, crate::unicode::GraphemeCol(5));
+            // A later tick, session then ends (or crashes) in a.txt.
+            editor.track_recent_file();
+        }
+        let mut editor = editor_for(&project);
+        editor.load_file(project.root.join("b.txt")).unwrap();
+        editor.open_recent_files_picker();
+        let entry = editor.picker().unwrap().filtered_result(0).unwrap().clone();
+        assert_eq!(entry.display, "a.txt");
+        assert_eq!((entry.line, entry.col), (2, 5));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

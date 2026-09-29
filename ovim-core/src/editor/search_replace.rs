@@ -615,7 +615,7 @@ impl Editor {
             .collect();
 
         let mut report = ReplaceReport::default();
-        let mut touched: Vec<crate::buffer::BufferId> = Vec::new();
+        let mut touched: Vec<(crate::buffer::BufferId, u64)> = Vec::new();
 
         for file in plan {
             let Some(uri) = crate::lsp::uri_from_file_path(&file.path) else {
@@ -665,7 +665,11 @@ impl Editor {
             }
             report.replaced += count;
             report.files += 1;
-            touched.push(self.buffers[index].id());
+            // Remember which undo entry is ours so `:ReplaceUndo` never undoes
+            // something the user did afterwards (or already undid with `u`).
+            if let Some(entry) = self.buffers[index].change_manager().undo_stack.last() {
+                touched.push((self.buffers[index].id(), entry.seq));
+            }
 
             // Save-all semantics, like `| update`. Only files the review
             // itself wrote: a buffer that already held the user's unsaved work
@@ -692,18 +696,32 @@ impl Editor {
     }
 
     /// Undoes the last "replace in files" in every buffer it touched.
-    pub fn undo_last_search_replace(&mut self) -> Result<usize, String> {
-        let ids = std::mem::take(&mut self.ui_panels.last_replace_buffers);
-        if ids.is_empty() {
+    ///
+    /// A buffer is only undone while the replacement is still the newest
+    /// change in it; buffers the user has edited (or undone with `u`) since
+    /// are left alone. Returns `(undone, skipped)` buffer counts.
+    pub fn undo_last_search_replace(&mut self) -> Result<(usize, usize), String> {
+        let entries = std::mem::take(&mut self.ui_panels.last_replace_buffers);
+        if entries.is_empty() {
             return Err("No replace in files to undo".to_string());
         }
-        let mut undone = 0;
-        for id in ids {
+        let (mut undone, mut skipped) = (0, 0);
+        for (id, seq) in entries {
             let Some(index) = self.buffers.iter().position(|b| b.id() == id) else {
+                skipped += 1;
                 continue;
             };
+            let is_top = self.buffers[index]
+                .change_manager()
+                .undo_stack
+                .last()
+                .is_some_and(|entry| entry.seq == seq);
+            if !is_top {
+                skipped += 1;
+                continue;
+            }
             let (outcome, _) = self.buffers[index].undo();
-            if !matches!(outcome, crate::change::UndoOutcome::Nothing) {
+            if outcome.is_done() {
                 undone += 1;
                 if self.buffer_index_is_modified(index) {
                     let _ = self.write_through_workspace_edit_buffer(index);
@@ -716,10 +734,12 @@ impl Editor {
                         .or_default()
                         .mark_modified();
                 }
+            } else {
+                skipped += 1;
             }
         }
         self.request_diagnostics_refresh();
         self.mark_dirty();
-        Ok(undone)
+        Ok((undone, skipped))
     }
 }
