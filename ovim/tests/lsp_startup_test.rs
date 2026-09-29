@@ -400,3 +400,38 @@ async fn restart_attempts_are_bounded_until_lsp_restart() {
         .await;
     session.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn failed_request_shows_the_servers_own_error_message() {
+    let mut session = StartupSession::new();
+    session.initialize_response(
+        json!({"result": {"capabilities": {"textDocumentSync": 1, "renameProvider": true}}}),
+    );
+    session.wait_for_event("textDocument/didOpen").await;
+    std::fs::write(
+        session.dir.path().join("response-textDocument_rename.json"),
+        json!({"error": {"code": -32602, "message": "Cannot rename: contains an unresolved refactoring candidate 'Circle'"}}).to_string(),
+    )
+    .unwrap();
+
+    session.test.editor.request_rename("Ring".to_string());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !session
+            .test
+            .editor
+            .status_message()
+            .contains("Rename request failed")
+        {
+            session.tick().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("rename failure must be reported");
+    let status = session.test.editor.status_message().to_string();
+    assert!(
+        status.contains("Cannot rename: contains an unresolved refactoring candidate 'Circle'"),
+        "server message must reach the user: {status}"
+    );
+    session.stop().await;
+}

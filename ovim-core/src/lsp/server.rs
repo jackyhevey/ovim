@@ -134,6 +134,22 @@ struct PendingRequest {
     method: String,
 }
 
+/// A JSON-RPC error response from the language server. `Display` is the
+/// server's message alone, so it reads naturally in the status line.
+#[derive(Debug, Clone)]
+pub struct LspServerError {
+    pub code: i32,
+    pub message: String,
+}
+
+impl std::fmt::Display for LspServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LspServerError {}
+
 /// Server state for explicit state machine
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -717,12 +733,12 @@ impl LanguageServer {
                                         } else {
                                             // Real LSP error - propagate to caller
                                             // Errors will be shown in status line by the editor
-                                            let error_msg =
-                                                format!("{} (code {})", error.message, error.code);
-                                            // Removed eprintln - leaks into TUI display
-                                            let _ = req
-                                                .sender
-                                                .send(Err(anyhow!("LSP error: {}", error_msg)));
+                                            let _ = req.sender.send(Err(anyhow::Error::new(
+                                                LspServerError {
+                                                    code: error.code,
+                                                    message: error.message.clone(),
+                                                },
+                                            )));
                                         }
                                     } else if let Some(result) = msg.result {
                                         let _ = req.sender.send(Ok(result));
@@ -1330,7 +1346,14 @@ impl LanguageServer {
                     request_id,
                     result_preview
                 );
-                result.context(format!("LSP request '{}' failed", method))
+                // Surface the server's own explanation (e.g. "Cannot rename:
+                // contains an unresolved refactoring candidate 'Circle'").
+                // Every caller shows `err.to_string()`, so the message must
+                // be the error itself, not hidden behind a generic context.
+                result.map_err(|e| match e.downcast::<LspServerError>() {
+                    Ok(server_error) => anyhow::Error::new(server_error),
+                    Err(other) => anyhow!("LSP request '{}' failed: {:#}", method, other),
+                })
             }
             Ok(Err(_)) => {
                 let _elapsed = start_time.elapsed();

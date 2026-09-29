@@ -33,7 +33,7 @@ pub use position::{char_col_to_utf16, utf16_to_char_col};
 
 pub use protocol::{JsonRpcMessage, RequestId};
 pub use recovery::{ServerStatusReport, MAX_AUTO_RESTARTS};
-pub use server::{LanguageServer, LanguageServerHealth};
+pub use server::{LanguageServer, LanguageServerHealth, LspServerError};
 pub use supervisor::{RestartPolicy, TaskSupervisor};
 pub use trigger_chars::fallback_completion_trigger_characters;
 pub(crate) use types::diagnostic_range_is_valid;

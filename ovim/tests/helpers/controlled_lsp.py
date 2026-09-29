@@ -37,4 +37,10 @@ while True:
     elif method == "exit":
         break
     elif "id" in request:
-        respond(request, {"result": None})
+        # A test can script an error or result for one method by writing
+        # response-<method with / replaced by _>.json ({"error": ...} or {"result": ...}).
+        scripted = root / ("response-" + (method or "").replace("/", "_") + ".json")
+        if scripted.exists():
+            respond(request, json.loads(scripted.read_text()))
+        else:
+            respond(request, {"result": None})
