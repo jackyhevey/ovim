@@ -3,8 +3,8 @@
 //! `j`/`k` move the highlighted line, `Ctrl-d`/`Ctrl-u` page, `g`/`G` jump to
 //! the top/bottom (`G` resumes following live output), `Enter` opens the
 //! source location on the line (stack frames, compiler errors), `[`/`]`
-//! switch between runs, `r` reruns, `s` stops, `x` clears, `q`/`Esc` returns
-//! to the buffer.
+//! switch between runs, `r` reruns, `s` stops, `x` clears, `i` types a line for
+//! the program's stdin (`D` ends the input), `q`/`Esc` returns to the buffer.
 
 use crate::{KeyCode, KeyEvent, Modifiers};
 use anyhow::Result;
@@ -56,6 +56,12 @@ pub fn handle_run_console_mode(editor: &mut Editor, key: KeyEvent) -> Result<()>
             editor.launch_stop();
         }
         KeyCode::Char('x') => editor.clear_run_console(),
+        KeyCode::Char('i') => {
+            // Type a line for the program's stdin (`:RunInput`).
+            editor.set_mode(Mode::Command);
+            editor.set_command_line("RunInput ");
+        }
+        KeyCode::Char('D') => editor.run_eof(),
         KeyCode::Char('R') => editor.launch_at_cursor(LaunchMode::Run),
         _ => {}
     }

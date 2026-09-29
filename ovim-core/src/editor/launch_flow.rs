@@ -196,6 +196,10 @@ pub(crate) struct LaunchState {
     pending_pick: Option<PendingPick>,
     debug_port_timeout: Duration,
     pub(crate) code_lens: super::code_lens::CodeLensState,
+    /// A stack frame whose source is not under the workspace, being looked up
+    /// through the language server (`workspace/symbol`): the file and 1-based
+    /// line to open, or a message.
+    pub(crate) frame_lookup: Option<oneshot::Receiver<Result<(PathBuf, usize), String>>>,
     /// `:LspExec` in flight: (command, result).
     pub(crate) server_command:
         Option<oneshot::Receiver<(String, Result<serde_json::Value, String>)>>,
@@ -211,6 +215,7 @@ impl Default for LaunchState {
             pending_pick: None,
             debug_port_timeout: DEBUG_PORT_TIMEOUT,
             code_lens: Default::default(),
+            frame_lookup: None,
             server_command: None,
         }
     }
@@ -257,6 +262,46 @@ impl Editor {
     // ------------------------------------------------------------------
     // Entry points (called from keys and commands; never block)
     // ------------------------------------------------------------------
+
+    /// `:RunInput <text>`: sends a line to the running program's stdin
+    /// (`System.in`). Empty text sends an empty line.
+    pub fn run_input(&mut self, text: &str) {
+        let Some(job) = self.launch.job.as_mut() else {
+            self.set_status_message("No program is running");
+            return;
+        };
+        let run_id = job.run_id;
+        let sent = job
+            .proc
+            .as_ref()
+            .is_some_and(|p| p.accepts_stdin() && p.send_stdin(&format!("{text}\n")));
+        if sent {
+            self.log_console(run_id, LineKind::System, format!("» {text}"));
+        } else {
+            self.set_status_message(
+                "The running program does not take input (only Run, not Debug or tests, feeds stdin)",
+            );
+        }
+    }
+
+    /// `:RunEof`: closes the program's stdin (like Ctrl-D in a terminal).
+    pub fn run_eof(&mut self) {
+        let Some(job) = self.launch.job.as_mut() else {
+            self.set_status_message("No program is running");
+            return;
+        };
+        let run_id = job.run_id;
+        let closed = job.proc.as_mut().is_some_and(|p| {
+            let open = p.accepts_stdin();
+            p.close_stdin();
+            open
+        });
+        if closed {
+            self.log_console(run_id, LineKind::System, "» (end of input)");
+        } else {
+            self.set_status_message("Input is already closed");
+        }
+    }
 
     /// `:LspExec <command> [json args]`: runs a `workspace/executeCommand`
     /// on the language server that owns the current file and reports the
@@ -548,6 +593,17 @@ impl Editor {
                 true
             }
             None => {
+                if let stacktrace::ConsoleLocation::Frame {
+                    class, file, line, ..
+                } = &location
+                {
+                    // Not in the workspace: libraries, other modules, the JDK.
+                    // Ask the language server that indexes them.
+                    if self.lookup_frame_via_lsp(class, file, *line) {
+                        self.set_status_message(format!("Looking up {class}..."));
+                        return true;
+                    }
+                }
                 let what = match &location {
                     stacktrace::ConsoleLocation::Frame { class, file, .. } => {
                         format!("{class} ({file})")
@@ -558,6 +614,53 @@ impl Editor {
                 false
             }
         }
+    }
+
+    /// Starts a `workspace/symbol` lookup for a stack frame's class. Returns
+    /// false when there is no server to ask.
+    fn lookup_frame_via_lsp(&mut self, class: &str, file: &str, line: usize) -> bool {
+        let Some(manager) = self.lsp_manager() else {
+            return false;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return false;
+        }
+        let language_id = if file.ends_with(".kt") || file.ends_with(".kts") {
+            "kotlin"
+        } else {
+            "java"
+        }
+        .to_string();
+        let (class, file) = (class.to_string(), file.to_string());
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = stacktrace::lookup_frame_source(&manager, &language_id, &class, &file)
+                .await
+                .map(|path| (path, line));
+            let _ = tx.send(result);
+        });
+        self.launch.frame_lookup = Some(rx);
+        true
+    }
+
+    fn poll_frame_lookup(&mut self) -> bool {
+        let Some(rx) = self.launch.frame_lookup.as_mut() else {
+            return false;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(oneshot::error::TryRecvError::Empty) => return false,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.launch.frame_lookup = None;
+                return false;
+            }
+        };
+        self.launch.frame_lookup = None;
+        match result {
+            Ok((path, line)) => self.open_location(&path, line, 1),
+            Err(message) => self.set_status_message(message),
+        }
+        true
     }
 
     /// Opens `path` at a 1-based line/column and leaves console focus.
@@ -1084,6 +1187,9 @@ impl Editor {
         phase: RunPhase,
         stage: Stage,
     ) {
+        // Only the program itself reads stdin, not builds or test tasks.
+        let interactive =
+            stage == Stage::Running && job.plan.as_ref().is_some_and(|p| p.kind == PlanKind::Main);
         self.log_console(
             job.run_id,
             LineKind::System,
@@ -1093,7 +1199,12 @@ impl Editor {
             run.command = spec.display();
             run.cwd = spec.cwd.clone();
         }
-        match ProcessHandle::spawn(spec) {
+        let spawned = if interactive {
+            ProcessHandle::spawn_interactive(spec)
+        } else {
+            ProcessHandle::spawn(spec)
+        };
+        match spawned {
             Ok(proc) => {
                 job.proc = Some(proc);
                 job.proc_exit = None;
@@ -1247,6 +1358,7 @@ impl Editor {
     pub fn poll_launch(&mut self) -> bool {
         let mut changed = self.ingest_debug_output();
         changed |= self.poll_server_command();
+        changed |= self.poll_frame_lookup();
         let Some(mut job) = self.launch.job.take() else {
             changed |= self.acknowledge_orphan_session_end();
             self.start_queued_launch();

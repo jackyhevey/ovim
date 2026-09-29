@@ -712,6 +712,14 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
                 Err(_) => err("Usage: RunJump <line index>"),
             }
         }
+        "RunEof" => {
+            editor.run_eof();
+            crate::command_result::ok_silent()
+        }
+        cmd if cmd == "RunInput" || cmd.starts_with("RunInput ") => {
+            editor.run_input(cmd.strip_prefix("RunInput ").unwrap_or(""));
+            crate::command_result::ok_silent()
+        }
         "RunClear" => {
             editor.clear_run_console();
             crate::command_result::ok_silent()

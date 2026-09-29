@@ -1561,3 +1561,36 @@ async fn debug_panel_expands_variables_and_manages_watches_breakpoints_and_excep
     d.inner.test.keys(" ds");
     d.inner.stop_lsp().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_input_feeds_the_programs_stdin_and_eof_ends_it() {
+    let _jdk = JDK_LOCK.lock().await;
+    let mut s = Session::new(&resolve_commands()).await;
+    s.fake_java("echo 'name?'\nread name\necho \"hello:$name\"\nwhile read more; do echo \"more:$more\"; done\necho done");
+    s.script_resolve(s.main_plan(None));
+    s.test.keys(" rr");
+    s.until("the prompt", |s| s.console_text().contains("name?"))
+        .await;
+    s.test.command("RunInput Ann");
+    s.until("the greeting", |s| s.console_text().contains("hello:Ann"))
+        .await;
+    assert!(s.console_text().contains("» Ann"), "the input is echoed");
+    s.test.command("RunInput second line");
+    s.until("the echo", |s| {
+        s.console_text().contains("more:second line")
+    })
+    .await;
+    s.test.command("RunEof");
+    s.until("the program to finish", |s| s.run_finished()).await;
+    assert!(s.console_text().contains("done"));
+    assert_eq!(s.outcome(), RunOutcome::Succeeded);
+
+    // After the run there is nothing to type into.
+    s.test.command("RunInput late");
+    assert!(s
+        .test
+        .editor
+        .status_message()
+        .contains("No program is running"));
+    s.stop_lsp().await;
+}
