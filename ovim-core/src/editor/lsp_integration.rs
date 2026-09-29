@@ -3307,3 +3307,48 @@ mod tests {
         );
     }
 }
+
+    /// OV-00474: accepting a method completion whose snippet leaves the cursor
+    /// inside `name(|)` brings the parameter popup up at once; a completion
+    /// that ends after its `)` does not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn accepting_a_method_snippet_requests_signature_help() {
+        let mut editor = Editor::with_content("list.ad");
+        editor.set_file_path("/tmp/a.java".to_string());
+        editor.set_mode(crate::mode::Mode::Insert);
+        editor
+            .buffer_mut()
+            .set_cursor_char_col(0, crate::unicode::CharCol(7));
+        let method = CompletionItem {
+            label: "add(E e)".to_string(),
+            insert_text: Some("add(${1:e})".to_string()),
+            insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
+            ..Default::default()
+        };
+        editor
+            .completion_menu_mut()
+            .show(vec![method], 5, "ad".to_string());
+        editor.accept_completion();
+        assert_eq!(editor.buffer().rope().to_string(), "list.add(e)\n");
+        assert!(editor.lsp.intents.signature_help, "cursor is inside add(...)");
+
+        let mut editor = Editor::with_content("list.si");
+        editor.set_file_path("/tmp/a.java".to_string());
+        editor.set_mode(crate::mode::Mode::Insert);
+        editor
+            .buffer_mut()
+            .set_cursor_char_col(0, crate::unicode::CharCol(7));
+        let finished = CompletionItem {
+            label: "size()".to_string(),
+            insert_text: Some("size()".to_string()),
+            ..Default::default()
+        };
+        editor
+            .completion_menu_mut()
+            .show(vec![finished], 5, "si".to_string());
+        editor.accept_completion();
+        assert!(
+            !editor.lsp.intents.signature_help,
+            "the cursor is after `size()`, not inside a call"
+        );
+    }

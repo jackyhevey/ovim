@@ -276,6 +276,10 @@ impl Editor {
     /// Applies `edits` (pre-edit char offsets, any order) as a single undo
     /// step and puts the cursor at `cursor` (a post-edit char offset). The
     /// insert-mode recording is closed first and restarted afterwards so the
+
+        // A method completion leaves the cursor inside `name(|)`: show its
+        // parameters right away.
+        self.request_signature_help_if_in_call();
     /// edit is its own `Recorded` entry (see the note in
     /// `accept_completion_item`).
     pub(super) fn apply_offset_edits_as_one_undo(
