@@ -510,18 +510,6 @@ pub enum LspInstallConsent {
     No,
 }
 
-/// A background `:make` job waiting for results.
-pub struct PendingMake {
-    pub receiver: std::sync::mpsc::Receiver<MakeResult>,
-    pub command: String,
-}
-
-/// Result from a `:make` background job.
-pub struct MakeResult {
-    pub output: String,
-    pub success: bool,
-}
-
 /// Cached picker layout rects for mouse hit-testing
 #[derive(Debug, Clone)]
 pub struct PickerLayout {

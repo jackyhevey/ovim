@@ -2,18 +2,22 @@
 //! end to end: streaming, finishing, the quickfix list they leave behind,
 //! and what happens to the process when a run is superseded or stopped.
 //!
-//! These pin the behaviour of the old separate runners so the move onto the
-//! launch pipeline's process handle changes only what is intended (see
-//! OV-00480).
+//! Both go through the launch pipeline's process handle (OV-00480). The
+//! tests were written against the old separate runners first; the places
+//! where the behaviour changed on purpose are marked "was:".
 
-use crate::editor::{Editor, QuickfixEntryType, TestRunStatus};
+use crate::editor::{Editor, LaunchRequest, QuickfixEntryType, TestRunStatus};
+use crate::launch::plan::PlanKind;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Advances every background poller once.
 fn poll_all(editor: &mut Editor) {
-    editor.poll_pending_make();
-    editor.poll_pending_test();
+    editor.poll_launch();
+}
+
+fn run_test(editor: &mut Editor, label: &'static str, command: &str, cwd: PathBuf) {
+    editor.begin_request(LaunchRequest::shell(PlanKind::Test, label, command, cwd));
 }
 
 /// Polls until `done` holds (fails after 15 s).
@@ -82,7 +86,7 @@ fn scratch() -> (tempfile::TempDir, PathBuf) {
 async fn a_test_run_streams_both_pipes_and_reports_success() {
     let (_dir, cwd) = scratch();
     let mut editor = Editor::with_content("");
-    editor.spawn_test_job("suite", "echo to-out; echo to-err >&2", cwd);
+    run_test(&mut editor, "suite", "echo to-out; echo to-err >&2", cwd);
     drive(&mut editor, "the run to finish", test_finished).await;
     let run = editor.test_panel().latest().unwrap();
     assert_eq!(run.status, TestRunStatus::Passed);
@@ -97,7 +101,8 @@ async fn a_failing_test_run_fills_quickfix_silently_with_paths_resolved_against_
     let (_dir, cwd) = scratch();
     let mut editor = Editor::with_content("");
     let before = editor.buffer().file_path().map(str::to_string);
-    editor.spawn_test_job(
+    run_test(
+        &mut editor,
         "file",
         "printf 'E   assert 1 == 2\\ntests/test_x.py:12: in test_x\\n'; exit 1",
         cwd.clone(),
@@ -135,46 +140,47 @@ async fn make_lists_diagnostics_selects_the_first_entry_and_opens_the_window() {
     assert_eq!(list.entries().len(), 2);
     assert!(list.title().starts_with(":make "), "{}", list.title());
     assert!(editor.is_quickfix_window_open());
-    // Old behaviour: the jump goes to entry 0 even when it is a warning.
+    // Was: the jump went to entry 0 even when that is a warning. Now it is
+    // the first error, like a failed build in the launch pipeline.
     assert_eq!(list.entries()[0].entry_type, QuickfixEntryType::Warning);
+    assert_eq!(list.selected_index(), 1);
     assert_eq!(
         editor.buffer().file_path().map(PathBuf::from).as_deref(),
-        Some(warning.as_path())
+        Some(error.as_path())
     );
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn make_leaves_paths_as_the_tool_printed_them() {
+async fn make_resolves_relative_paths_against_the_directory_it_ran_in() {
     let mut editor = Editor::with_content("");
     make(&mut editor, "printf 'rel/x.rs:3:1: error: boom\\n'; exit 1");
     drive(&mut editor, "make to finish", make_finished).await;
-    // Old behaviour: no base directory, the relative name is kept as is.
+    // Was: no base directory, the relative name was kept as printed.
+    let cwd = std::env::current_dir().unwrap();
     assert_eq!(
         editor.quickfix_list().entries()[0].filename,
-        Some(PathBuf::from("rel/x.rs"))
+        Some(cwd.join("rel/x.rs"))
     );
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn superseding_a_test_run_leaves_the_old_process_running() {
+async fn superseding_a_test_run_kills_the_old_process() {
     let (_dir, cwd) = scratch();
     let pid_file = cwd.join("pid");
     let mut editor = Editor::with_content("");
-    editor.spawn_test_job("suite", &sleeper(&pid_file), cwd.clone());
+    run_test(&mut editor, "suite", &sleeper(&pid_file), cwd.clone());
     let pid = read_pid(&pid_file).await;
-    editor.spawn_test_job("suite", "true", cwd);
+    run_test(&mut editor, "suite", "true", cwd);
     drive(&mut editor, "the second run to finish", test_finished).await;
-    // Old behaviour (the bug OV-00480 fixes): nothing ever signals the first
-    // run's process group.
-    assert!(alive(pid));
-    // SAFETY: cleaning up the process this test started.
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    // Was: nothing ever signalled the first run's process group.
+    assert!(!alive(pid));
+    assert_eq!(editor.test_panel().runs[0].status, TestRunStatus::Cancelled);
 }
 
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
-async fn a_second_make_leaves_the_first_process_running() {
+async fn a_second_make_kills_the_first_process() {
     let (_dir, cwd) = scratch();
     let pid_file = cwd.join("pid");
     let mut editor = Editor::with_content("");
@@ -182,7 +188,54 @@ async fn a_second_make_leaves_the_first_process_running() {
     let pid = read_pid(&pid_file).await;
     make(&mut editor, "true");
     drive(&mut editor, "the second make to finish", make_finished).await;
-    assert!(alive(pid));
-    // SAFETY: cleaning up the process this test started.
-    unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert!(!alive(pid));
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_kills_a_running_test_and_marks_it_cancelled() {
+    let (_dir, cwd) = scratch();
+    let pid_file = cwd.join("pid");
+    let mut editor = Editor::with_content("");
+    run_test(&mut editor, "suite", &sleeper(&pid_file), cwd);
+    let pid = read_pid(&pid_file).await;
+    assert!(editor.launch_stop());
+    drive(&mut editor, "the run to stop", test_finished).await;
+    assert_eq!(latest_status(&editor), Some(TestRunStatus::Cancelled));
+    assert!(!alive(pid));
+    assert!(!editor.is_launch_active());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_kills_a_running_make() {
+    let (_dir, cwd) = scratch();
+    let pid_file = cwd.join("pid");
+    let mut editor = Editor::with_content("");
+    make(&mut editor, &sleeper(&pid_file));
+    let pid = read_pid(&pid_file).await;
+    assert!(editor.launch_stop());
+    drive(&mut editor, "make to stop", |e| !e.is_launch_active()).await;
+    assert!(!alive(pid));
+    // A stopped make reports nothing.
+    assert!(editor.last_make_output().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_test_run_appears_in_the_run_console_and_rerun_replays_it() {
+    let (_dir, cwd) = scratch();
+    let mut editor = Editor::with_content("");
+    run_test(&mut editor, "nearest", "echo hello", cwd.clone());
+    drive(&mut editor, "the run to finish", test_finished).await;
+    let console = editor.run_console().viewed().unwrap();
+    assert_eq!(console.command, "echo hello");
+    assert!(console.lines.iter().any(|l| l.text == "hello"));
+    let first = editor.test_panel().runs.len();
+    editor.launch_last();
+    drive(&mut editor, "the rerun to start", |e| {
+        e.test_panel().runs.len() > first
+    })
+    .await;
+    drive(&mut editor, "the rerun to finish", test_finished).await;
+    assert_eq!(latest_status(&editor), Some(TestRunStatus::Passed));
 }

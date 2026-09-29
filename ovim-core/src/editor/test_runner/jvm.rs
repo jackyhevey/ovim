@@ -377,6 +377,7 @@ pub fn local_test_plan(
             class_name: selection.class_name,
             method_name: selection.method_name,
             reports_dir: Some(reports_dir),
+            shell: None,
         }),
         attach: None,
         warnings: Vec::new(),

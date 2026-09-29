@@ -213,53 +213,6 @@ impl Editor {
         }
     }
 
-    /// Sets a pending `:make` background job.
-    pub fn set_pending_make(&mut self, pending: super::PendingMake) {
-        self.build.pending_make = Some(pending);
-    }
-
-    /// Polls for a completed `:make` job. Returns true if results were applied.
-    pub fn poll_pending_make(&mut self) -> bool {
-        let pending = match self.build.pending_make.take() {
-            Some(p) => p,
-            None => return false,
-        };
-
-        match pending.receiver.try_recv() {
-            Ok(result) => {
-                // Store raw output for :TestOutput / :MakeOutput
-                self.build.last_make_output = Some(result.output.clone());
-
-                let entries = crate::commands::parse_compiler_output(&result.output);
-                let entry_count = entries.len();
-                let title = format!(":make {}", pending.command);
-                self.set_quickfix_list(entries, title);
-
-                if entry_count > 0 {
-                    self.ui_panels.quickfix_list.first();
-                    self.jump_to_quickfix_entry();
-                    self.open_quickfix_window();
-                    self.set_status_message(format!("{} error(s)/warning(s)", entry_count));
-                } else if result.success {
-                    self.close_quickfix_window();
-                    self.set_status_message("Build succeeded — no errors".to_string());
-                } else {
-                    self.set_status_message("Build failed (no parseable errors)".to_string());
-                }
-                true
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // Still running — put it back
-                self.build.pending_make = Some(pending);
-                false
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.set_status_message("Make job failed (thread panicked)".to_string());
-                true
-            }
-        }
-    }
-
     /// Recompute signs when pullbase changes, invalidating older background results.
     pub fn refresh_pullbase_gutters(&mut self) {
         self.git_refresh_generation = self.git_refresh_generation.wrapping_add(1);

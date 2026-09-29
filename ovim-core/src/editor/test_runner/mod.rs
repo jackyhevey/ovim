@@ -8,7 +8,8 @@
 //! - `<Space>tt` / `:TestPanel`   — toggle the right-side test panel
 //! - `<Space>to` / `:TestOutput`  — raw output in a scratch buffer
 //!
-//! Commands run as background jobs in the file's own project root (nearest
+//! Commands run through the launch pipeline (`launch_flow.rs`: process group,
+//! stop with `:LaunchStop`, a new run replaces the current one) in the file's own project root (nearest
 //! `Cargo.toml` / `package.json` / `go.mod` / pytest marker — resolved per
 //! file, so monorepos work without configuring anything). Output streams
 //! live into the right-side test panel (`<Space>tt` toggles it; see
@@ -34,22 +35,20 @@ pub use runners::TestScope;
 use runners::{build_test_command, TestContext, TestInvocation};
 
 use crate::editor::Editor;
-use crate::launch::plan::LaunchMode;
+use crate::launch::plan::{LaunchMode, PlanKind};
 use crate::syntax::Language;
 use std::path::{Path, PathBuf};
 
 /// Remembered state of the last test run, for `:TestLast` / `:TestVisit`.
 #[derive(Debug, Clone)]
 pub struct LastTest {
-    pub command: String,
-    pub cwd: PathBuf,
     /// Absolute path of the file the test was run from.
     pub file: String,
     /// 0-indexed cursor line at run time.
     pub line: usize,
-    /// JVM tests run through the launch pipeline; re-running replays this
-    /// request instead of the shell `command`.
-    pub request: Option<crate::editor::LaunchRequest>,
+    /// What `:TestLast` replays: every test run goes through the launch
+    /// pipeline.
+    pub request: crate::editor::LaunchRequest,
 }
 
 impl Editor {
@@ -71,11 +70,7 @@ impl Editor {
     /// `<Space>tl` - Re-run the last test command.
     pub fn run_test_last(&mut self) {
         match self.build.last_test.clone() {
-            Some(LastTest {
-                request: Some(request),
-                ..
-            }) => self.begin_request(request),
-            Some(last) => self.spawn_test_job("re-run", &last.command, last.cwd),
+            Some(last) => self.begin_request(last.request),
             None => self.set_status_message("No previous test command".to_string()),
         }
     }
@@ -164,19 +159,10 @@ impl Editor {
 
         match build_test_command(scope, &ctx) {
             Ok(TestInvocation { command, cwd }) => {
-                self.build.last_test = Some(LastTest {
-                    command: command.clone(),
-                    cwd: cwd.clone(),
-                    file: abs_file.to_string_lossy().to_string(),
-                    line: cursor_line,
-                    request: None,
-                });
-                let label = match scope {
-                    TestScope::Nearest => "nearest",
-                    TestScope::File => "file",
-                    TestScope::Suite => "suite",
-                };
-                self.spawn_test_job(label, &command, cwd);
+                let label = scope_label(scope);
+                let request =
+                    crate::editor::LaunchRequest::shell(PlanKind::Test, label, &command, cwd);
+                self.remember_and_begin(&abs_file, cursor_line, request);
             }
             Err(msg) => self.set_status_message(msg),
         }
@@ -250,95 +236,30 @@ impl Editor {
             source: request_source,
             adapter: None,
         };
-        let label = match scope {
-            TestScope::Nearest => "nearest",
-            TestScope::File => "file",
-            TestScope::Suite => "suite",
-        };
+        self.remember_and_begin(&file, cursor_line, request);
+    }
+
+    /// Records `request` for `:TestLast` / `:TestVisit` and starts it.
+    fn remember_and_begin(
+        &mut self,
+        file: &Path,
+        cursor_line: usize,
+        request: crate::editor::LaunchRequest,
+    ) {
         self.build.last_test = Some(LastTest {
-            command: format!("{} tests ({label})", mode.verb().to_lowercase()),
-            cwd: file.parent().map(Path::to_path_buf).unwrap_or_default(),
             file: file.to_string_lossy().to_string(),
             line: cursor_line,
-            request: Some(request.clone()),
+            request: request.clone(),
         });
         self.begin_request(request);
     }
+}
 
-    /// Runs a test command in the background, streaming its output into the
-    /// test panel line by line (stdout and stderr interleaved as they
-    /// arrive). Opens the panel and supersedes any run still in flight.
-    fn spawn_test_job(&mut self, scope_label: &'static str, cmd: &str, cwd: PathBuf) {
-        use crate::editor::test_panel::{PendingTest, TestEvent};
-        use std::io::{BufRead, BufReader};
-        use std::process::{Command, Stdio};
-
-        let (tx, rx) = std::sync::mpsc::channel();
-        let cmd_owned = cmd.to_string();
-        let cwd_for_spawn = cwd.clone();
-
-        std::thread::spawn(move || {
-            let mut child = match Command::new("sh")
-                .arg("-c")
-                .arg(&cmd_owned)
-                .current_dir(&cwd_for_spawn)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-            {
-                Ok(child) => child,
-                Err(e) => {
-                    let _ = tx.send(TestEvent::Line(format!(
-                        "Failed to run '{}': {}",
-                        cmd_owned, e
-                    )));
-                    let _ = tx.send(TestEvent::Finished { success: false });
-                    return;
-                }
-            };
-
-            let stderr_thread = child.stderr.take().map(|stderr| {
-                let tx = tx.clone();
-                std::thread::spawn(move || {
-                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                        if tx.send(TestEvent::Line(line)).is_err() {
-                            break;
-                        }
-                    }
-                })
-            });
-            if let Some(stdout) = child.stdout.take() {
-                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    if tx.send(TestEvent::Line(line)).is_err() {
-                        break;
-                    }
-                }
-            }
-            if let Some(handle) = stderr_thread {
-                let _ = handle.join();
-            }
-            let success = child.wait().map(|s| s.success()).unwrap_or(false);
-            let _ = tx.send(TestEvent::Finished { success });
-        });
-
-        let dir_name = cwd
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| cwd.to_string_lossy().to_string());
-        self.build
-            .test_panel
-            .start_run(scope_label, cmd.to_string(), cwd.clone());
-        self.build.pending_test = Some(PendingTest { receiver: rx });
-
-        // Show where the command runs when it isn't the process cwd — in a
-        // monorepo "Running: cargo test" alone would be ambiguous.
-        let here = std::env::current_dir().ok();
-        if here.as_deref() != Some(cwd.as_path()) {
-            self.set_status_message(format!("Running: {} (in {})", cmd, dir_name));
-        } else {
-            self.set_status_message(format!("Running: {}", cmd));
-        }
+fn scope_label(scope: TestScope) -> &'static str {
+    match scope {
+        TestScope::Nearest => "nearest",
+        TestScope::File => "file",
+        TestScope::Suite => "suite",
     }
 }
 

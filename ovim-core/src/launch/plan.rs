@@ -104,6 +104,20 @@ pub struct TaskPlan {
     pub method_name: Option<String>,
     /// Directory with JUnit XML results, parsed after the run.
     pub reports_dir: Option<PathBuf>,
+    /// Set when the task is a command line run through the shell instead of
+    /// a build-tool invocation (see [`LaunchPlan::shell`]).
+    pub shell: Option<ShellRun>,
+}
+
+/// A command line run through the platform shell: non-JVM test runs
+/// (`<Space>t*`, plan kind [`PlanKind::Test`], results parsed from the output
+/// into the test panel) and `:make` (plan kind [`PlanKind::Task`],
+/// diagnostics parsed from the output into the quickfix list).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellRun {
+    pub command: String,
+    /// "nearest" / "file" / "suite" / "re-run" for tests, "make" for `:make`.
+    pub label: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +145,43 @@ pub struct LaunchPlan {
 }
 
 impl LaunchPlan {
+    /// A plan that runs `command` in `cwd` through the platform shell.
+    pub fn shell(kind: PlanKind, label: &'static str, command: &str, cwd: PathBuf) -> Self {
+        let argv: &[&str] = if cfg!(windows) {
+            &["cmd", "/C"]
+        } else {
+            &["sh", "-c"]
+        };
+        Self {
+            name: command.to_string(),
+            kind,
+            language: None,
+            project_root: cwd.clone(),
+            module_dir: None,
+            build_tool: "shell".to_string(),
+            build: None,
+            launch: None,
+            task: Some(TaskPlan {
+                argv: argv
+                    .iter()
+                    .map(|a| a.to_string())
+                    .chain([command.to_string()])
+                    .collect(),
+                debug_argv: None,
+                cwd,
+                class_name: None,
+                method_name: None,
+                reports_dir: None,
+                shell: Some(ShellRun {
+                    command: command.to_string(),
+                    label,
+                }),
+            }),
+            attach: None,
+            warnings: Vec::new(),
+        }
+    }
+
     /// Directories that may contain the sources behind stack-trace frames.
     pub fn source_roots(&self) -> Vec<PathBuf> {
         let mut roots = Vec::new();
@@ -380,6 +431,7 @@ pub fn plan_from_resolved(value: &Value) -> Result<Option<LaunchPlan>, String> {
                 class_name: test.class_name,
                 method_name: test.method_name,
                 reports_dir: test.reports_dir.map(PathBuf::from),
+                shell: None,
             });
         }
         _ => {
@@ -478,6 +530,7 @@ pub fn plan_from_config(config: &DebugRunConfig, default_root: &Path) -> LaunchP
                     class_name: None,
                     method_name: None,
                     reports_dir: None,
+                    shell: None,
                 }),
                 ..base
             }
