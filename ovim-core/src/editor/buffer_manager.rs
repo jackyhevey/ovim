@@ -502,8 +502,11 @@ impl Editor {
             let cursor_before =
                 crate::change::CursorPos::new(buffer.cursor().line(), buffer.cursor().col());
 
-            let (all_applied, recorded_edits) =
-                buffer.record(|buf| Self::apply_text_edits_to_buffer(buf, &edits));
+            let (all_applied, recorded_edits) = buffer.record(|buf| {
+                let applied = Self::apply_text_edits_to_buffer(buf, &edits);
+                buf.clamp_cursor_to_content();
+                applied
+            });
 
             let cursor_after =
                 crate::change::CursorPos::new(buffer.cursor().line(), buffer.cursor().col());

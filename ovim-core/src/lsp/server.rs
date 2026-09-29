@@ -991,6 +991,19 @@ impl LanguageServer {
             workspace: Some(lsp_types::WorkspaceClientCapabilities {
                 apply_edit: Some(true),
                 configuration: Some(true),
+                // `apply_workspace_edit` handles versioned documentChanges and
+                // Create/Rename/Delete resource operations (including buffers
+                // open on the affected files).
+                workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
+                    document_changes: Some(true),
+                    resource_operations: Some(vec![
+                        lsp_types::ResourceOperationKind::Create,
+                        lsp_types::ResourceOperationKind::Rename,
+                        lsp_types::ResourceOperationKind::Delete,
+                    ]),
+                    normalizes_line_endings: Some(true),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
 
