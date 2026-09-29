@@ -232,6 +232,7 @@ export const mockSnapshot: GuiSnapshot = {
     testPanel: undefined,
     problems: undefined,
     lspManager: undefined,
+    searchReplace: undefined,
     debug: undefined,
     runConsole: undefined,
     theme,

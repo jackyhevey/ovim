@@ -1,0 +1,258 @@
+//! Project-level ex commands: replace in files, `:grep`, `:update`.
+//!
+//! Kept out of `commands.rs` so that file does not keep growing. `try_handle`
+//! returns `None` for commands it does not own.
+
+use crate::command_result::{err, ok, CommandResult};
+use crate::editor::{Editor, QuickfixEntry, QuickfixEntryType};
+use crate::project_search::{self, SearchOptions};
+use std::sync::atomic::AtomicBool;
+
+pub fn try_handle(editor: &mut Editor, command: &str) -> Option<CommandResult> {
+    let (name, args) = match command.split_once(char::is_whitespace) {
+        Some((name, args)) => (name, args.trim()),
+        None => (command, ""),
+    };
+    match name {
+        "SearchReplace" | "Sr" | "ReplaceInFiles" => Some(search_replace(editor, args)),
+        "ReplaceApply" => Some(replace_apply(editor)),
+        "ReplaceUndo" => Some(replace_undo(editor)),
+        "update" | "up" => Some(update(editor)),
+        "grep" | "gr" | "vimgrep" | "vim" => Some(grep(editor, args)),
+        _ => None,
+    }
+}
+
+/// `:update` — write the buffer only when it has unsaved changes.
+fn update(editor: &mut Editor) -> CommandResult {
+    if !editor.current_buffer_needs_write() {
+        return crate::command_result::ok_silent();
+    }
+    crate::commands::execute_command(editor, "w")
+}
+
+/// Splits `/find/replace/flags rest` on an unescaped delimiter.
+///
+/// Returns `(find, replace, flags, rest)`. `\<delim>` yields a literal
+/// delimiter; every other backslash sequence is kept for the regex engine.
+fn parse_substitution(args: &str) -> Option<(String, String, String, String)> {
+    let mut chars = args.chars();
+    let delimiter = chars.next()?;
+    if delimiter.is_alphanumeric() || delimiter.is_whitespace() || delimiter == '\\' {
+        return None;
+    }
+    let mut parts: Vec<String> = vec![String::new()];
+    let mut rest = String::new();
+    let mut escaped = false;
+    let mut delimiters = 0;
+    let mut in_tail = false;
+    for c in chars {
+        if in_tail {
+            rest.push(c);
+            continue;
+        }
+        let current = parts.last_mut()?;
+        if escaped {
+            if c != delimiter {
+                current.push('\\');
+            }
+            current.push(c);
+            escaped = false;
+        } else if c == '\\' {
+            escaped = true;
+        } else if c == delimiter && delimiters < 2 {
+            delimiters += 1;
+            parts.push(String::new());
+        } else if delimiters >= 2 && c.is_whitespace() {
+            in_tail = true;
+        } else {
+            current.push(c);
+        }
+    }
+    if delimiters < 1 {
+        return None;
+    }
+    let mut parts = parts.into_iter();
+    let find = parts.next().unwrap_or_default();
+    let replace = parts.next().unwrap_or_default();
+    let flags = parts.next().unwrap_or_default();
+    Some((find, replace, flags, rest.trim().to_string()))
+}
+
+/// `:SearchReplace [/find/replace/flags [globs]]`
+///
+/// Flags: `c` case sensitive, `w` whole word, `r` regular expression. Without
+/// arguments the last review (or an empty one) opens. With arguments the
+/// search runs immediately so the review is populated when the command
+/// returns.
+fn search_replace(editor: &mut Editor, args: &str) -> CommandResult {
+    if args.is_empty() {
+        editor.open_search_replace(None);
+        return ok("Replace in files");
+    }
+    let Some((find, replace, flags, globs)) = parse_substitution(args) else {
+        // Bare text: use it as the find string.
+        editor.open_search_replace(Some(args.to_string()));
+        return ok("Replace in files");
+    };
+    editor.open_search_replace(None);
+    if let Some(panel) = editor.search_replace_panel_mut() {
+        panel.find = crate::editor::SingleLineInput::new(find);
+        panel.find.move_end();
+        panel.replace = crate::editor::SingleLineInput::new(replace);
+        panel.replace.move_end();
+        panel.files = crate::editor::SingleLineInput::new(globs);
+        panel.files.move_end();
+        panel.case_sensitive = flags.contains('c');
+        panel.whole_word = flags.contains('w');
+        panel.regex = flags.contains('r');
+        panel.focus = crate::editor::search_replace::SearchReplaceField::Results;
+    }
+    editor.run_search_replace_now();
+    match editor.search_replace_panel() {
+        Some(panel) => match &panel.error {
+            Some(error) => err(format!("Search failed: {error}")),
+            None => ok(format!(
+                "{} matches in {} files; Alt-Enter or :ReplaceApply to replace",
+                panel.total_matches(),
+                panel.results.len()
+            )),
+        },
+        None => ok("Replace in files"),
+    }
+}
+
+fn replace_apply(editor: &mut Editor) -> CommandResult {
+    match editor.apply_search_replace() {
+        Ok(report) => {
+            editor.discard_search_replace();
+            ok(report.summary())
+        }
+        Err(message) => err(message),
+    }
+}
+
+fn replace_undo(editor: &mut Editor) -> CommandResult {
+    match editor.undo_last_search_replace() {
+        Ok(count) => ok(format!(
+            "Undid the last replace in {count} file{}",
+            if count == 1 { "" } else { "s" }
+        )),
+        Err(message) => err(message),
+    }
+}
+
+/// `:grep pattern [-- globs]` — fill the quickfix list with matching lines
+/// (regex, smart case, respects .gitignore). Pair with `:cdo` / `:cfdo`.
+fn grep(editor: &mut Editor, args: &str) -> CommandResult {
+    if args.is_empty() {
+        return err("E471: Argument required");
+    }
+    let (pattern, globs) = match args.split_once(" -- ") {
+        Some((pattern, globs)) => (pattern.trim(), globs.trim()),
+        None => (args, ""),
+    };
+    // Accept `:vimgrep /pat/ glob` style as well.
+    let (pattern, globs) = match parse_substitution(pattern) {
+        Some((find, _, _, rest)) if pattern.starts_with('/') && pattern.ends_with('/') => (
+            find,
+            if globs.is_empty() {
+                rest
+            } else {
+                globs.to_string()
+            },
+        ),
+        _ => (pattern.to_string(), globs.to_string()),
+    };
+    let mut options = SearchOptions {
+        pattern: pattern.clone(),
+        regex: true,
+        case_sensitive: pattern.chars().any(|c| c.is_uppercase()),
+        whole_word: false,
+        globs,
+    };
+    if options.build_regex().is_err() {
+        options.regex = false;
+    }
+    let root = editor.picker_dirs().0;
+    let overlays = editor.open_buffer_overlays();
+    let outcome =
+        match project_search::search_project(&root, &options, &overlays, &AtomicBool::new(false)) {
+            Ok(outcome) => outcome,
+            Err(message) => return err(format!("E486: {message}")),
+        };
+    let entries: Vec<QuickfixEntry> = outcome
+        .files
+        .iter()
+        .flat_map(|file| {
+            file.matches.iter().map(move |found| {
+                QuickfixEntry::new(
+                    Some(file.path.clone()),
+                    found.line + 1,
+                    found.start_col + 1,
+                    QuickfixEntryType::Info,
+                    found.line_text.trim().to_string(),
+                )
+            })
+        })
+        .collect();
+    if entries.is_empty() {
+        return err(format!("E486: Pattern not found: {pattern}"));
+    }
+    let count = entries.len();
+    editor.set_quickfix_list(entries, format!(":grep {pattern}"));
+    editor.open_quickfix_window();
+    if let Some(entry) = editor.quickfix_list().current_entry().cloned() {
+        let _ = crate::commands::jump_to_quickfix_entry(editor, &entry);
+    }
+    ok(format!(
+        "{count} match{} for {pattern}{}",
+        if count == 1 { "" } else { "es" },
+        if outcome.truncated {
+            " (truncated)"
+        } else {
+            ""
+        }
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_substitution;
+
+    #[test]
+    fn parses_find_replace_flags_and_globs() {
+        let parsed = parse_substitution("/foo/bar/cw *.java, !build").unwrap();
+        assert_eq!(
+            parsed,
+            (
+                "foo".to_string(),
+                "bar".to_string(),
+                "cw".to_string(),
+                "*.java, !build".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn escaped_delimiters_are_literal_and_other_escapes_kept() {
+        let parsed = parse_substitution(r"/a\/b\d/x\/y/r").unwrap();
+        assert_eq!(parsed.0, r"a/b\d");
+        assert_eq!(parsed.1, "x/y");
+        assert_eq!(parsed.2, "r");
+    }
+
+    #[test]
+    fn missing_trailing_delimiter_means_empty_replacement_flags() {
+        let parsed = parse_substitution("/foo/bar").unwrap();
+        assert_eq!(
+            (parsed.0.as_str(), parsed.1.as_str(), parsed.2.as_str()),
+            ("foo", "bar", "")
+        );
+    }
+
+    #[test]
+    fn plain_words_are_not_substitutions() {
+        assert!(parse_substitution("foo").is_none());
+    }
+}

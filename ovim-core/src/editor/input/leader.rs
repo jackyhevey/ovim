@@ -380,6 +380,13 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
             editor.reset_input_state();
         }
 
+        (&['s'], 'r') => {
+            // <Space>sr - Replace in files (prefilled with the word under the cursor)
+            let word = editor.buffer().word_under_cursor().map(|(word, _, _)| word);
+            editor.open_search_replace(word);
+            editor.reset_input_state();
+        }
+
         // <Space>g... sequences (git)
         (&['g'], 'd') => {
             // <Space>gd - Toggle the branch diff review

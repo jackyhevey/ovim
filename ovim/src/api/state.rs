@@ -206,6 +206,9 @@ pub struct EditorSnapshot {
     pub marks: HashMap<String, CursorPosition>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub picker: Option<PickerInfo>,
+    /// "Replace in files" review panel, while it is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_replace: Option<SearchReplaceInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hover_info: Option<String>,
     /// Active AI chat state, including hidden chats that continue running.
@@ -402,6 +405,36 @@ pub struct DecorationInfo {
     /// Buffer version the decoration is anchored to.  Populated from the
     /// originating LSP request's `buffer_version` and never mutated.
     pub source_version: u64,
+}
+
+/// Replace-in-files review state for headless clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchReplaceInfo {
+    pub find: String,
+    pub replace: String,
+    pub files: String,
+    pub focus: String,
+    pub regex: bool,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub searching: bool,
+    pub error: Option<String>,
+    pub total_matches: usize,
+    pub checked_matches: usize,
+    pub rows: Vec<SearchReplaceRowInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchReplaceRowInfo {
+    /// `file` or `match`.
+    pub kind: String,
+    pub path: String,
+    /// 1-based line (0 for file rows).
+    pub line: usize,
+    pub checked: bool,
+    pub selected: bool,
+    /// For matches: the line as it will read after the replacement.
+    pub preview: String,
 }
 
 /// Picker state information

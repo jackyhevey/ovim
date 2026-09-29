@@ -82,6 +82,7 @@ pub mod picker;
 mod picker_manager;
 pub mod picker_state;
 mod pseudocode;
+pub mod search_replace;
 pub use pseudocode::MarkdownDocument;
 mod quickfix;
 mod register;

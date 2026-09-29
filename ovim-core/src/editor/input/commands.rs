@@ -143,6 +143,13 @@ fn update_path_completion(editor: &mut Editor) {
 
 /// Known command names for Tab completion.
 const COMMAND_NAMES: &[&str] = &[
+    "SearchReplace",
+    "ReplaceApply",
+    "ReplaceUndo",
+    "cdo",
+    "cfdo",
+    "grep",
+    "update",
     "bd",
     "bdelete",
     "browser",
@@ -490,6 +497,13 @@ fn execute_command_impl(editor: &mut Editor, command: &str) -> Result<()> {
     // Handle command chaining with |
     // BUG FIX: Don't split on | for substitute, global, or vglobal commands
     // because | can appear in patterns like :s/foo|bar/baz/
+    // `:s/pat/rep/flags | cmd` — the bar ends a substitute once its pattern and
+    // replacement are complete (`:cfdo %s/a/b/ge | update`).
+    if let Some((first, rest)) = split_after_substitute(command) {
+        execute_command_impl(editor, first)?;
+        return execute_command_impl(editor, rest);
+    }
+
     if command.contains('|') && !command_owns_bar(command) {
         // Simple split for non-substitute commands
         for part in command.split('|') {
@@ -504,6 +518,49 @@ fn execute_command_impl(editor: &mut Editor, command: &str) -> Result<()> {
     execute_command_single(editor, command)
 }
 
+/// Splits `command` at the bar that terminates a leading `:s` command.
+///
+/// Inside the pattern a bar is literal (regex alternation); in the replacement
+/// and flags an unescaped bar separates the next Ex command, as in vim.
+/// Returns `None` when `command` is not a substitute or has no such bar.
+fn split_after_substitute(command: &str) -> Option<(&str, &str)> {
+    let trimmed = command.trim();
+    let range_len = trimmed
+        .find(|c: char| !(c.is_ascii_digit() || ",%.$ '<>+-".contains(c)))
+        .unwrap_or(trimmed.len());
+    let body = &trimmed[range_len..];
+    let mut chars = body.char_indices();
+    let (_, first) = chars.next()?;
+    if first != 's' {
+        return None;
+    }
+    let (delim_at, delimiter) = chars.next()?;
+    if delimiter.is_alphanumeric()
+        || delimiter.is_whitespace()
+        || matches!(delimiter, '|' | '"' | '\\')
+    {
+        return None;
+    }
+    let mut delimiters = 0;
+    let mut escaped = false;
+    for (offset, c) in body[delim_at..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+        } else if c == delimiter {
+            delimiters += 1;
+        } else if c == '|' && delimiters >= 2 {
+            let at = range_len + delim_at + offset;
+            let (first, rest) = (&trimmed[..at], &trimmed[at + 1..]);
+            return Some((first.trim_end(), rest.trim_start()));
+        }
+    }
+    None
+}
+
 /// Whether `|` belongs to this command's payload instead of separating Ex
 /// commands. Shell/terminal commands own their complete tail; pattern commands
 /// may contain a bar in their pattern.
@@ -513,7 +570,7 @@ fn execute_command_impl(editor: &mut Editor, command: &str) -> Result<()> {
 /// false positives on commands like `:e files/foo | set number`.
 fn command_owns_bar(command: &str) -> bool {
     let trimmed = command.trim();
-    if parse_terminal_session(trimmed).is_some() {
+    if parse_terminal_session(trimmed).is_some() || parse_quickfix_do(trimmed).is_some() {
         return true;
     }
     // Skip past range prefix: digits, commas, %, ., $, ', <, >, +, -, spaces
@@ -526,6 +583,75 @@ fn command_owns_bar(command: &str) -> bool {
         || cmd.starts_with("g/")
         || cmd.starts_with("g!/")
         || cmd.starts_with("v/")
+}
+
+/// `:cdo {cmd}` / `:cfdo {cmd}`: returns `(per_file, cmd)`. The command owns the
+/// rest of the line, so `:cfdo %s/a/b/g | update` chains inside each entry.
+fn parse_quickfix_do(command: &str) -> Option<(bool, &str)> {
+    let (name, rest) = command.split_once(char::is_whitespace)?;
+    match name {
+        "cdo" => Some((false, rest.trim())),
+        "cfdo" => Some((true, rest.trim())),
+        _ => None,
+    }
+}
+
+/// Runs `inner` for every quickfix entry (`:cdo`) or the first entry of every
+/// distinct file (`:cfdo`), jumping there first. Stops at the first error like
+/// vim, and reports how far it got.
+fn run_quickfix_do(editor: &mut Editor, per_file: bool, inner: &str) -> Result<()> {
+    let name = if per_file { "cfdo" } else { "cdo" };
+    if inner.is_empty() {
+        editor.set_status_message("E471: Argument required".to_string());
+        return Ok(());
+    }
+    let entries: Vec<(usize, crate::editor::QuickfixEntry)> = {
+        let list = editor.quickfix_list();
+        let mut seen = std::collections::HashSet::new();
+        list.entries()
+            .iter()
+            .cloned()
+            .enumerate()
+            .filter(|(_, entry)| {
+                !per_file
+                    || entry
+                        .filename
+                        .as_ref()
+                        .is_some_and(|file| seen.insert(file.clone()))
+            })
+            .filter(|(_, entry)| entry.filename.is_some())
+            .collect()
+    };
+    if entries.is_empty() {
+        editor.set_status_message("E42: No Errors".to_string());
+        return Ok(());
+    }
+    let total = entries.len();
+    let mut done = 0;
+    for (index, entry) in entries {
+        editor.quickfix_list_mut().set_selected(index);
+        if let CommandResult::Error(error) = crate::commands::jump_to_quickfix_entry(editor, &entry)
+        {
+            editor.set_status_message(format!("{name}: {}", error.error));
+            return Ok(());
+        }
+        editor.set_status_message(String::new());
+        execute_command_impl(editor, inner)?;
+        done += 1;
+        let status = editor.status_message().trim().to_string();
+        if is_vim_error_status(&status) {
+            editor.set_status_message(format!(
+                "{name}: stopped at entry {} of {total}: {status}",
+                index + 1
+            ));
+            return Ok(());
+        }
+    }
+    editor.set_status_message(format!(
+        "{name}: ran on {done} {}",
+        if per_file { "file(s)" } else { "entr(ies)" }
+    ));
+    Ok(())
 }
 
 /// Parse commands that request an interactive shell owned by the active
@@ -551,6 +677,10 @@ fn parse_terminal_session(command: &str) -> Option<Option<String>> {
 fn execute_command_single(editor: &mut Editor, command: &str) -> Result<()> {
     // Update the : register with the command
     editor.registers_mut().set_last_command(command.to_string());
+
+    if let Some((per_file, inner)) = parse_quickfix_do(command) {
+        return run_quickfix_do(editor, per_file, inner);
+    }
 
     if let Some(command) = parse_terminal_session(command) {
         editor.build.pending_terminal_session =

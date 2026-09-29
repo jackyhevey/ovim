@@ -392,6 +392,7 @@ pub struct GuiSnapshot {
     pub test_panel: Option<GuiTestPanel>,
     pub problems: Option<GuiProblemList>,
     pub lsp_manager: Option<GuiLspManager>,
+    pub search_replace: Option<GuiSearchReplace>,
     pub debug: Option<GuiDebugPanel>,
     pub run_console: Option<GuiRunConsole>,
     pub theme: GuiTheme,
@@ -776,6 +777,47 @@ pub struct GuiProblem {
     pub message: String,
 }
 
+/// The "Replace in files" review panel.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiSearchReplace {
+    pub find: String,
+    pub replace: String,
+    pub files: String,
+    /// `find`, `replace`, `files` or `results`.
+    pub focus: String,
+    pub regex: bool,
+    pub case_sensitive: bool,
+    pub whole_word: bool,
+    pub searching: bool,
+    pub searched: bool,
+    pub truncated: bool,
+    pub error: Option<String>,
+    pub total_matches: usize,
+    pub checked_matches: usize,
+    pub file_count: usize,
+    pub selected: usize,
+    pub rows: Vec<GuiSearchReplaceRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiSearchReplaceRow {
+    pub index: usize,
+    /// `file` or `match`.
+    pub kind: String,
+    /// `checked`, `unchecked` or (files only) `partial`.
+    pub state: String,
+    pub path: String,
+    pub line: usize,
+    /// Matches in the file (file rows only).
+    pub count: usize,
+    pub before: String,
+    pub matched: String,
+    pub replacement: String,
+    pub after: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GuiLspManager {
@@ -1049,6 +1091,13 @@ enum GuiRequest {
     SelectLsp {
         index: usize,
         activate: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// A click in the replace-in-files panel: select row `index` and `toggle`
+    /// its checkbox, or `apply` the review.
+    SearchReplaceRow {
+        index: usize,
+        action: String,
         reply: oneshot::Sender<Result<(), String>>,
     },
     DebugPanelRow {
@@ -1326,6 +1375,17 @@ impl GuiBridge {
             kind,
             index,
             activate,
+            reply,
+        })
+        .await
+    }
+
+    /// Actions: `select`, `toggle`, `open`, `apply`, `toggle-all`, `case`,
+    /// `word`, `regex`, `field-find`, `field-replace`, `field-files`.
+    pub async fn search_replace_row(&self, index: usize, action: String) -> Result<(), String> {
+        self.request(|reply| GuiRequest::SearchReplaceRow {
+            index,
+            action,
             reply,
         })
         .await
@@ -2212,6 +2272,66 @@ async fn handle_request(
             }
             (reply, result)
         }
+        GuiRequest::SearchReplaceRow {
+            index,
+            action,
+            reply,
+        } => {
+            use crate::editor::search_replace::SearchReplaceField;
+            use ovim_core::key::{KeyCode, KeyEvent, Modifiers};
+            let result: anyhow::Result<()> = (|| {
+                let Some(panel) = editor.search_replace_panel_mut() else {
+                    return Err(anyhow::anyhow!("Replace in files is not open"));
+                };
+                if index < panel.row_count() {
+                    panel.selected = index;
+                }
+                match action.as_str() {
+                    "select" => {}
+                    "toggle" => panel.toggle_selected(),
+                    "toggle-all" => panel.toggle_all(),
+                    "case" => {
+                        panel.case_sensitive = !panel.case_sensitive;
+                        panel.mark_dirty_now();
+                    }
+                    "word" => {
+                        panel.whole_word = !panel.whole_word;
+                        panel.mark_dirty_now();
+                    }
+                    "regex" => {
+                        panel.regex = !panel.regex;
+                        panel.mark_dirty_now();
+                    }
+                    "field-find" => panel.focus = SearchReplaceField::Find,
+                    "field-replace" => panel.focus = SearchReplaceField::Replace,
+                    "field-files" => panel.focus = SearchReplaceField::Files,
+                    "open" | "apply" => {}
+                    other => return Err(anyhow::anyhow!("Unknown replace action: {other}")),
+                }
+                Ok(())
+            })();
+            let result = match (result, action.as_str()) {
+                (Ok(()), "open") => {
+                    if let Some(panel) = editor.search_replace_panel_mut() {
+                        panel.focus = SearchReplaceField::Results;
+                    }
+                    InputHandler::handle_key_event_no_dirty(
+                        editor,
+                        KeyEvent::new(KeyCode::Enter, Modifiers::NONE),
+                    )
+                }
+                (Ok(()), "apply") => InputHandler::handle_key_event_no_dirty(
+                    editor,
+                    KeyEvent::new(KeyCode::Enter, Modifiers::ALT),
+                ),
+                (other, _) => other,
+            };
+            if result.is_ok() {
+                refresh_after_input(editor);
+                editor.dispatch_pending_intents().await;
+            }
+            (reply, result)
+        }
         GuiRequest::DebugPanelRow {
             index,
             action,
@@ -2426,6 +2546,7 @@ fn snapshot_with_cache(
         ai_chat: ai_chat(editor),
         test_panel: test_panel(editor),
         problems: problem_list(editor),
+        search_replace: search_replace(editor),
         lsp_manager: lsp_manager(editor),
         debug: debug_panel(editor),
         run_console: run_console(editor),
@@ -3756,6 +3877,90 @@ fn problem_list(editor: &Editor) -> Option<GuiProblemList> {
     })
 }
 
+fn search_replace(editor: &Editor) -> Option<GuiSearchReplace> {
+    use crate::editor::search_replace::ReviewRow;
+    if !editor.is_search_replace_open() {
+        return None;
+    }
+    let panel = editor.search_replace_panel()?;
+    let rows = panel.rows();
+    let start = centered_window_start(panel.selected, rows.len(), 200);
+    let items = rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(200)
+        .map(|(index, row)| match *row {
+            ReviewRow::File(file) => {
+                let file = &panel.results[file];
+                let checked = file.checked_count();
+                GuiSearchReplaceRow {
+                    index,
+                    kind: "file".to_string(),
+                    state: if checked == file.matches.len() {
+                        "checked"
+                    } else if checked == 0 {
+                        "unchecked"
+                    } else {
+                        "partial"
+                    }
+                    .to_string(),
+                    path: file.rel.clone(),
+                    line: 0,
+                    count: file.matches.len(),
+                    before: String::new(),
+                    matched: String::new(),
+                    replacement: String::new(),
+                    after: String::new(),
+                }
+            }
+            ReviewRow::Match(file, m) => {
+                let file = &panel.results[file];
+                let entry = &file.matches[m];
+                let text = &entry.found.line_text;
+                GuiSearchReplaceRow {
+                    index,
+                    kind: "match".to_string(),
+                    state: if entry.checked {
+                        "checked"
+                    } else {
+                        "unchecked"
+                    }
+                    .to_string(),
+                    path: file.rel.clone(),
+                    line: entry.found.line + 1,
+                    count: 0,
+                    before: truncate_panel_text(text[..entry.found.start_byte].trim_start(), 200),
+                    matched: truncate_panel_text(
+                        &text[entry.found.start_byte..entry.found.end_byte],
+                        200,
+                    ),
+                    replacement: truncate_panel_text(&panel.replacement_for(&entry.found), 200),
+                    after: truncate_panel_text(text[entry.found.end_byte..].trim_end(), 200),
+                }
+            }
+        })
+        .collect();
+    Some(GuiSearchReplace {
+        find: panel.find.text().to_string(),
+        replace: panel.replace.text().to_string(),
+        files: panel.files.text().to_string(),
+        focus: panel.focus.as_str().to_string(),
+        regex: panel.regex,
+        case_sensitive: panel.case_sensitive,
+        whole_word: panel.whole_word,
+        searching: panel.searching,
+        searched: panel.searched,
+        truncated: panel.truncated,
+        error: panel.error.clone(),
+        total_matches: panel.total_matches(),
+        checked_matches: panel.checked_matches(),
+        file_count: panel.results.len(),
+        selected: panel.selected,
+        rows: items,
+    })
+}
+
 fn lsp_manager(editor: &Editor) -> Option<GuiLspManager> {
     let panel = editor.lsp_manager_panel()?;
     let filtered = panel.filtered_entries();
@@ -4181,6 +4386,43 @@ mod tests {
                 "{columns}-column pane has separator at {separator}, expected {center}"
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn replace_in_files_review_projects_rows_checkboxes_and_previews() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join("a.txt"), "one foo\ntwo\nfoo foo\n").unwrap();
+        let mut editor = Editor::default();
+        editor.open_file(root.join("a.txt")).unwrap();
+        assert!(search_replace(&editor).is_none());
+
+        editor.open_search_replace(Some("foo".to_string()));
+        editor.run_search_replace_now();
+        editor.search_replace_panel_mut().unwrap().replace =
+            crate::editor::SingleLineInput::new("bar");
+        editor.search_replace_panel_mut().unwrap().selected = 2;
+        editor.search_replace_panel_mut().unwrap().toggle_selected();
+
+        let panel = search_replace(&editor).expect("panel projected while open");
+        assert_eq!(panel.total_matches, 3);
+        assert_eq!(panel.checked_matches, 2);
+        assert_eq!(panel.file_count, 1);
+        assert_eq!(panel.rows.len(), 4, "one file row and three matches");
+        assert_eq!(panel.rows[0].kind, "file");
+        assert_eq!(panel.rows[0].state, "partial");
+        assert_eq!(panel.rows[1].before, "one ");
+        assert_eq!(panel.rows[1].matched, "foo");
+        assert_eq!(panel.rows[1].replacement, "bar");
+        assert_eq!(panel.rows[2].state, "unchecked");
+        assert_eq!(panel.rows[3].line, 3);
+
+        editor.close_search_replace();
+        assert!(
+            search_replace(&editor).is_none(),
+            "hidden panels are not projected"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

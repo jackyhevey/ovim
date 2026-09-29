@@ -255,6 +255,10 @@ pub(super) fn handle_substitute_command(
     if !edits.is_empty() {
         let cursor_after = editor.cursor_position();
         editor.push_recorded_undo(edits, cursor_before, cursor_after);
+    } else if !flags.contains('e') {
+        // Vim: nothing substituted -> E486, unless the `e` flag asks for silence.
+        // `:cdo` / `:cfdo` rely on this to stop at the first entry that fails.
+        editor.set_status_message(format!("E486: Pattern not found: {pattern}"));
     }
 
     Ok(())

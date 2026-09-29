@@ -306,6 +306,38 @@ export interface GuiProblemList {
     }>;
 }
 
+export interface GuiSearchReplaceRow {
+    index: number;
+    kind: "file" | "match";
+    state: "checked" | "unchecked" | "partial";
+    path: string;
+    line: number;
+    count: number;
+    before: string;
+    matched: string;
+    replacement: string;
+    after: string;
+}
+
+export interface GuiSearchReplace {
+    find: string;
+    replace: string;
+    files: string;
+    focus: "find" | "replace" | "files" | "results";
+    regex: boolean;
+    caseSensitive: boolean;
+    wholeWord: boolean;
+    searching: boolean;
+    searched: boolean;
+    truncated: boolean;
+    error?: string;
+    totalMatches: number;
+    checkedMatches: number;
+    fileCount: number;
+    selected: number;
+    rows: GuiSearchReplaceRow[];
+}
+
 export interface GuiLspManager {
     filter: string;
     selected: number;
@@ -479,6 +511,7 @@ export interface GuiSnapshot {
     testPanel?: GuiTestPanel;
     problems?: GuiProblemList;
     lspManager?: GuiLspManager;
+    searchReplace?: GuiSearchReplace;
     debug?: GuiDebugPanel;
     runConsole?: GuiRunConsole;
     theme: GuiTheme;

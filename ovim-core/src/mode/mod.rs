@@ -40,6 +40,8 @@ pub enum Mode {
     RunConsole,
     /// DebugPanel mode - focused debug panel (stack, variables, watches, breakpoints)
     DebugPanel,
+    /// SearchReplace mode - project-wide replace review panel
+    SearchReplace,
 }
 
 impl Mode {
@@ -65,6 +67,7 @@ impl Mode {
             Mode::AiChat => "AI CHAT",
             Mode::RunConsole => "CONSOLE",
             Mode::DebugPanel => "DEBUG",
+            Mode::SearchReplace => "REPLACE IN FILES",
         }
     }
 

@@ -1383,6 +1383,92 @@ describe("Ovim Solid workbench", () => {
         }
     });
 
+    it("renders the replace-in-files review projected by the core", () => {
+        mockSnapshot.searchReplace = {
+            find: "Circle",
+            replace: "Round",
+            files: "*.java",
+            focus: "results",
+            regex: false,
+            caseSensitive: true,
+            wholeWord: false,
+            searching: false,
+            searched: true,
+            truncated: false,
+            totalMatches: 2,
+            checkedMatches: 1,
+            fileCount: 1,
+            selected: 1,
+            rows: [
+                {
+                    index: 0,
+                    kind: "file",
+                    state: "partial",
+                    path: "src/A.java",
+                    line: 0,
+                    count: 2,
+                    before: "",
+                    matched: "",
+                    replacement: "",
+                    after: "",
+                },
+                {
+                    index: 1,
+                    kind: "match",
+                    state: "checked",
+                    path: "src/A.java",
+                    line: 3,
+                    count: 0,
+                    before: "new ",
+                    matched: "Circle",
+                    replacement: "Round",
+                    after: "();",
+                },
+                {
+                    index: 2,
+                    kind: "match",
+                    state: "unchecked",
+                    path: "src/A.java",
+                    line: 9,
+                    count: 0,
+                    before: "",
+                    matched: "Circle",
+                    replacement: "Round",
+                    after: " c;",
+                },
+            ],
+        };
+
+        try {
+            const result = render(() => <App />);
+            const dialog = screen.getByRole("dialog", {
+                name: "Replace in files",
+            });
+            expect(dialog.textContent).toContain("1 of 2 checked in 1 files");
+            expect(dialog.textContent).toContain("Replace 1");
+            expect(dialog.querySelectorAll("del")[0].textContent).toBe(
+                "Circle",
+            );
+            expect(dialog.querySelectorAll("ins")[0].textContent).toBe("Round");
+            const boxes = dialog.querySelectorAll<HTMLInputElement>(
+                "input[type=checkbox]",
+            );
+            expect(boxes[0].indeterminate).toBe(true);
+            expect(boxes[1].checked).toBe(true);
+            expect(boxes[2].checked).toBe(false);
+            expect(
+                screen
+                    .getByRole("button", { name: "Aa" })
+                    .getAttribute("aria-pressed"),
+            ).toBe("true");
+            expect(
+                result.container.querySelector(".sr-item.off"),
+            ).not.toBeNull();
+        } finally {
+            delete mockSnapshot.searchReplace;
+        }
+    });
+
     it("exposes debugger execution controls and projected stop location", () => {
         mockSnapshot.debug = {
             running: false,

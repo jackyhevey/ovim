@@ -538,6 +538,15 @@ async fn gui_select_lsp(
 }
 
 #[tauri::command]
+async fn gui_search_replace_row(
+    bridge: State<'_, GuiBridge>,
+    index: usize,
+    action: String,
+) -> Result<(), String> {
+    bridge.search_replace_row(index, action).await
+}
+
+#[tauri::command]
 async fn gui_debug_panel_row(
     bridge: State<'_, GuiBridge>,
     index: usize,
@@ -659,6 +668,7 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
             gui_select_completion,
             gui_select_file_tree,
             gui_select_problem,
+            gui_search_replace_row,
             gui_select_lsp,
             gui_select_debug_frame,
             gui_debug_panel_row,

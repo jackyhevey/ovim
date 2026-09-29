@@ -286,6 +286,10 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
         }
     }
 
+    if let Some(result) = crate::cmd_project::try_handle(editor, command) {
+        return result;
+    }
+
     match command {
         "u" | "undo" => {
             editor.undo();

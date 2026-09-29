@@ -1639,9 +1639,12 @@ function App() {
         const chatOpened = !view().aiChat && Boolean(snapshot.aiChat);
         const chatClosed = Boolean(view().aiChat) && !snapshot.aiChat;
         const coreDialogClosed =
-            Boolean(view().picker || view().lspManager) &&
+            Boolean(
+                view().picker || view().lspManager || view().searchReplace,
+            ) &&
             !snapshot.picker &&
-            !snapshot.lspManager;
+            !snapshot.lspManager &&
+            !snapshot.searchReplace;
         setView((previous) => retainProjection(previous, snapshot));
         if (treeRevealed) setActiveDock("explorer");
         setConnected(true);
@@ -3535,6 +3538,215 @@ function App() {
         </Show>
     );
 
+    const SearchReplaceOverlay = () => (
+        <Show when={!view().aiChat ? view().searchReplace : undefined}>
+            {(panel) => {
+                const act = (index: number, action: string) => {
+                    void mutate("gui_search_replace_row", { index, action });
+                };
+                const field = (
+                    name: "find" | "replace" | "files",
+                    label: string,
+                    value: string,
+                ) => (
+                    <button
+                        type="button"
+                        class="sr-field"
+                        classList={{ focused: panel().focus === name }}
+                        aria-label={`${label} field`}
+                        onClick={() => act(panel().selected, `field-${name}`)}
+                    >
+                        <span>{label}</span>
+                        <code>{value || " "}</code>
+                    </button>
+                );
+                const toggle = (
+                    action: string,
+                    label: string,
+                    title: string,
+                    on: boolean,
+                ) => (
+                    <button
+                        type="button"
+                        class="sr-toggle"
+                        aria-pressed={on}
+                        title={title}
+                        onClick={() => act(panel().selected, action)}
+                    >
+                        {label}
+                    </button>
+                );
+                return (
+                    <div class="overlay-shade sr-overlay">
+                        <section
+                            ref={(element) =>
+                                queueMicrotask(() =>
+                                    element.focus({ preventScroll: true }),
+                                )
+                            }
+                            class="sr-panel"
+                            role="dialog"
+                            aria-labelledby="sr-title"
+                            data-gui-core-dialog
+                            tabIndex={-1}
+                            onKeyDown={(event) =>
+                                void trapDialogFocus(event, event.currentTarget)
+                            }
+                        >
+                            <header>
+                                <b id="sr-title">Replace in files</b>
+                                <span class="sr-summary">
+                                    {panel().error
+                                        ? panel().error
+                                        : panel().searching
+                                          ? "Searching..."
+                                          : panel().searched
+                                            ? `${panel().checkedMatches} of ${panel().totalMatches} checked in ${panel().fileCount} files${panel().truncated ? " (truncated)" : ""}`
+                                            : ""}
+                                </span>
+                                <kbd>esc</kbd>
+                            </header>
+                            <div class="sr-inputs">
+                                <div class="sr-row">
+                                    {field("find", "Find", panel().find)}
+                                    {toggle(
+                                        "case",
+                                        "Aa",
+                                        "Match case (Alt-C)",
+                                        panel().caseSensitive,
+                                    )}
+                                    {toggle(
+                                        "word",
+                                        "W",
+                                        "Whole word (Alt-W)",
+                                        panel().wholeWord,
+                                    )}
+                                    {toggle(
+                                        "regex",
+                                        ".*",
+                                        "Regular expression (Alt-R)",
+                                        panel().regex,
+                                    )}
+                                </div>
+                                {field("replace", "Replace", panel().replace)}
+                                {field("files", "Files", panel().files)}
+                            </div>
+                            <div
+                                class="sr-results"
+                                role="listbox"
+                                aria-label="Matches"
+                            >
+                                <For
+                                    each={panel().rows}
+                                    fallback={
+                                        <p class="panel-empty compact">
+                                            {panel().find
+                                                ? "No matches"
+                                                : "Type something to find"}
+                                        </p>
+                                    }
+                                >
+                                    {(row) => (
+                                        <div
+                                            class="sr-item"
+                                            classList={{
+                                                selected:
+                                                    row.index ===
+                                                    panel().selected,
+                                                file: row.kind === "file",
+                                                off: row.state === "unchecked",
+                                            }}
+                                            role="option"
+                                            aria-selected={
+                                                row.index === panel().selected
+                                            }
+                                            onClick={() =>
+                                                act(row.index, "select")
+                                            }
+                                            onDblClick={() =>
+                                                act(row.index, "open")
+                                            }
+                                        >
+                                            <input
+                                                type="checkbox"
+                                                ref={(element) =>
+                                                    createEffect(() => {
+                                                        element.indeterminate =
+                                                            row.state ===
+                                                            "partial";
+                                                    })
+                                                }
+                                                checked={
+                                                    row.state === "checked"
+                                                }
+                                                aria-label={
+                                                    row.kind === "file"
+                                                        ? `Include ${row.path}`
+                                                        : `Include ${row.path}:${row.line}`
+                                                }
+                                                onClick={(event) => {
+                                                    event.stopPropagation();
+                                                    act(row.index, "toggle");
+                                                }}
+                                            />
+                                            <Show
+                                                when={row.kind === "match"}
+                                                fallback={
+                                                    <>
+                                                        <strong>
+                                                            {row.path}
+                                                        </strong>
+                                                        <small>
+                                                            {row.count}
+                                                        </small>
+                                                    </>
+                                                }
+                                            >
+                                                <small class="sr-line">
+                                                    {row.line}
+                                                </small>
+                                                <code>
+                                                    <span>{row.before}</span>
+                                                    <del>{row.matched}</del>
+                                                    <ins>{row.replacement}</ins>
+                                                    <span>{row.after}</span>
+                                                </code>
+                                            </Show>
+                                        </div>
+                                    )}
+                                </For>
+                            </div>
+                            <footer>
+                                <button
+                                    type="button"
+                                    class="sr-apply"
+                                    disabled={panel().checkedMatches === 0}
+                                    onClick={() =>
+                                        act(panel().selected, "apply")
+                                    }
+                                >
+                                    Replace {panel().checkedMatches}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() =>
+                                        act(panel().selected, "toggle-all")
+                                    }
+                                >
+                                    Toggle all
+                                </button>
+                                <span>
+                                    <kbd>Tab</kbd> field <kbd>Ctrl-T</kbd>{" "}
+                                    toggle <kbd>Alt-Enter</kbd> replace
+                                </span>
+                            </footer>
+                        </section>
+                    </div>
+                );
+            }}
+        </Show>
+    );
+
     const LspOverlay = () => (
         <Show when={!view().aiChat ? view().lspManager : undefined}>
             {(manager) => {
@@ -4178,7 +4390,8 @@ function App() {
                                 pendingExit() ||
                                 browserCommandRequest() ||
                                 view().picker ||
-                                view().lspManager,
+                                view().lspManager ||
+                                view().searchReplace,
                             )}
                             onNavigate={navigateBrowserSession}
                             onToolbar={runBrowserToolbar}
@@ -4507,6 +4720,7 @@ function App() {
                             )}
                         </Show>
                         <LspOverlay />
+                        <SearchReplaceOverlay />
                     </div>
 
                     <div class="message-line">
