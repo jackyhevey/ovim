@@ -80,6 +80,24 @@ both layouts, Guided sections, change navigation, and image exports. Toggle it
 off to restore the complete review. The original patch and its change totals
 are unchanged.
 
+Mark a file or reassigned section **Reviewed** to hide it while you work through
+regular or custom comparisons. In the terminal, press `x` anywhere in the item
+or click its checkbox. In the GUI, use the **Reviewed** checkbox or `x` on the
+current item. Press `X` / **Show reviewed** to bring checked items back and
+uncheck them. Checks survive refreshing, switching layouts, and reopening the
+review in the same editor session. Changed content becomes unchecked again.
+File and Guided views share progress; exports omit hidden reviewed items.
+
+For `gd` in a GUI diff, click the symbol in the code first, then press `gd`.
+The terminal uses the symbol under its cursor. Definition lookup requires the
+saved line to match live source; changed historical lines must be opened and
+navigated in their current source instead.
+
+In the GUI, `Ctrl+Tab` / `Ctrl+Shift+Tab` cycles through the visible workbench
+tabs, including source, diff, and browser tabs. This also works from browser
+inputs with browser Vim keys disabled. Browser `:` opens the browser command
+line; `Esc` returns focus to the page.
+
 Refinements are saved immediately and shared by the terminal and GUI. After a
 restart, open the same comparison with `<Space>gd` or `:GitDiff`: Ovim reapplies
 its saved pairing only after verifying the resolved base, complete patch and
@@ -97,6 +115,8 @@ the captured source. Older saved reviews may not contain surrounding source.
 |---|---|
 | `<Space>gd` | Open the review, return to it from a file, or leave it |
 | `K` / `J` | Reveal ten surrounding lines above / below the current diff block (GUI and terminal) |
+| `x` / `X` | Check/uncheck the current file or section / show or hide checked items |
+| `gd` | Go to the definition of the selected live-source symbol |
 | `s` | Switch between the unified and side-by-side layouts |
 | `w` | Hide/show equal paired changes, ignoring whitespace (GUI and terminal curated reviews) |
 | `]c` / `[c` | Next / previous hunk (in ordinary files: next / previous git change) |

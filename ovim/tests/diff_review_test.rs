@@ -406,7 +406,7 @@ async fn leader_gd_opens_a_highlighted_review_in_a_new_tab() {
     let text = test.editor.buffer().rope().to_string();
     assert!(text.contains("2 files · +3 −1"), "{text}");
     assert!(text.contains("  M  a.txt  +2 −1"), "{text}");
-    assert!(text.contains("  A  b.txt  +1"), "{text}");
+    assert!(text.contains("  A  b.txt  +1  [ ]"), "{text}");
     assert!(text.contains("@@ -1,3 +1,4 @@"), "{text}");
     assert!(text.contains("\n+new file\n"), "{text}");
     assert!(text.contains("1 commit ahead"), "{text}");
@@ -477,11 +477,11 @@ async fn enter_on_a_file_row_jumps_to_that_file_and_opens_new_files() {
     let mut test = open_editor_on(&fixture, "a.txt");
     test.keys(" gd");
 
-    let row = line_index_of(&test, "  A  b.txt  +1");
+    let row = line_index_of(&test, "  A  b.txt  +1  [ ]");
     test.set_cursor(row, 0);
     test.press_key(KeyCode::Enter);
     assert!(test.editor.is_diff_review_buffer());
-    assert_eq!(current_line(&test), "diff --git a/b.txt b/b.txt");
+    assert_eq!(current_line(&test), "diff --git a/b.txt b/b.txt  [ ]");
 
     // Enter on a file header opens the file at its first hunk.
     test.press_key(KeyCode::Enter);
@@ -2274,4 +2274,211 @@ fn truncated_diff_still_opens_as_a_display_snapshot_without_restoration_proof() 
     assert!(snapshot.patch.truncated);
     assert!(snapshot.content_fingerprint.is_none());
     assert!(review_snapshot(&fixture.root, &ReviewBase::explicit("HEAD")).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn checking_files_hides_only_review_content_and_survives_refresh_and_reopen() {
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    test.keys(" gd");
+    let original = test.editor.diff_review().unwrap().patch().clone();
+    test.keys("]fx");
+    assert!(test
+        .editor
+        .diff_review()
+        .unwrap()
+        .checked_items
+        .contains("file:a.txt"));
+    assert!(!buffer_text(&test).contains("diff --git a/a.txt"));
+    assert!(buffer_text(&test).contains("diff --git a/b.txt"));
+    assert_eq!(test.editor.diff_review().unwrap().patch(), &original);
+    test.keys("sr");
+    assert!(!buffer_text(&test).contains("one"));
+    test.keys("q gd");
+    assert!(test
+        .editor
+        .diff_review()
+        .unwrap()
+        .checked_items
+        .contains("file:a.txt"));
+    test.keys("X");
+    assert!(buffer_text(&test).contains("[x] checked"));
+    test.editor.toggle_diff_review_check("file:a.txt").unwrap();
+    assert!(test.editor.diff_review().unwrap().checked_items.is_empty());
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("a.txt")).unwrap(),
+        "one\n2\nthree\nfour\n"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn changed_checked_file_reappears_while_unchanged_file_stays_checked() {
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    test.keys(" gd");
+    for path in ["a.txt", "b.txt"] {
+        test.editor
+            .toggle_diff_review_check(&format!("file:{path}"))
+            .unwrap();
+    }
+    assert!(buffer_text(&test).contains("All visible changes checked"));
+    fs::write(fixture.root.join("a.txt"), "one\nnew change\nthree\n").unwrap();
+    test.keys("r");
+    let checked = &test.editor.diff_review().unwrap().checked_items;
+    assert!(!checked.contains("file:a.txt"));
+    assert!(checked.contains("file:b.txt"));
+    assert!(buffer_text(&test).contains("+new change"));
+    assert!(!buffer_text(&test).contains("diff --git a/b.txt"));
+    test.keys("]c");
+    assert!(current_line(&test).starts_with("@@"));
+    assert!(test
+        .editor
+        .toggle_diff_review_check("section:missing")
+        .is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn checked_custom_sections_keep_context_and_source_mapping_in_both_layouts() {
+    let fixture = Fixture::new();
+    let snapshot = review_snapshot(&fixture.root, &ReviewBase::explicit("main")).unwrap();
+    let custom = snapshot.reassign(&[]).unwrap();
+    assert!(custom.sections.len() >= 2);
+    let first = format!("section:{}", custom.sections[0].id);
+    for layout in [
+        ovim_core::editor::DiffLayout::Unified,
+        ovim_core::editor::DiffLayout::Split,
+    ] {
+        let mut test = open_editor_on(&fixture, "a.txt");
+        test.editor
+            .open_custom_diff_review("Review", custom.clone())
+            .unwrap();
+        test.editor.set_diff_review_layout(layout);
+        test.keys("]cx");
+        assert!(test
+            .editor
+            .diff_review()
+            .unwrap()
+            .checked_items
+            .contains(&first));
+        assert_eq!(test.editor.diff_review().unwrap().custom(), Some(&custom));
+        test.keys("rX");
+        assert!(buffer_text(&test).contains("[x] checked"));
+        test.editor.toggle_diff_review_check(&first).unwrap();
+        assert!(test.editor.diff_review().unwrap().checked_items.is_empty());
+        test.keys("gg]cJ");
+        assert!(!buffer_text(&test).contains("All visible changes checked"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn checks_agree_between_file_and_guided_views() {
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    let custom = review_snapshot(&fixture.root, &ReviewBase::explicit("main"))
+        .unwrap()
+        .reassign(&[])
+        .unwrap();
+    let section = custom
+        .sections
+        .iter()
+        .find(|section| section.new_path.as_deref() == Some("a.txt"))
+        .unwrap();
+    let id = format!("section:{}", section.id);
+    test.editor
+        .open_custom_diff_review("Review", custom)
+        .unwrap();
+    test.editor.toggle_diff_review_check("file:a.txt").unwrap();
+    assert!(test
+        .editor
+        .diff_review()
+        .unwrap()
+        .checked_items
+        .contains(&id));
+    test.editor.toggle_diff_review_check(&id).unwrap();
+    assert!(!test
+        .editor
+        .diff_review()
+        .unwrap()
+        .checked_items
+        .contains("file:a.txt"));
+    test.editor.toggle_diff_review_check(&id).unwrap();
+    assert!(test
+        .editor
+        .diff_review()
+        .unwrap()
+        .checked_items
+        .contains("file:a.txt"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn diff_definition_uses_source_column_and_rejects_stale_and_unknown_lines() {
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    test.keys(" gd");
+    assert!(test
+        .editor
+        .diff_review_goto_definition("../outside", 1, "new", 0)
+        .is_err());
+    assert!(test
+        .editor
+        .diff_review_goto_definition("a.txt", 999, "new", 0)
+        .is_err());
+    assert!(test
+        .editor
+        .diff_review_goto_definition("a.txt", 2, "old", 1)
+        .is_err());
+    test.editor
+        .diff_review_goto_definition("a.txt", 4, "new", 2)
+        .unwrap();
+    assert!(!test.editor.is_diff_review_buffer());
+    assert_eq!(test.editor.buffer().cursor().line(), 3);
+    assert_eq!(test.editor.buffer().cursor().col().0, 2);
+    test.keys(" gd");
+    fs::write(fixture.root.join("a.txt"), "other\nnew\ncontent\nchanged\n").unwrap();
+    assert!(test
+        .editor
+        .diff_review_goto_definition("a.txt", 4, "new", 2)
+        .is_err());
+    assert!(test.editor.is_diff_review_buffer());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn section_checks_survive_removing_the_custom_overlay() {
+    let fixture = Fixture::new();
+    let mut test = open_editor_on(&fixture, "a.txt");
+    let custom = review_snapshot(&fixture.root, &ReviewBase::explicit("main"))
+        .unwrap()
+        .reassign(&[])
+        .unwrap();
+    let id = format!(
+        "section:{}",
+        custom
+            .sections
+            .iter()
+            .find(|section| section.new_path.as_deref() == Some("a.txt"))
+            .unwrap()
+            .id
+    );
+    test.editor
+        .open_custom_diff_review("Review", custom)
+        .unwrap();
+    test.editor.toggle_diff_review_check(&id).unwrap();
+    test.editor.return_to_live_diff_review().unwrap();
+    test.editor.toggle_diff_review_overlay().unwrap();
+    assert!(test.editor.diff_review().unwrap().custom().is_none());
+    assert!(test
+        .editor
+        .diff_review()
+        .unwrap()
+        .checked_items
+        .contains("file:a.txt"));
+    assert!(!buffer_text(&test).contains("diff --git a/a.txt"));
+    test.editor.toggle_diff_review_check("file:a.txt").unwrap();
+    test.editor.toggle_diff_review_overlay().unwrap();
+    assert!(!test
+        .editor
+        .diff_review()
+        .unwrap()
+        .checked_items
+        .contains(&id));
 }

@@ -5,6 +5,7 @@ import {
     createEffect,
     createMemo,
     createSignal,
+    on,
     onCleanup,
     onMount,
 } from "solid-js";
@@ -44,6 +45,7 @@ import {
 } from "./layoutPersistence";
 import {
     activeSourceSelection,
+    adjacentWorkbenchTab,
     createWorkbenchTabOrder,
     reconcileWorkbenchTabs,
     type WorkbenchSelection,
@@ -1441,21 +1443,26 @@ function App() {
         }).catch((reason) => setError(String(reason)));
     });
 
-    createEffect(() => {
-        const activeSource = activeSourceSelection(view().tabs);
-        const selection = workbenchSelection();
-        if (
-            selection.kind === "source" &&
-            selection.tabId !== activeSource.tabId
-        ) {
-            setWorkbenchSelection(activeSource);
-        } else if (
-            selection.kind === "vector" &&
-            selection.sourceTabId !== activeSource.tabId
-        ) {
-            setWorkbenchSelection(activeSource);
-        }
-    });
+    createEffect(
+        on(
+            () => view().tabs,
+            (tabs) => {
+                const activeSource = activeSourceSelection(tabs);
+                const selection = workbenchSelection();
+                if (
+                    selection.kind === "source" &&
+                    selection.tabId !== activeSource.tabId
+                ) {
+                    setWorkbenchSelection(activeSource);
+                } else if (
+                    selection.kind === "vector" &&
+                    selection.sourceTabId !== activeSource.tabId
+                ) {
+                    setWorkbenchSelection(activeSource);
+                }
+            },
+        ),
+    );
 
     createEffect(() => {
         const filePath = view().filePath;
@@ -1964,6 +1971,7 @@ function App() {
             case "source":
                 setWorkbenchSelection({ kind: "source", tabId: tab.tabId });
                 void mutate("gui_select_tab", { index: tab.index });
+                queueMicrotask(focusEditorInput);
                 break;
             case "vector":
                 setWorkbenchSelection({
@@ -2023,6 +2031,24 @@ function App() {
             event.key === "Dead"
         )
             return;
+        if (
+            event.ctrlKey &&
+            event.key === "Tab" &&
+            !event.altKey &&
+            !event.metaKey
+        ) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            selectWorkbenchTab(
+                adjacentWorkbenchTab(
+                    workbenchTabs(),
+                    workbenchSelection(),
+                    event.shiftKey,
+                ),
+            );
+            queueMicrotask(focusPrimaryInput);
+            return;
+        }
         const target = event.target as Element | null;
         const primaryModifier = macos ? event.metaKey : event.ctrlKey;
         if (
@@ -2653,6 +2679,16 @@ function App() {
                                 pane: props.pane.index,
                                 line,
                                 displayColumn: 0,
+                            });
+                        }}
+                        onDefinition={(path, line, side, definitionColumn) => {
+                            void mutate("gui_open_diff_source", {
+                                pane: props.pane.index,
+                                bufferId: props.pane.bufferId,
+                                path,
+                                line,
+                                side,
+                                definitionColumn,
                             });
                         }}
                         onOpenSource={(path, line, side) => {

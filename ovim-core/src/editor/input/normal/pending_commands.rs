@@ -39,7 +39,11 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             editor.clear_count();
         }
         ('g', KeyCode::Char('d')) => {
-            editor.request_goto_definition();
+            if editor.is_diff_review_buffer() {
+                editor.diff_review_goto_definition_at_cursor();
+            } else {
+                editor.request_goto_definition();
+            }
             editor.clear_count();
         }
         ('g', KeyCode::Char('D')) => {

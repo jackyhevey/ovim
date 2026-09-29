@@ -156,6 +156,7 @@ describe("browser navigation controller", () => {
                 navigation.openCommand(session.sessionId);
                 expect(workbench.present).toHaveBeenCalledWith(
                     session.sessionId,
+                    false,
                 );
                 expect(navigation.commandRequest()).toEqual({
                     serial: 1,

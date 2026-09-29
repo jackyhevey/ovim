@@ -35,7 +35,7 @@ const MIN_SPLIT_TEXT_WIDTH: usize = 8;
 const MAX_WRAP_ROWS: usize = 12;
 
 const KEY_HINT: &str =
-    "# Enter open at cursor · ]c [c hunk · ]f [f file · o overlay · O saved · K/J context ↑/↓ · r refresh · q close · <Space>gf fetch base";
+    "# Enter open at cursor · ]c [c hunk · ]f [f file · o overlay · O saved · K/J context ↑/↓ · x check · X show checked · r refresh · q close · <Space>gf fetch base";
 
 /// How the patch body is laid out.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -170,6 +170,8 @@ impl Toolbar {
 
 /// Everything a render produces for the review buffer.
 pub struct Rendered {
+    /// Stable review item owning each rendered row.
+    pub item_rows: Vec<Option<String>>,
     pub title: String,
     pub text: String,
     pub rows: Vec<ReviewRow>,
@@ -494,7 +496,20 @@ pub fn render(
         .map(|line| if line == usize::MAX { fallback } else { line })
         .collect();
 
+    let mut item_rows: Vec<_> = builder
+        .rows
+        .iter()
+        .map(|row| {
+            row.info()
+                .and_then(|info| info.file)
+                .map(|index| format!("file:{}", patch.files[index].path))
+        })
+        .collect();
+    for &(row, index) in &stat_rows {
+        item_rows[row] = Some(format!("file:{}", patch.files[index].path));
+    }
     Rendered {
+        item_rows,
         title: format!(
             "{DIFF_REVIEW_TITLE_PREFIX}{} → {}",
             patch.head, patch.base.name
@@ -552,9 +567,9 @@ pub fn render_custom(
         .any(|section| section.message.is_some());
     builder.header(
         if has_notes {
-            "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · w hide equal · a notes · K/J context ↑/↓ · r refresh/redraw · q close"
+            "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · w hide equal · a notes · K/J context ↑/↓ · x check · X show checked · r refresh/redraw · q close"
         } else {
-            "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · w hide equal · K/J context ↑/↓ · r refresh/redraw · q close"
+            "# Enter open source · ]c [c section · o live/overlay · O saved · s layout · w hide equal · K/J context ↑/↓ · x check · X show checked · r refresh/redraw · q close"
         },
         Some(HighlightGroup::Comment),
     );
@@ -582,6 +597,7 @@ pub fn render_custom(
         );
         targets.push(None);
     }
+    let mut item_rows = vec![None; builder.len()];
     for section in &custom.sections {
         let hidden = if hide_equal {
             section.equal_change_lines()
@@ -715,13 +731,16 @@ pub fn render_custom(
         }
         builder.header("", None);
         targets.push(None);
+        item_rows.resize(builder.len(), Some(format!("section:{}", section.id)));
     }
     if hide_equal && hunk_lines.is_empty() {
         builder.header("No unequal changes", Some(HighlightGroup::Comment));
         targets.push(None);
     }
+    item_rows.resize(builder.len(), None);
     let fallback = builder.len().saturating_sub(1);
     Rendered {
+        item_rows,
         title: format!("{DIFF_REVIEW_TITLE_PREFIX}{title}"),
         text: builder.text,
         rows: builder.rows,
@@ -1206,7 +1225,10 @@ fn render_split(
                     let line = builder.len();
                     let mut row = RowBuilder::default();
                     row.push(
-                        &file_banner(entry, geometry.row_width()),
+                        &file_banner(
+                            entry,
+                            geometry.row_width().saturating_sub("  [x] checked".len()),
+                        ),
                         Some(HighlightGroup::DiffHeader),
                     );
                     builder.push(row, ReviewRow::single(header_cell(*info, index, "")));
@@ -1569,7 +1591,7 @@ pub fn expand_context(
     tab_width: usize,
 ) -> Vec<Option<String>> {
     use std::collections::{BTreeMap, HashMap};
-    type Insertion = (String, Builder, Vec<Option<CustomTarget>>);
+    type Insertion = (String, Builder, Vec<Option<CustomTarget>>, Option<String>);
     let mut insertions: BTreeMap<usize, Vec<Insertion>> = BTreeMap::new();
     let mut ids = vec![None; rendered.rows.len()];
     let geometry = SplitGeometry::new(&snapshot.patch, width);
@@ -1746,10 +1768,12 @@ pub fn expand_context(
                     targets.push(Some(target.clone()));
                 }
             }
-            insertions
-                .entry(position)
-                .or_default()
-                .push((region.id.clone(), builder, targets));
+            insertions.entry(position).or_default().push((
+                region.id.clone(),
+                builder,
+                targets,
+                rendered.item_rows[first].clone(),
+            ));
         }
     }
     if insertions.is_empty() {
@@ -1761,10 +1785,12 @@ pub fn expand_context(
     let mut highlights = Vec::new();
     let mut targets = Vec::new();
     let mut result_ids = Vec::new();
+    let mut item_rows = Vec::new();
     let mut mapping = vec![0; original.len()];
     for index in 0..=original.len() {
         if let Some(entries) = insertions.remove(&index) {
-            for (id, builder, context_targets) in entries {
+            for (id, builder, context_targets, item) in entries {
+                item_rows.extend(std::iter::repeat_n(item, builder.rows.len()));
                 result_ids.extend(std::iter::repeat_n(Some(id), builder.rows.len()));
                 text.push_str(&builder.text);
                 rows.extend(builder.rows);
@@ -1780,6 +1806,7 @@ pub fn expand_context(
             highlights.push(rendered.highlights[index].clone());
             targets.push(rendered.custom_targets.get(index).cloned().flatten());
             result_ids.push(ids[index].clone());
+            item_rows.push(rendered.item_rows[index].clone());
         }
     }
     let remap = |line: &mut usize| {
@@ -1796,6 +1823,7 @@ pub fn expand_context(
     for (line, _) in &mut rendered.stat_rows {
         remap(line);
     }
+    rendered.item_rows = item_rows;
     rendered.text = text;
     rendered.rows = rows;
     rendered.highlights = highlights;

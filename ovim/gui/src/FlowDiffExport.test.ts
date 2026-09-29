@@ -314,3 +314,22 @@ it("exports the selected unified guided order with full-width code", () => {
     expect(svg).toContain('width="1492" height="25"');
     expect(svg).not.toContain(">AFTER</text>");
 });
+
+it("exports only visible reviewed items and labels hidden accounting", () => {
+    const checked = { ...file("checked.rs"), checked: true, binary: true };
+    const document = review([checked]);
+    const options = {
+        view: "files" as const,
+        layout: "unified" as const,
+        reconstruction: "old" as const,
+        traceMoves: false,
+        hideEqual: false,
+    };
+    const hidden = buildDiffExportImage(document, options).svg;
+    expect(hidden).not.toContain("checked.rs");
+    expect(hidden).toContain("1 reviewed items hidden");
+    expect(hidden).toContain("All visible changes reviewed");
+    expect(
+        buildDiffExportImage({ ...document, showChecked: true }, options).svg,
+    ).toContain("checked.rs");
+});

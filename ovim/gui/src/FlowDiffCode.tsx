@@ -93,6 +93,12 @@ export function FileLine(props: {
     return (
         <div
             class={`flow-code-line ${props.line.kind}`}
+            data-source-path={
+                props.pathOverride ||
+                (props.side === "old"
+                    ? props.file.oldPath || props.file.path
+                    : props.file.path)
+            }
             data-source-line={number()}
             data-source-side={props.side}
         >

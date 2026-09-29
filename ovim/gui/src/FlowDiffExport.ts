@@ -711,7 +711,11 @@ export function buildDiffExportImage(
         draft.rows.push({ row, y: draft.bottom });
         draft.bottom += row.height;
     };
+    const hiddenReviewed = review.showChecked
+        ? 0
+        : files.filter((file) => file.checked).length;
     for (const file of files) {
+        if (file.checked && !review.showChecked) continue;
         const block = fileBlock(file, moves, options);
         if (!block) continue;
         append(block.header);
@@ -726,7 +730,7 @@ export function buildDiffExportImage(
         0,
     );
     const moveCount = review.moves?.length ?? 0;
-    const coverage = `${options.hideEqual ? "Equal paired changes hidden · original patch: " : ""}${review.files.length} files · ${moveCount} possible moved-code matches · +${additions} −${deletions}`;
+    const coverage = `${hiddenReviewed ? `${hiddenReviewed} reviewed items hidden · ` : ""}${options.hideEqual ? "Equal paired changes hidden · original patch: " : ""}${review.files.length} files · ${moveCount} possible moved-code matches · +${additions} −${deletions}`;
     const scope = options.view === "guided" ? "Guided sections" : "Files";
     const stem = safeStem(review.title);
 
@@ -745,7 +749,11 @@ export function buildDiffExportImage(
               {
                   kind: "note",
                   height: 28,
-                  text: options.hideEqual ? "No unequal changes" : "No changes",
+                  text: hiddenReviewed
+                      ? "All visible changes reviewed"
+                      : options.hideEqual
+                        ? "No unequal changes"
+                        : "No changes",
               },
               bodyTop,
           );

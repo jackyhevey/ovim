@@ -108,6 +108,7 @@ export interface GuiDiffDocument {
     layout: "split" | "unified";
     managed: boolean;
     custom: boolean;
+    showChecked?: boolean;
     moves?: GuiDiffMove[];
     guidedFiles?: GuiDiffDocument["files"];
     overlay?: {
@@ -116,6 +117,7 @@ export interface GuiDiffDocument {
     };
     files: Array<{
         id: string;
+        checked?: boolean;
         label?: string;
         message?: string;
         path: string;

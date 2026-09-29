@@ -87,6 +87,20 @@ fn try_handle_diff_review_key(editor: &mut Editor, key_event: KeyEvent) -> bool 
         return false;
     }
     match key_event.code {
+        KeyCode::Char('x')
+            if !key_event
+                .modifiers
+                .intersects(Modifiers::CONTROL | Modifiers::ALT) =>
+        {
+            editor.toggle_diff_review_check_at_cursor()
+        }
+        KeyCode::Char('X')
+            if !key_event
+                .modifiers
+                .intersects(Modifiers::CONTROL | Modifiers::ALT) =>
+        {
+            editor.toggle_diff_review_show_checked()
+        }
         KeyCode::Enter => editor.diff_review_open_at_cursor(),
         KeyCode::Char('q') => editor.close_diff_review(),
         KeyCode::Char('r') => editor.refresh_diff_review(),

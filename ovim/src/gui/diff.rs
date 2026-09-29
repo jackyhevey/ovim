@@ -17,6 +17,7 @@ pub struct GuiDiffReview {
     pub layout: &'static str,
     pub managed: bool,
     pub custom: bool,
+    pub show_checked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<GuiDiffProvenance>,
     pub files: Vec<GuiDiffFile>,
@@ -95,6 +96,7 @@ impl Serialize for GuiDiffDocument {
 #[serde(rename_all = "camelCase")]
 pub struct GuiDiffFile {
     pub id: String,
+    pub checked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -181,6 +183,9 @@ fn project_review_patch(title: &str, review: &DiffReviewState) -> GuiDiffReview 
         .iter()
         .map(|file| GuiDiffFile {
             id: file.path.clone(),
+            checked: review
+                .checked_items
+                .contains(&format!("file:{}", file.path)),
             label: None,
             message: None,
             path: file.path.clone(),
@@ -242,6 +247,7 @@ fn project_review_patch(title: &str, review: &DiffReviewState) -> GuiDiffReview 
         layout: layout_name(review.layout),
         managed: true,
         custom: false,
+        show_checked: review.show_checked,
         provenance: Some(GuiDiffProvenance {
             base_label: patch.base.name.clone(),
             comparison_base_oid: patch.comparison_base_oid.clone(),
@@ -403,6 +409,9 @@ fn project_guided_files(review: &DiffReviewState, custom: &CustomReview) -> Vec<
             };
             GuiDiffFile {
                 id: section.id.clone(),
+                checked: review
+                    .checked_items
+                    .contains(&format!("section:{}", section.id)),
                 label: section.label.clone(),
                 message: section.message.clone(),
                 path,
@@ -596,6 +605,7 @@ fn context_windows_from_lines(lines: BTreeMap<usize, GuiDiffLine>) -> Vec<GuiDif
 
 fn project_standalone(title: &str, path: &str, content: &str) -> GuiDiffReview {
     let mut file = GuiDiffFile {
+        checked: false,
         id: path.to_string(),
         label: None,
         message: None,
@@ -679,6 +689,7 @@ fn project_standalone(title: &str, path: &str, content: &str) -> GuiDiffReview {
         layout: "split",
         managed: false,
         custom: false,
+        show_checked: false,
         provenance: None,
         files: vec![file],
         overlay: None,
@@ -780,6 +791,11 @@ pub fn perform_diff_action(
     focus_diff_pane(editor, pane, buffer_id)?;
     let managed = editor.is_diff_review_buffer();
     match action {
+        "show_checked" if managed => editor.toggle_diff_review_show_checked(),
+        action if managed && action.starts_with("check:") => {
+            editor
+                .toggle_diff_review_check(action.strip_prefix("check:").expect("check action"))?;
+        }
         "refresh" if managed => editor.refresh_diff_review(),
         "split" if managed => editor.set_diff_review_layout(DiffLayout::Split),
         "unified" if managed => editor.set_diff_review_layout(DiffLayout::Unified),
@@ -811,6 +827,21 @@ pub fn perform_diff_action(
         _ => return Err(format!("Unsupported diff action: {action}")),
     }
     Ok(())
+}
+
+pub fn goto_diff_definition(
+    editor: &mut Editor,
+    pane: usize,
+    buffer_id: u64,
+    path: &str,
+    line: usize,
+    side: &str,
+    column: u32,
+) -> Result<(), String> {
+    focus_diff_pane(editor, pane, buffer_id)?;
+    editor
+        .diff_review_goto_definition(path, line, side, column)
+        .map_err(|error| format!("{error:#}"))
 }
 
 pub fn open_diff_source(
@@ -911,6 +942,41 @@ mod tests {
             &parents,
         )
         .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn review_checks_project_to_both_views_and_validate_pane_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let repo = Repository::init(root).unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        fs::write(root.join("source.rs"), "fn old() {}\n").unwrap();
+        commit(&repo);
+        fs::write(root.join("source.rs"), "fn updated() {}\n").unwrap();
+        let custom = review_snapshot(root, &ReviewBase::explicit("HEAD"))
+            .unwrap()
+            .reassign(&[])
+            .unwrap();
+        let mut editor = Editor::new();
+        editor.open_file(root.join("source.rs")).unwrap();
+        editor.open_custom_diff_review("Review", custom).unwrap();
+        editor.init_window_manager(100, 40);
+        let id = editor.buffer().id();
+        assert!(perform_diff_action(&mut editor, 0, id + 1, "check:file:source.rs").is_err());
+        assert!(perform_diff_action(&mut editor, 0, id, "check:file:unknown").is_err());
+        perform_diff_action(&mut editor, 0, id, "check:file:source.rs").unwrap();
+        let projected = project_diff(&editor, editor.buffer()).unwrap();
+        assert!(projected.files[0].checked);
+        assert!(projected.guided_files.iter().all(|file| file.checked));
+        assert!(!projected.show_checked);
+        assert!(!editor.buffer().rope().to_string().contains("updated()"));
+        perform_diff_action(&mut editor, 0, id, "show_checked").unwrap();
+        assert!(project_diff(&editor, editor.buffer()).unwrap().show_checked);
+        assert!(editor.buffer().rope().to_string().contains("updated()"));
+        assert!(goto_diff_definition(&mut editor, 0, id + 1, "source.rs", 1, "new", 4).is_err());
+        goto_diff_definition(&mut editor, 0, id, "source.rs", 1, "new", 4).unwrap();
+        assert_eq!(editor.buffer().cursor().col().0, 4);
+        assert!(!editor.is_diff_review_buffer());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

@@ -900,6 +900,7 @@ enum GuiRequest {
         path: String,
         line: usize,
         side: String,
+        definition_column: Option<u32>,
         reply: oneshot::Sender<Result<(), String>>,
     },
     Key {
@@ -1152,6 +1153,7 @@ impl GuiBridge {
         path: String,
         line: usize,
         side: String,
+        definition_column: Option<u32>,
     ) -> Result<(), String> {
         self.request(|reply| GuiRequest::OpenDiffSource {
             pane,
@@ -1159,6 +1161,7 @@ impl GuiBridge {
             path,
             line,
             side,
+            definition_column,
             reply,
         })
         .await
@@ -1731,10 +1734,19 @@ async fn handle_request(
             path,
             line,
             side,
+            definition_column,
             reply,
         } => {
-            let result = diff::open_diff_source(editor, pane, buffer_id, &path, line, &side)
-                .map_err(anyhow::Error::msg);
+            let result = if let Some(column) = definition_column {
+                diff::goto_diff_definition(editor, pane, buffer_id, &path, line, &side, column)
+            } else {
+                diff::open_diff_source(editor, pane, buffer_id, &path, line, &side)
+            }
+            .map_err(anyhow::Error::msg);
+            if result.is_ok() {
+                refresh_after_input(editor);
+                editor.dispatch_pending_intents().await;
+            }
             (reply, result)
         }
         GuiRequest::Key { input, reply } => {

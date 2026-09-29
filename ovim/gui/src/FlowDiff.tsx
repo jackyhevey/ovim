@@ -36,10 +36,18 @@ export type FlowDiffProps = {
     syntax?: Record<string, string>;
     onNavigateReviewLine?: (line: number) => void;
     onOpenSource?: (path: string, line: number, side: Side) => void;
+    onDefinition?: (
+        path: string,
+        line: number,
+        side: Side,
+        column: number,
+    ) => void;
     onLayoutChange?: (layout: "split" | "unified") => void;
     onExport?: (file: DiffImageFile) => Promise<boolean>;
     onAction?: (
         key:
+            | "show_checked"
+            | `check:${string}`
             | "q"
             | "r"
             | "toggle_overlay"
@@ -215,9 +223,20 @@ export default function FlowDiff(props: FlowDiffProps) {
     );
     const fileSections = (item: FlowDiffFile) =>
         sectionsByFile().get(item.id) ?? [];
+    const checkItem = (item: FlowDiffFile) => {
+        props.onAction?.(
+            `check:${effectiveView() === "guided" ? "section" : "file"}:${item.id}`,
+        );
+        panel?.focus();
+    };
+    const checkedCount = createMemo(
+        () => sourceFiles().filter((item) => item.checked).length,
+    );
     const visibleFiles = createMemo(() =>
         sourceFiles().filter(
-            (item) => !hideEqual() || !isEqualOnly(item, fileSections(item)),
+            (item) =>
+                (!item.checked || props.review.showChecked) &&
+                (!hideEqual() || !isEqualOnly(item, fileSections(item))),
         ),
     );
     const allSections = createMemo(() =>
@@ -769,6 +788,20 @@ export default function FlowDiff(props: FlowDiffProps) {
                     <span class="flow-renamed">from {item.oldPath}</span>
                 </Show>
             </div>
+            <Show when={props.review.managed && props.onAction}>
+                <label
+                    class="flow-review-check"
+                    title="Mark reviewed and hide (x)"
+                >
+                    <input
+                        type="checkbox"
+                        checked={item.checked ?? false}
+                        aria-label={`Reviewed ${item.label || item.path}`}
+                        onChange={() => checkItem(item)}
+                    />
+                    Reviewed
+                </label>
+            </Show>
             <span
                 class="flow-file-stats"
                 title="Original patch additions and deletions"
@@ -872,6 +905,38 @@ export default function FlowDiff(props: FlowDiffProps) {
             );
     };
 
+    const [navigationMessage, setNavigationMessage] = createSignal("");
+    const gotoDefinition = () => {
+        const selection = window.getSelection();
+        const node = selection?.focusNode;
+        const element = node instanceof Element ? node : node?.parentElement;
+        const code = element?.closest<HTMLElement>(".flow-line-text");
+        const row = code?.closest<HTMLElement>(".flow-code-line");
+        if (
+            !node ||
+            !code ||
+            !row ||
+            !panel?.contains(row) ||
+            !props.onDefinition
+        ) {
+            setNavigationMessage(
+                "Click a symbol in the diff, then press gd to go to its definition.",
+            );
+            return;
+        }
+        const range = document.createRange();
+        range.selectNodeContents(code);
+        range.setEnd(node, selection!.focusOffset);
+        const column = range.toString().length;
+        const path = row.dataset.sourcePath;
+        const line = Number(row.dataset.sourceLine);
+        const side = row.dataset.sourceSide as Side;
+        if (path && line > 0 && (side === "old" || side === "new")) {
+            setNavigationMessage("");
+            props.onDefinition(path, line, side, column);
+        }
+    };
+
     const keydown: JSX.EventHandlerUnion<HTMLElement, KeyboardEvent> = (
         event,
     ) => {
@@ -931,6 +996,13 @@ export default function FlowDiff(props: FlowDiffProps) {
             pendingGo = true;
             return;
         }
+        if (pendingGo && event.key === "d") {
+            pendingGo = false;
+            pendingBracket = "";
+            event.preventDefault();
+            gotoDefinition();
+            return;
+        }
         const openSource =
             event.key === "Enter" || (pendingGo && event.key === "f");
         pendingGo = false;
@@ -980,6 +1052,16 @@ export default function FlowDiff(props: FlowDiffProps) {
                 sections().find((s) => s.kind === "change");
             if (item && section)
                 expandContext(item, section, event.key === "K");
+            return;
+        }
+        if (event.key === "x" && file() && props.onAction) {
+            event.preventDefault();
+            checkItem(file()!);
+            return;
+        }
+        if (event.key === "X" && props.onAction) {
+            event.preventDefault();
+            props.onAction("show_checked");
             return;
         }
         if (event.key === "w") {
@@ -1035,6 +1117,11 @@ export default function FlowDiff(props: FlowDiffProps) {
             data-gui-native-control
             onKeyDown={keydown}
         >
+            <Show when={navigationMessage()}>
+                <div role="status" class="flow-navigation-message">
+                    {navigationMessage()}
+                </div>
+            </Show>
             <header class="flow-toolbar">
                 <div class="flow-toolbar-title" title={props.review.title}>
                     <strong>Review</strong>
@@ -1168,12 +1255,27 @@ export default function FlowDiff(props: FlowDiffProps) {
                     </div>
                     <button
                         type="button"
+                        class="flow-equal-toggle"
                         disabled={exporting() || !props.review.files.length}
                         title="Download this view and layout as one dark PNG image."
                         onClick={() => void exportImages()}
                     >
                         {exporting() ? "Exporting…" : "Export image"}
                     </button>
+                    <Show when={props.review.managed && props.onAction}>
+                        <button
+                            type="button"
+                            class="flow-equal-toggle"
+                            aria-pressed={props.review.showChecked ?? false}
+                            onClick={() => props.onAction?.("show_checked")}
+                            title="Show or hide reviewed items (X)"
+                        >
+                            {props.review.showChecked
+                                ? "Hide reviewed"
+                                : "Show reviewed"}{" "}
+                            ({checkedCount()})
+                        </button>
+                    </Show>
                     <Show when={props.onAction}>
                         <div class="flow-action-buttons">
                             <button
@@ -1373,9 +1475,11 @@ export default function FlowDiff(props: FlowDiffProps) {
                 when={visibleFiles().length}
                 fallback={
                     <div class="flow-empty">
-                        {hideEqual() && sourceFiles().length
-                            ? "No unequal changes"
-                            : "No changed files in this comparison."}
+                        {checkedCount() && !props.review.showChecked
+                            ? "All visible changes reviewed. Show reviewed to bring them back."
+                            : hideEqual() && sourceFiles().length
+                              ? "No unequal changes"
+                              : "No changed files in this comparison."}
                     </div>
                 }
             >

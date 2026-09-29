@@ -86,15 +86,12 @@ impl Editor {
 
         self.ensure_lsp_document_synced().await;
 
-        let server_ids = lsp.servers_for_document(&language_id, std::path::Path::new(&file_path));
-
         Some(GotoPrepared {
             lsp,
             uri,
             line,
             character,
             language_id,
-            server_ids,
         })
     }
 
@@ -117,17 +114,12 @@ impl Editor {
         let line = p.line;
         let character = p.character;
         let language_id = p.language_id;
-        let server_ids = p.server_ids;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            let result = if server_ids.len() > 1 {
-                lsp.goto_definition_multi(&uri, line, character, &server_ids)
-                    .await
-            } else {
-                lsp.goto_definition(&uri, line, character, &language_id)
-                    .await
-            };
+            let result = lsp
+                .goto_definition(&uri, line, character, &language_id)
+                .await;
             let _ = tx.send(result.map(|loc| GotoLocationResult {
                 location: loc,
                 new_tab,
@@ -226,5 +218,4 @@ struct GotoPrepared {
     line: u32,
     character: u32,
     language_id: String,
-    server_ids: Vec<String>,
 }

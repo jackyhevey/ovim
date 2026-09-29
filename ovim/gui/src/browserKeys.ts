@@ -1,6 +1,12 @@
-import type { WorkbenchSelection, WorkbenchTabReference } from "./workbench";
+import {
+    adjacentWorkbenchTab,
+    type WorkbenchSelection,
+    type WorkbenchTabReference,
+} from "./workbench";
 
 export type BrowserKeyIntent =
+    | "next_workbench_tab"
+    | "previous_workbench_tab"
     | "command"
     | "new_tab"
     | "restore_tab"
@@ -122,6 +128,16 @@ export const createBrowserKeyRouter = (options: BrowserKeyRouterOptions) => {
         const sessionId = event.sessionId;
         if (!sessionId || !options.hasSession(sessionId)) return;
         switch (event.intent) {
+            case "next_workbench_tab":
+            case "previous_workbench_tab":
+                options.selectTab(
+                    adjacentWorkbenchTab(
+                        options.tabs(),
+                        options.selection(),
+                        event.intent === "previous_workbench_tab",
+                    ),
+                );
+                break;
             case "command":
                 options.openCommand(sessionId);
                 break;

@@ -131,3 +131,11 @@ describe("browser key router", () => {
         expect(actions.closeTab).not.toHaveBeenCalled();
     });
 });
+
+it("Ctrl+Tab intents include source tabs and wrap in both directions", async () => {
+    const { route, actions } = setup();
+    await route({ sessionId: "one", intent: "previous_workbench_tab" });
+    expect(actions.selectTab).toHaveBeenLastCalledWith(0);
+    await route({ sessionId: "one", intent: "next_workbench_tab" });
+    expect(actions.selectTab).toHaveBeenLastCalledWith(2);
+});

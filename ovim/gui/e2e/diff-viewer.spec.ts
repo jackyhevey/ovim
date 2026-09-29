@@ -677,6 +677,9 @@ test("stale restructuring can be recovered through native diff actions", async (
     await expect(page.locator(".flow-move-overlay")).toHaveCount(0);
     await page.getByRole("button", { name: "View saved review" }).click();
     await expect(page.locator(".flow-move-overlay")).toHaveCount(0);
+    // Frozen reviews open in Guided; move overlays belong to the Files view.
+    await expect(page.getByRole("button", { name: "Guided", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "Files", exact: true }).click();
     await page.getByRole("button", { name: "Show moved-code matches" }).click();
     await expect(page.locator(".flow-move-overlay")).toBeVisible();
     await expect(

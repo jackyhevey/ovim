@@ -19,6 +19,7 @@
 //! whichever of `main` / `origin/main` has the most recent merge-base with
 //! HEAD so a stale local or remote copy never pollutes the review.
 
+mod checks;
 mod highlight;
 mod render;
 
@@ -33,6 +34,7 @@ use crate::native_diff::{self, CustomReview, PatchLineKind, ReviewBase, ReviewPa
 use crate::syntax::HighlightGroup;
 use crate::unicode::{grapheme_index_for_byte, GraphemeCol};
 
+pub use checks::ReviewChecks;
 pub use render::{DiffLayout, DIFF_REVIEW_TITLE_PREFIX};
 
 use render::{
@@ -41,6 +43,9 @@ use render::{
 
 /// State of the open branch review, if any.
 pub struct DiffReviewState {
+    item_rows: Vec<Option<String>>,
+    pub checked_items: std::collections::BTreeSet<String>,
+    pub show_checked: bool,
     /// The read-only buffer showing the patch.
     pub buffer_id: BufferId,
     /// Buffer that was current when the review was (re-)entered. `Enter`
@@ -585,6 +590,9 @@ impl Editor {
         let buffer_id = self.buffer().id();
 
         self.ui_panels.diff_review = Some(DiffReviewState {
+            item_rows: Vec::new(),
+            checked_items: Default::default(),
+            show_checked: false,
             buffer_id,
             origin_buffer_id,
             origin_tab,
@@ -688,6 +696,9 @@ impl Editor {
         self.open_diff_buffer_in_new_tab(&rendered.title, &rendered.text);
         let buffer_id = self.buffer().id();
         self.ui_panels.diff_review = Some(DiffReviewState {
+            item_rows: Vec::new(),
+            checked_items: Default::default(),
+            show_checked: false,
             buffer_id,
             origin_buffer_id,
             origin_tab,
@@ -1044,6 +1055,26 @@ impl Editor {
     /// A left click inside the review. Returns true when it hit the toolbar
     /// and the caller should not move the cursor.
     pub fn diff_review_click(&mut self, line: usize, col: usize) -> bool {
+        if self.is_diff_review_buffer() {
+            let item = self.diff_review().and_then(|state| {
+                let text = state.line_text(line)?;
+                let suffix = if text.ends_with("  [x] checked") {
+                    "  [x] checked"
+                } else if text.ends_with("  [ ]") {
+                    "  [ ]"
+                } else {
+                    return None;
+                };
+                let start = crate::unicode::grapheme_count(&text[..text.len() - suffix.len()]) + 2;
+                (col >= start && col < start + 3)
+                    .then(|| state.item_rows.get(line).cloned().flatten())
+                    .flatten()
+            });
+            if let Some(id) = item {
+                let _ = self.toggle_diff_review_check(&id);
+                return true;
+            }
+        }
         let Some(layout) = self
             .ui_panels
             .diff_review
@@ -1202,6 +1233,107 @@ impl Editor {
         self.set_status_message(format!(
             "{path}:{new_line} · <Space>gd returns to the review"
         ));
+        self.mark_dirty();
+        Ok(())
+    }
+
+    pub fn diff_review_goto_definition_at_cursor(&mut self) {
+        let result = (|| {
+            let state = self
+                .diff_review()
+                .ok_or_else(|| anyhow::anyhow!("No diff review"))?;
+            let line = self.buffer().cursor().line();
+            let col = self.buffer().cursor().col().0;
+            let cell = state
+                .row(line)
+                .and_then(|row| row.cell_at(col))
+                .ok_or_else(|| anyhow::anyhow!("Move to a symbol in the diff first"))?;
+            let target = state
+                .custom_target_at(line, col)
+                .or_else(|| {
+                    let file = state.patch.files.get(cell.info.file?)?;
+                    if cell.info.kind == PatchLineKind::Removed {
+                        Some((
+                            file.old_path.as_ref().unwrap_or(&file.path).clone(),
+                            cell.info.old_line?,
+                            "old",
+                        ))
+                    } else {
+                        Some((file.path.clone(), cell.info.new_line?, "new"))
+                    }
+                })
+                .ok_or_else(|| anyhow::anyhow!("Move to a symbol in the diff first"))?;
+            let text = snapshot_saved_line(&state.context_snapshot, &target.0, target.1, target.2)
+                .ok_or_else(|| anyhow::anyhow!("Source is not in this review"))?;
+            let glyphs = layout_body(
+                text,
+                self.diff_review_tab_width(),
+                state.layout == DiffLayout::Split,
+            );
+            let offset = cell.src_glyph
+                + col
+                    .saturating_sub(cell.text_col)
+                    .min(cell.text_len.saturating_sub(1));
+            let source_col = glyphs
+                .get(offset)
+                .map(|glyph| grapheme_index_for_byte(text, glyph.src_byte))
+                .unwrap_or(0);
+            let utf16_column = crate::unicode::grapheme_indices(text)
+                .take(source_col)
+                .map(|(_, glyph)| glyph.encode_utf16().count() as u32)
+                .sum();
+            self.diff_review_goto_definition(&target.0, target.1, target.2, utf16_column)
+        })();
+        if let Err(error) = result {
+            self.set_status_message(format!("Definition: {error:#}"));
+        }
+    }
+
+    /// Resolve a symbol selected in either frontend against verified live source.
+    /// A frozen/removed line must never send stale coordinates to an LSP server.
+    pub fn diff_review_goto_definition(
+        &mut self,
+        path: &str,
+        line: usize,
+        side: &str,
+        utf16_column: u32,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(self.is_diff_review_buffer(), "No active branch review");
+        let state = self
+            .diff_review()
+            .ok_or_else(|| anyhow::anyhow!("No diff review is open"))?;
+        let saved = snapshot_saved_line(&state.context_snapshot, path, line, side)
+            .ok_or_else(|| anyhow::anyhow!("Source is not in this review: {path}:{line}"))?
+            .to_string();
+        anyhow::ensure!(
+            utf16_column < saved.encode_utf16().count() as u32,
+            "Select a symbol in the diff first"
+        );
+        let file = state
+            .patch
+            .files
+            .iter()
+            .find(|file| file.path == path || file.old_path.as_deref() == Some(path))
+            .ok_or_else(|| anyhow::anyhow!("File is not in this review"))?;
+        let target = state.patch.root.join(&file.path);
+        let live = std::fs::read_to_string(&target)?;
+        anyhow::ensure!(
+            live.lines().nth(line.saturating_sub(1)) == Some(saved.as_str()),
+            "This saved line differs from the live source; open the source to navigate definitions"
+        );
+        self.go_to_review_origin();
+        self.open_file(target)?;
+        anyhow::ensure!(
+            self.buffer().line_text(line - 1).as_deref() == Some(saved.as_str()),
+            "The source has unsaved changes at this line; select the symbol in the source"
+        );
+        let col = self.utf16_to_grapheme_col(line - 1, utf16_column);
+        self.buffer_mut()
+            .cursor_mut()
+            .set_position(line - 1, GraphemeCol(col));
+        self.buffer_mut().validate_cursor_position();
+        self.center_cursor_in_viewport();
+        self.request_goto_definition();
         self.mark_dirty();
         Ok(())
     }
@@ -1495,6 +1627,16 @@ impl Editor {
             state.layout_width,
             tab_width,
         );
+        let checked = checks::item_checks(state, &self.ui_panels.diff_review_checks);
+        state.checked_items = checked;
+        state.show_checked = self.ui_panels.diff_review_show_checked;
+        checks::filter_rendered(
+            &mut rendered,
+            &mut state.context_rows,
+            &state.checked_items,
+            state.show_checked,
+        );
+        state.item_rows = rendered.item_rows.clone();
         self.buffers[index].replace_content(&rendered.text);
         self.buffers[index].set_forced_highlights(rendered.highlights);
         let state = self.ui_panels.diff_review.as_mut().expect("review state");

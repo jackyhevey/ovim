@@ -861,3 +861,89 @@ describe("FlowDiff", () => {
         }
     });
 });
+
+describe("review checks", () => {
+    for (const layout of ["split", "unified"] as const) {
+        for (const guided of [false, true]) {
+            it(`checks and restores ${guided ? "guided sections" : "files"} in ${layout}`, async () => {
+                const [document, setDocument] = createSignal<FlowDiffReview>({
+                    ...review,
+                    managed: true,
+                    layout,
+                    custom: guided,
+                    overlay: guided ? { mode: "saved" } : undefined,
+                    guidedFiles: guided ? review.files : undefined,
+                });
+                const action = vi.fn((key: string) => {
+                    if (key === "show_checked")
+                        setDocument((d) => ({
+                            ...d,
+                            showChecked: !d.showChecked,
+                        }));
+                    else {
+                        const prefix = `check:${guided ? "section" : "file"}:`;
+                        expect(key.startsWith(prefix)).toBe(true);
+                        const id = key.slice(prefix.length);
+                        setDocument((d) => ({
+                            ...d,
+                            [guided ? "guidedFiles" : "files"]: (guided
+                                ? d.guidedFiles!
+                                : d.files
+                            ).map((f) =>
+                                f.id === id ? { ...f, checked: !f.checked } : f,
+                            ),
+                        }));
+                    }
+                });
+                const result = render(() => (
+                    <FlowDiff review={document()} onAction={action} />
+                ));
+                const checkbox = result.getAllByRole("checkbox", {
+                    name: "Reviewed src/uneven.ts",
+                })[0];
+                fireEvent.click(checkbox);
+                await waitFor(() =>
+                    expect(
+                        result.queryAllByRole("checkbox", {
+                            name: "Reviewed src/uneven.ts",
+                        }),
+                    ).toHaveLength(0),
+                );
+                fireEvent.click(
+                    result.getByRole("button", { name: "Show reviewed (1)" }),
+                );
+                const restored = result.getAllByRole("checkbox", {
+                    name: "Reviewed src/uneven.ts",
+                })[0] as HTMLInputElement;
+                expect(restored.checked).toBe(true);
+                fireEvent.click(restored);
+                expect(
+                    result.getByRole("button", { name: "Hide reviewed (0)" }),
+                ).toBeTruthy();
+                result.unmount();
+            });
+        }
+    }
+});
+
+it("gd routes the selected diff symbol with its UTF-16 source column", () => {
+    const definition = vi.fn();
+    const result = render(() => (
+        <FlowDiff review={review} onDefinition={definition} />
+    ));
+    const code = result.container.querySelector(
+        ".flow-code-line.added .flow-line-text",
+    )!;
+    const node = code.firstChild!.firstChild!;
+    const selection = window.getSelection()!;
+    selection.collapse(node, 3);
+    const panel = result.getByRole("region", { name: "Diff review" });
+    fireEvent.keyDown(panel, { key: "g" });
+    fireEvent.keyDown(panel, { key: "d" });
+    expect(definition).toHaveBeenCalledWith("src/uneven.ts", 5, "new", 3);
+    selection.removeAllRanges();
+    fireEvent.keyDown(panel, { key: "g" });
+    fireEvent.keyDown(panel, { key: "d" });
+    expect(result.getByRole("status").textContent).toContain("Click a symbol");
+    result.unmount();
+});

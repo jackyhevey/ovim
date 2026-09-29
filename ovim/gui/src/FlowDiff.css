@@ -825,3 +825,20 @@
     outline: 2px solid #d6aa46;
     outline-offset: -2px;
 }
+
+.flow-review-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-left: auto;
+    white-space: nowrap;
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+.flow-review-check input {
+    accent-color: var(--accent);
+}
+.flow-navigation-message {
+    padding: 8px 12px;
+    color: var(--text-secondary);
+}

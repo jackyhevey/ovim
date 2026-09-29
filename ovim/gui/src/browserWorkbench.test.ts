@@ -495,3 +495,41 @@ describe("browser workbench controller", () => {
         );
     });
 });
+
+it("opening browser chrome cancels queued page focus", () =>
+    createRoot((dispose) => {
+        const frames: FrameRequestCallback[] = [];
+        vi.stubGlobal(
+            "requestAnimationFrame",
+            (callback: FrameRequestCallback) => {
+                frames.push(callback);
+                return frames.length;
+            },
+        );
+        const [selection, setSelection] = createSignal<WorkbenchSelection>({
+            kind: "browser",
+            sessionId: "browser-1",
+        });
+        const controller = createBrowserWorkbench({
+            native: true,
+            sourceTabs: () => sourceTabs,
+            includeVector: () => false,
+            selection,
+            setSelection,
+            setError: vi.fn(),
+        });
+        controller.present("browser-1");
+        controller.present("browser-1", false);
+        while (frames.length) frames.shift()!(0);
+        expect(invoke).not.toHaveBeenCalledWith("gui_browser_toolbar", {
+            sessionId: "browser-1",
+            action: "focus",
+        });
+        controller.present("browser-1");
+        while (frames.length) frames.shift()!(0);
+        expect(invoke).toHaveBeenCalledWith("gui_browser_toolbar", {
+            sessionId: "browser-1",
+            action: "focus",
+        });
+        dispose();
+    }));

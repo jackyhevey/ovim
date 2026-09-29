@@ -70,11 +70,17 @@ export const createBrowserWorkbench = (options: BrowserWorkbenchOptions) => {
                 action: "focus",
             });
     };
-    const present = (sessionId: string) => {
+    let presentationFocusSerial = 0;
+    const present = (sessionId: string, focusPage = true) => {
+        const serial = ++presentationFocusSerial;
         options.setSelection({ kind: "browser", sessionId });
+        if (!focusPage) return;
         requestAnimationFrame(() =>
             requestAnimationFrame(() => {
-                if (activeSessionId() === sessionId)
+                if (
+                    serial === presentationFocusSerial &&
+                    activeSessionId() === sessionId
+                )
                     void focus(sessionId).catch(() => {});
             }),
         );

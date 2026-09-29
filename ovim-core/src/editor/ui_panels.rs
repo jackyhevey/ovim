@@ -52,6 +52,9 @@ pub struct UiPanels {
     pub diff_review_hide_equal: bool,
     /// Hide agent messages on saved review sections (visible by default).
     pub diff_review_hide_notes: bool,
+    /// Content-addressed review checks survive closing/reopening within this session.
+    pub diff_review_checks: super::diff_review::ReviewChecks,
+    pub diff_review_show_checked: bool,
     /// Layout the next review opens in; `s` and the toolbar change it.
     pub diff_review_layout: super::diff_review::DiffLayout,
 }

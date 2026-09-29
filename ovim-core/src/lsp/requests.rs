@@ -30,48 +30,8 @@ impl LspManager {
         character: u32,
         language_id: &str,
     ) -> Result<Option<lsp_types::Location>> {
-        use lsp_types::{
-            GotoDefinitionParams, GotoDefinitionResponse, Position, TextDocumentIdentifier,
-            TextDocumentPositionParams,
-        };
-
-        let server = self
-            .servers
-            .get(language_id)
-            .ok_or_else(|| anyhow::anyhow!("No server for language: {}", language_id))?;
-
-        // Check if server supports goto definition
-        if !server.supports_goto_definition().await {
-            return Ok(None); // Gracefully return None if not supported
-        }
-
-        let params = GotoDefinitionParams {
-            text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
-                position: Position { line, character },
-            },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        };
-
-        let result = server
-            .request("textDocument/definition", serde_json::to_value(params)?)
-            .await?;
-
-        let response: Option<GotoDefinitionResponse> =
-            parse_lsp_response(result, "textDocument/definition");
-
-        // Convert response to single location (take first if multiple)
-        Ok(response.and_then(|resp| match resp {
-            GotoDefinitionResponse::Scalar(location) => Some(location),
-            GotoDefinitionResponse::Array(locations) => locations.into_iter().next(),
-            GotoDefinitionResponse::Link(links) => {
-                links.into_iter().next().map(|link| lsp_types::Location {
-                    uri: link.target_uri,
-                    range: link.target_selection_range,
-                })
-            }
-        }))
+        self.goto_for_document(uri, line, character, language_id, "textDocument/definition")
+            .await
     }
 
     /// Requests go-to-declaration for a position in a document
@@ -133,49 +93,14 @@ impl LspManager {
         character: u32,
         language_id: &str,
     ) -> Result<Option<lsp_types::Location>> {
-        use lsp_types::GotoDefinitionResponse as GotoImplementationResponse;
-        use lsp_types::{
-            request::GotoImplementationParams, Position, TextDocumentIdentifier,
-            TextDocumentPositionParams,
-        };
-
-        let server = self
-            .servers
-            .get(language_id)
-            .ok_or_else(|| anyhow::anyhow!("No server for language: {}", language_id))?;
-
-        // Check if server supports goto implementation
-        if !server.supports_goto_implementation().await {
-            return Ok(None); // Gracefully return None if not supported
-        }
-
-        let params = GotoImplementationParams {
-            text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
-                position: Position { line, character },
-            },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        };
-
-        let result = server
-            .request("textDocument/implementation", serde_json::to_value(params)?)
-            .await?;
-
-        let response: Option<GotoImplementationResponse> =
-            parse_lsp_response(result, "textDocument/implementation");
-
-        // Convert response to single location (take first if multiple)
-        Ok(response.and_then(|resp| match resp {
-            GotoImplementationResponse::Scalar(location) => Some(location),
-            GotoImplementationResponse::Array(locations) => locations.into_iter().next(),
-            GotoImplementationResponse::Link(links) => {
-                links.into_iter().next().map(|link| lsp_types::Location {
-                    uri: link.target_uri,
-                    range: link.target_selection_range,
-                })
-            }
-        }))
+        self.goto_for_document(
+            uri,
+            line,
+            character,
+            language_id,
+            "textDocument/implementation",
+        )
+        .await
     }
 
     /// Requests go-to-type-definition for a position in a document
@@ -186,49 +111,14 @@ impl LspManager {
         character: u32,
         language_id: &str,
     ) -> Result<Option<lsp_types::Location>> {
-        use lsp_types::GotoDefinitionResponse as GotoTypeDefinitionResponse;
-        use lsp_types::{
-            request::GotoTypeDefinitionParams, Position, TextDocumentIdentifier,
-            TextDocumentPositionParams,
-        };
-
-        let server = self
-            .servers
-            .get(language_id)
-            .ok_or_else(|| anyhow::anyhow!("No server for language: {}", language_id))?;
-
-        // Check if server supports goto type definition
-        if !server.supports_goto_type_definition().await {
-            return Ok(None); // Gracefully return None if not supported
-        }
-
-        let params = GotoTypeDefinitionParams {
-            text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
-                position: Position { line, character },
-            },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-        };
-
-        let result = server
-            .request("textDocument/typeDefinition", serde_json::to_value(params)?)
-            .await?;
-
-        let response: Option<GotoTypeDefinitionResponse> =
-            parse_lsp_response(result, "textDocument/typeDefinition");
-
-        // Convert response to single location (take first if multiple)
-        Ok(response.and_then(|resp| match resp {
-            GotoTypeDefinitionResponse::Scalar(location) => Some(location),
-            GotoTypeDefinitionResponse::Array(locations) => locations.into_iter().next(),
-            GotoTypeDefinitionResponse::Link(links) => {
-                links.into_iter().next().map(|link| lsp_types::Location {
-                    uri: link.target_uri,
-                    range: link.target_selection_range,
-                })
-            }
-        }))
+        self.goto_for_document(
+            uri,
+            line,
+            character,
+            language_id,
+            "textDocument/typeDefinition",
+        )
+        .await
     }
 
     /// Requests hover information for a position in a document
@@ -1854,12 +1744,56 @@ impl LspManager {
         line: u32,
         character: u32,
     ) -> Result<Option<lsp_types::Location>> {
+        Self::goto_on_server(server, uri, line, character, "textDocument/definition").await
+    }
+
+    /// Route all navigation requests through the document's owning root, even
+    /// when there is just one server (its ID need not equal the language).
+    async fn goto_for_document(
+        &self,
+        uri: &Uri,
+        line: u32,
+        character: u32,
+        language_id: &str,
+        method: &'static str,
+    ) -> Result<Option<lsp_types::Location>> {
+        let ids = self.servers_for_document_uri(language_id, uri);
+        anyhow::ensure!(!ids.is_empty(), "No server for this {language_id} document");
+        if ids.len() == 1 {
+            let server = self
+                .servers
+                .get(&ids[0])
+                .map(|entry| entry.value().clone())
+                .ok_or_else(|| anyhow::anyhow!("Language server is no longer running"))?;
+            return Self::goto_on_server(&server, uri, line, character, method).await;
+        }
+        let results = self
+            .fan_out(&ids, |server| {
+                let uri = uri.clone();
+                async move { Self::goto_on_server(&server, &uri, line, character, method).await }
+            })
+            .await;
+        Ok(results.into_iter().flatten().next())
+    }
+
+    async fn goto_on_server(
+        server: &super::LanguageServer,
+        uri: &Uri,
+        line: u32,
+        character: u32,
+        method: &str,
+    ) -> Result<Option<lsp_types::Location>> {
         use lsp_types::{
             GotoDefinitionParams, GotoDefinitionResponse, Position, TextDocumentIdentifier,
             TextDocumentPositionParams,
         };
 
-        if !server.supports_goto_definition().await {
+        let supported = match method {
+            "textDocument/implementation" => server.supports_goto_implementation().await,
+            "textDocument/typeDefinition" => server.supports_goto_type_definition().await,
+            _ => server.supports_goto_definition().await,
+        };
+        if !supported {
             return Ok(None);
         }
 
@@ -1873,11 +1807,13 @@ impl LspManager {
         };
 
         let result = server
-            .request("textDocument/definition", serde_json::to_value(params)?)
+            .request(method, serde_json::to_value(params)?)
             .await?;
 
-        let response: Option<GotoDefinitionResponse> =
-            parse_lsp_response(result, "textDocument/definition");
+        if result.is_null() {
+            return Ok(None);
+        }
+        let response: Option<GotoDefinitionResponse> = parse_lsp_response(result, method);
         Ok(response.and_then(|resp| match resp {
             GotoDefinitionResponse::Scalar(location) => Some(location),
             GotoDefinitionResponse::Array(locations) => locations.into_iter().next(),
@@ -2032,5 +1968,80 @@ mod tests {
         assert!(err
             .to_string()
             .contains("No server for language 'rust' supports workspace/executeCommand"));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod navigation_routing_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn navigation_uses_the_document_root_server_even_when_it_is_the_only_one() {
+        // Exercise the actual JSON-RPC transport and LocationLink conversion.
+        let script = r#"
+import json, sys
+while True:
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line: sys.exit(0)
+        if line == b'\r\n': break
+        key, value = line.decode().split(':', 1)
+        headers[key.lower()] = value.strip()
+    request = json.loads(sys.stdin.buffer.read(int(headers['content-length'])))
+    if 'id' not in request: continue
+    method = request['method']
+    if method == 'initialize':
+        result = {'capabilities': {'definitionProvider': True, 'implementationProvider': True, 'typeDefinitionProvider': True}}
+    elif method == 'shutdown': result = None
+    else:
+        assert request['params']['position'] == {'line': 2, 'character': 7}
+        result = [{'targetUri': 'file:///workspace/nested/target.rs', 'targetRange': {'start': {'line': 0, 'character': 0}, 'end': {'line': 9, 'character': 0}}, 'targetSelectionRange': {'start': {'line': 3, 'character': 4}, 'end': {'line': 3, 'character': 8}}}]
+    body = json.dumps({'jsonrpc': '2.0', 'id': request['id'], 'result': result}).encode()
+    sys.stdout.buffer.write(('Content-Length: %d\r\n\r\n' % len(body)).encode() + body)
+    sys.stdout.buffer.flush()
+"#;
+        let mut server = super::super::LanguageServer::spawn(
+            "rust",
+            "python3",
+            vec!["-u".into(), "-c".into(), script.into()],
+        )
+        .await
+        .unwrap();
+        server
+            .initialize("file:///workspace/nested".parse().unwrap())
+            .await
+            .unwrap();
+        let manager = LspManager::new();
+        let id = "rust@nested".to_string();
+        manager.servers.insert(id.clone(), server.clone());
+        manager
+            .language_server_index
+            .insert("rust".into(), vec![id.clone()]);
+        manager.server_roots.insert(id, "/workspace/nested".into());
+        let uri = "file:///workspace/nested/source.rs".parse().unwrap();
+        for method in [
+            "textDocument/definition",
+            "textDocument/implementation",
+            "textDocument/typeDefinition",
+        ] {
+            let result = manager
+                .goto_for_document(&uri, 2, 7, "rust", method)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.range.start, lsp_types::Position::new(3, 4));
+            assert_eq!(result.uri.as_str(), "file:///workspace/nested/target.rs");
+        }
+        assert!(manager
+            .goto_definition(
+                &"file:///elsewhere/source.rs".parse().unwrap(),
+                2,
+                7,
+                "rust"
+            )
+            .await
+            .is_err());
+        server.shutdown().await.unwrap();
     }
 }

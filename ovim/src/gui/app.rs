@@ -153,9 +153,10 @@ async fn gui_open_diff_source(
     path: String,
     line: usize,
     side: String,
+    definition_column: Option<u32>,
 ) -> Result<(), String> {
     bridge
-        .open_diff_source(pane, buffer_id, path, line, side)
+        .open_diff_source(pane, buffer_id, path, line, side, definition_column)
         .await
 }
 
