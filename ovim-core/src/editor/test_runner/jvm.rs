@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 
 use super::nearest::{discover_tests, jvm_package, nearest_test, DiscoveredTest};
 use super::runners::TestScope;
-use crate::launch::plan::{gradle_program, maven_program, LaunchPlan, PlanKind, TaskPlan};
+use crate::launch::plan::{
+    gradle_program, maven_program, with_clean_test, LaunchPlan, PlanKind, TaskPlan,
+};
 use crate::syntax::Language;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,46 +39,23 @@ fn has_gradle_build(dir: &Path) -> bool {
         .any(|f| dir.join(f).is_file())
 }
 
-fn has_gradle_settings(dir: &Path) -> bool {
-    ["settings.gradle", "settings.gradle.kts"]
-        .iter()
-        .any(|f| dir.join(f).is_file())
-}
-
-fn find_module(file: &Path) -> Option<Module> {
+/// The module that owns `file`: its nearest ancestor with a Gradle build
+/// file or a pom. The workspace `root` is given, never rediscovered here: it
+/// is the one the language server and the launch flow use
+/// (`project_root::find_project_root_with_outermost`).
+fn find_module(file: &Path, root: &Path) -> Option<Module> {
     let mut dir = file.parent()?;
     loop {
         let gradle = has_gradle_build(dir);
-        let maven = dir.join("pom.xml").is_file();
-        if gradle || maven {
-            let tool = if gradle {
-                BuildTool::Gradle
-            } else {
-                BuildTool::Maven
-            };
-            let module = dir.to_path_buf();
-            let mut root = module.clone();
-            let mut up = dir.parent();
-            while let Some(candidate) = up {
-                let is_root = match tool {
-                    BuildTool::Gradle => has_gradle_settings(candidate),
-                    BuildTool::Maven => candidate.join("pom.xml").is_file(),
-                };
-                if is_root {
-                    root = candidate.to_path_buf();
-                } else if tool == BuildTool::Maven {
-                    // Poms must be contiguous.
-                    break;
-                }
-                up = candidate.parent();
-            }
-            if tool == BuildTool::Gradle && has_gradle_settings(&module) {
-                root = module.clone();
-            }
+        if gradle || dir.join("pom.xml").is_file() {
             return Some(Module {
-                tool,
-                dir: module,
-                root,
+                tool: if gradle {
+                    BuildTool::Gradle
+                } else {
+                    BuildTool::Maven
+                },
+                dir: dir.to_path_buf(),
+                root: root.to_path_buf(),
             });
         }
         dir = dir.parent()?;
@@ -245,17 +224,19 @@ fn class_declared_at(
     found
 }
 
-/// Composes a test plan for the file, or explains why it cannot.
+/// Composes a test plan for the file, or explains why it cannot. `root` is
+/// the workspace root the build tool runs in.
 pub fn local_test_plan(
     scope: TestScope,
     file: &Path,
     source: &str,
     cursor_line: usize,
     lang: Language,
+    root: &Path,
 ) -> Result<LocalTest, String> {
     let tests = discover_tests(lang, source);
     let package = jvm_package(source);
-    let module = find_module(file).ok_or_else(|| {
+    let module = find_module(file, root).ok_or_else(|| {
         "No Gradle or Maven project found for this file (looked for build.gradle(.kts) / pom.xml)"
             .to_string()
     })?;
@@ -294,13 +275,8 @@ pub fn local_test_plan(
                 .components()
                 .map(|c| format!(":{}", c.as_os_str().to_string_lossy()))
                 .collect();
-            // `cleanTest` first: an unchanged rerun would otherwise be
-            // UP-TO-DATE and write no new reports.
-            let mut argv = vec![
-                gradle_program(&module.root),
-                format!("{project_path}:cleanTest"),
-                format!("{project_path}:test"),
-            ];
+            let task = format!("{project_path}:test");
+            let mut argv = vec![gradle_program(&module.root), task.clone()];
             for (class, method) in &selection.filters {
                 argv.push("--tests".to_string());
                 argv.push(match method {
@@ -309,6 +285,9 @@ pub fn local_test_plan(
                 });
             }
             argv.push("--console=plain".to_string());
+            // `cleanTest` first: an unchanged rerun would otherwise be
+            // UP-TO-DATE and write no new reports.
+            let argv = with_clean_test(argv, Some(&task));
             let mut debug = argv.clone();
             debug.push("--debug-jvm".to_string());
             (
@@ -377,6 +356,7 @@ pub fn local_test_plan(
             class_name: selection.class_name,
             method_name: selection.method_name,
             reports_dir: Some(reports_dir),
+            shell: None,
         }),
         attach: None,
         warnings: Vec::new(),

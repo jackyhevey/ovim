@@ -722,50 +722,6 @@ impl Editor {
             }
         }
 
-        // Document symbols
-        if let Some(result) = self.lsp.slots.document_symbols.poll_with_timeout(timeout) {
-            match result {
-                Ok(r) if !r.symbols.is_empty() => {
-                    let count = r.symbols.len();
-                    self.lsp.state.available_document_symbols = r.symbols.clone();
-                    self.lsp.state.active_lsp_result_type =
-                        Some(crate::editor::LspResultType::DocumentSymbols);
-                    let file_path = r.file_path;
-                    let items: Vec<crate::editor::picker::PickerResult> = r
-                        .symbols
-                        .iter()
-                        .map(|sym| {
-                            let line = sym.range.start.line as usize;
-                            let col = self.utf16_to_grapheme_col(line, sym.range.start.character);
-                            crate::editor::picker::PickerResult {
-                                display: format!(
-                                    "{}:{}:{} {}",
-                                    file_path,
-                                    line + 1,
-                                    col + 1,
-                                    sym.name
-                                ),
-                                location: file_path.to_string(),
-                                line,
-                                col,
-                                match_positions: Vec::new(),
-                                content: None,
-                            }
-                        })
-                        .collect();
-                    self.open_location_picker(items, "Document Symbols");
-                    self.set_lsp_status(format!("Found {} symbols", count));
-                    changed = true;
-                }
-                Ok(_) => {
-                    self.set_lsp_status("No symbols found".to_string());
-                }
-                Err(e) => {
-                    self.set_lsp_status(format!("Document symbols request failed: {}", e));
-                }
-            }
-        }
-
         // Workspace symbols (live picker: results replace the list in place)
         if let Some(result) = self.lsp.slots.workspace_symbols.poll_with_timeout(timeout) {
             match result {
@@ -1186,7 +1142,6 @@ impl Editor {
         self.lsp.state.available_code_actions.clear();
         self.lsp.state.available_completions.clear();
         self.lsp.state.available_references.clear();
-        self.lsp.state.available_document_symbols.clear();
         self.lsp.state.available_workspace_symbols.clear();
         self.lsp.state.available_call_hierarchy.clear();
         self.lsp.state.available_type_hierarchy.clear();
@@ -1315,11 +1270,6 @@ impl Editor {
     /// Request find references at current cursor position
     pub fn request_find_references(&mut self) {
         self.lsp.intents.find_references = true;
-    }
-
-    /// Request document symbols for the current document
-    pub fn request_document_symbols(&mut self) {
-        self.lsp.intents.document_symbols = true;
     }
 
     /// Request workspace symbols
@@ -1568,7 +1518,7 @@ impl Editor {
 
         if let Some(old) = old_path {
             self.lsp.state.document_sync.remove(&old);
-            self.lsp.state.pending_did_close_file = Some(old);
+            self.queue_lsp_did_close(old);
         }
         if let Some(newp) = &new_path {
             // The target path may already be open on the server (e.g.
@@ -2250,12 +2200,23 @@ impl Editor {
         }
     }
 
-    /// Sends didClose notification to LSP for the pending file
-    pub async fn send_lsp_close_if_needed(&mut self) {
-        let Some(file_path) = self.lsp.state.pending_did_close_file.take() else {
-            return;
-        };
+    /// Queues a `didClose` for `path`, sent by the next
+    /// [`send_lsp_close_if_needed`](Self::send_lsp_close_if_needed).
+    pub(crate) fn queue_lsp_did_close(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        if !self.lsp.state.pending_did_close.contains(&path) {
+            self.lsp.state.pending_did_close.push(path);
+        }
+    }
 
+    /// Sends `didClose` for every queued document.
+    pub async fn send_lsp_close_if_needed(&mut self) {
+        for path in std::mem::take(&mut self.lsp.state.pending_did_close) {
+            self.send_did_close(&path).await;
+        }
+    }
+
+    async fn send_did_close(&mut self, file_path: &str) {
         // Switching away from a buffer only hides it: like other editors' LSP
         // clients (attach per loaded buffer, not per visible window) the
         // document stays open on the server while its buffer is loaded. That
@@ -2265,7 +2226,7 @@ impl Editor {
         let still_loaded = self
             .buffers
             .iter()
-            .any(|buffer| buffer.file_path() == Some(file_path.as_str()));
+            .any(|buffer| buffer.file_path() == Some(file_path));
         if still_loaded {
             return;
         }
@@ -2274,20 +2235,17 @@ impl Editor {
             return;
         };
 
-        let uri = match uri_from_file_path(&file_path) {
-            Some(u) => u,
-            None => return,
+        let Some(uri) = uri_from_file_path(file_path) else {
+            return;
         };
 
         // Get language_id from file extension
-        let language_id = match self.language_id_for_path(&file_path) {
-            Some(id) => id,
-            None => return,
+        let Some(language_id) = self.language_id_for_path(file_path) else {
+            return;
         };
 
-        let file_path_string = file_path.to_string();
         let _ = lsp.did_close_broadcast(uri, &language_id).await;
-        self.lsp.state.document_sync.remove(&file_path_string);
+        self.lsp.state.document_sync.remove(file_path);
     }
 
     // -------------------------------------------------------------------------
@@ -2351,9 +2309,6 @@ impl Editor {
         }
         if std::mem::take(&mut self.lsp.intents.find_references) {
             let _ = self.find_references_impl().await;
-        }
-        if std::mem::take(&mut self.lsp.intents.document_symbols) {
-            let _ = self.document_symbols_impl().await;
         }
         // The live symbol picker asks again whenever its query changes.
         if let Some(query) = self

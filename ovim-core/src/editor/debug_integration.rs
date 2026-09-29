@@ -6,7 +6,6 @@
 use super::*;
 use crate::dap::state::DebugState;
 use crate::dap::DapManager;
-use crate::language_config::DapConfig;
 use std::path::Path;
 
 /// What `:DebugLogpoint` / `:DebugHitCount` attach to a breakpoint.
@@ -116,15 +115,15 @@ impl Editor {
     }
 
     /// Start a debug session by spawning a debug adapter and initialising
-    /// it. `launch` is sent once the adapter reports `initialized`. A failure
+    /// it. `attach` is sent once the adapter reports `initialized`. A failure
     /// leaves nothing behind: the adapter is killed and state is reset.
     pub async fn start_debug_session(
         &mut self,
         command: &str,
         args: &[String],
-        launch: crate::dap::DapLaunchRequest,
+        attach: serde_json::Value,
     ) -> anyhow::Result<()> {
-        self.dap_manager.launch_request = Some(launch);
+        self.dap_manager.attach_request = Some(attach);
         let result = async {
             self.dap_manager.start(command, args).await?;
             self.dap_manager.initialize().await
@@ -832,14 +831,6 @@ impl Editor {
             ),
             (false, _) => format!("{what} set at line {line}"),
         }
-    }
-
-    /// Returns the DAP config for the current buffer's language, if any.
-    pub fn dap_config_for_current_file(&self) -> Option<&'static DapConfig> {
-        let fp = self.buffer().file_path()?;
-        let reg = crate::language_config::LanguageRegistry::try_get()?;
-        let lang = reg.detect(fp)?;
-        lang.dap.as_ref()
     }
 
     /// The 1-based execution line when the debuggee is stopped in the file of

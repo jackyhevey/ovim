@@ -185,6 +185,91 @@ async fn every_open_buffer_is_opened_once_the_shared_server_is_ready() {
     session.stop().await;
 }
 
+/// Two files closed between two ticks (a workspace edit renaming both) must
+/// both be reported: the close notification used to live in one slot, so the
+/// second close overwrote the first and the server kept a stale document.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_file_closed_in_one_tick_is_reported_to_the_server() {
+    let mut session = StartupSession::new();
+    session.wait_for_event("initialize").await;
+    session.ready();
+    let root = session.dir.path().canonicalize().unwrap();
+    let files: Vec<PathBuf> = ["old-a.controlled", "old-b.controlled"]
+        .iter()
+        .map(|name| root.join(name))
+        .collect();
+    for file in &files {
+        std::fs::write(file, "text\n").unwrap();
+        session.test.editor.new_tab();
+        session.test.editor.open_file(file).unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while session.events("textDocument/didOpen").len() < 3 {
+            session.tick().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("all three buffers must be didOpen'd");
+
+    let uri = |file: &PathBuf| ovim::lsp::uri_from_file_path(file.display().to_string()).unwrap();
+    let rename = |file: &PathBuf| {
+        let renamed = file.with_file_name(
+            file.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .replace("old", "new"),
+        );
+        lsp_types::DocumentChangeOperation::Op(lsp_types::ResourceOp::Rename(
+            lsp_types::RenameFile {
+                old_uri: uri(file),
+                new_uri: uri(&renamed),
+                options: None,
+                annotation_id: None,
+            },
+        ))
+    };
+    let edit = lsp_types::WorkspaceEdit {
+        changes: None,
+        document_changes: Some(lsp_types::DocumentChanges::Operations(
+            files.iter().map(rename).collect(),
+        )),
+        change_annotations: None,
+    };
+    session.test.editor.apply_workspace_edit(edit).unwrap();
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while session.events("textDocument/didClose").len() < 2 {
+            session.tick().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "expected a didClose per renamed file, got {:?}",
+            session.events("textDocument/didClose")
+        )
+    });
+    let closed: Vec<String> = session
+        .events("textDocument/didClose")
+        .iter()
+        .map(|event| {
+            event["params"]["textDocument"]["uri"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    for file in &files {
+        assert!(
+            closed.contains(&uri(file).as_str().to_string()),
+            "{closed:?}"
+        );
+    }
+    session.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn buffer_opened_in_a_split_after_startup_is_opened_on_the_server() {
     let mut session = StartupSession::new();

@@ -628,12 +628,6 @@ pub struct ReferencesResult {
     pub locations: Vec<lsp_types::Location>,
 }
 
-/// Result of a document-symbols request.
-pub struct DocumentSymbolsResult {
-    pub symbols: Vec<lsp_types::DocumentSymbol>,
-    pub file_path: String,
-}
-
 /// Result of a workspace-symbols request.
 pub struct WorkspaceSymbolsResult {
     pub symbols: Vec<lsp_types::SymbolInformation>,
@@ -705,7 +699,6 @@ pub struct LspSlots {
     // -- Actions (Step 5) --
     pub format: Slot<FormatResult>,
     pub references: Slot<ReferencesResult>,
-    pub document_symbols: Slot<DocumentSymbolsResult>,
     pub workspace_symbols: Slot<WorkspaceSymbolsResult>,
     pub code_actions: Slot<CodeActionsResult>,
     pub rename: Slot<RenameResult>,
@@ -732,7 +725,6 @@ impl LspSlots {
         self.diagnostics.cancel();
         self.format.cancel();
         self.references.cancel();
-        self.document_symbols.cancel();
         self.workspace_symbols.cancel();
         self.code_actions.cancel();
         self.rename.cancel();
@@ -757,7 +749,6 @@ impl LspSlots {
             || self.diagnostics.is_pending()
             || self.format.is_pending()
             || self.references.is_pending()
-            || self.document_symbols.is_pending()
             || self.workspace_symbols.is_pending()
             || self.code_actions.is_pending()
             || self.rename.is_pending()
@@ -788,7 +779,6 @@ impl Default for LspSlots {
             diagnostics: TrackedSlot::new(),
             format: Slot::new(),
             references: Slot::new(),
-            document_symbols: Slot::new(),
             workspace_symbols: Slot::new(),
             code_actions: Slot::new(),
             rename: Slot::new(),

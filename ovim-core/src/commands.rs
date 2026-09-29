@@ -1747,10 +1747,11 @@ fn handle_mapclear_command(editor: &mut Editor, command: &str) -> CommandResult 
     crate::command_result::ok_silent()
 }
 
-/// Execute :make command — runs makeprg and populates the quickfix list
+/// Execute :make command — runs makeprg through the launch pipeline (so
+/// `:LaunchStop` stops it and a second `:make` replaces it); its diagnostics
+/// become the quickfix list when it finishes.
 fn execute_make_command(editor: &mut Editor, args: &str) -> CommandResult {
-    use crate::editor::{MakeResult, PendingMake};
-    use std::process::Command;
+    use crate::launch::plan::PlanKind;
 
     // Build the command: makeprg + args (default: "cargo build")
     let makeprg = editor.options.makeprg.clone();
@@ -1759,38 +1760,13 @@ fn execute_make_command(editor: &mut Editor, args: &str) -> CommandResult {
     } else {
         format!("{} {}", makeprg, args)
     };
-
-    let (tx, rx) = std::sync::mpsc::channel();
-    let cmd_clone = cmd.clone();
-
-    std::thread::spawn(move || {
-        #[cfg(target_os = "windows")]
-        let (shell, shell_arg) = ("cmd", "/C");
-        #[cfg(not(target_os = "windows"))]
-        let (shell, shell_arg) = ("sh", "-c");
-
-        let result = match Command::new(shell).arg(shell_arg).arg(&cmd_clone).output() {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                MakeResult {
-                    output: format!("{}{}", stdout, stderr),
-                    success: output.status.success(),
-                }
-            }
-            Err(e) => MakeResult {
-                output: format!("Failed to run '{}': {}", cmd_clone, e),
-                success: false,
-            },
-        };
-        let _ = tx.send(result);
-    });
-
-    editor.set_pending_make(PendingMake {
-        receiver: rx,
-        command: cmd.clone(),
-    });
-
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    editor.begin_request(crate::editor::LaunchRequest::shell(
+        PlanKind::Task,
+        "make",
+        &cmd,
+        cwd,
+    ));
     ok(format!("Running: {}", cmd))
 }
 

@@ -201,12 +201,7 @@ async fn process_pending_debug_action(editor: &mut Editor) {
         return;
     }
     if editor.dap_manager_mut().take_breakpoint_sync_request() && editor.is_debug_active() {
-        let paths: Vec<std::path::PathBuf> =
-            editor.debug_state().breakpoints.keys().cloned().collect();
-        for path in &paths {
-            let _ = editor.debug_sync_breakpoints(path).await;
-        }
-        let _ = editor.dap_manager().sync_exception_breakpoints().await;
+        sync_all_breakpoints(editor).await;
         editor.mark_dirty();
     }
     let Some(action) = editor.dap_manager_mut().pending_action.take() else {
@@ -218,16 +213,10 @@ async fn process_pending_debug_action(editor: &mut Editor) {
         PendingDebugAction::Start {
             command,
             args,
-            launch,
+            attach,
         } => {
-            if let Err(e) = editor.start_debug_session(&command, &args, launch).await {
+            if let Err(e) = editor.start_debug_session(&command, &args, attach).await {
                 editor.launch_debug_failed(e.to_string());
-            }
-            editor.mark_dirty();
-        }
-        PendingDebugAction::Stop => {
-            if let Err(e) = editor.stop_debug_session().await {
-                editor.set_status_message(format!("Debug stop failed: {e}"));
             }
             editor.mark_dirty();
         }
@@ -255,16 +244,11 @@ async fn process_pending_debug_action(editor: &mut Editor) {
             }
             editor.mark_dirty();
         }
-        PendingDebugAction::LaunchOrAttach => {
-            process_dap_launch_or_attach(editor).await;
+        PendingDebugAction::Attach => {
+            process_dap_attach(editor).await;
         }
         PendingDebugAction::SyncBreakpoints => {
-            let paths: Vec<std::path::PathBuf> =
-                editor.debug_state().breakpoints.keys().cloned().collect();
-            for path in &paths {
-                let _ = editor.debug_sync_breakpoints(path).await;
-            }
-            let _ = editor.dap_manager().sync_exception_breakpoints().await;
+            sync_all_breakpoints(editor).await;
             match editor.dap_manager_mut().configuration_done().await {
                 Ok(()) => editor.launch_debug_started(),
                 Err(e) => {
@@ -366,32 +350,38 @@ async fn process_pending_debug_action(editor: &mut Editor) {
     }
 }
 
-/// Send the DAP `launch` / `attach` request for the session being started.
+/// Send the DAP `attach` request for the session being started.
 ///
 /// Every way of starting a session (F5, `:debug start`, `<Space>dc`, the
-/// config picker, test debugging) arrives here with a fully resolved request.
-async fn process_dap_launch_or_attach(editor: &mut Editor) {
-    use crate::dap::{DapLaunchRequest, PendingDebugAction};
+/// config picker, test debugging) arrives here: ovim has already started the
+/// JVM and the adapter only attaches to it.
+async fn process_dap_attach(editor: &mut Editor) {
+    use crate::dap::PendingDebugAction;
 
-    let Some(request) = editor.dap_manager().launch_request.clone() else {
+    let Some(arguments) = editor.dap_manager().attach_request.clone() else {
         // Nothing was asked for; a stray `initialized` event. Do not send
         // `configurationDone` to an adapter that has no debuggee.
         return;
     };
-    let result = match request {
-        DapLaunchRequest::Launch(arguments) => editor.dap_manager_mut().launch(arguments).await,
-        DapLaunchRequest::Attach(arguments) => editor.dap_manager_mut().attach(arguments).await,
-    };
-    match result {
+    match editor.dap_manager_mut().attach(arguments).await {
         Ok(()) => {
             editor.dap_manager_mut().pending_action = Some(PendingDebugAction::SyncBreakpoints);
         }
         Err(e) => {
             let _ = editor.stop_debug_session().await;
-            editor.launch_debug_failed(format!("launch/attach failed: {e}"));
+            editor.launch_debug_failed(format!("attach failed: {e}"));
         }
     }
     editor.mark_dirty();
+}
+
+/// Sends every breakpoint file and the exception filters to the adapter.
+async fn sync_all_breakpoints(editor: &mut Editor) {
+    let paths: Vec<std::path::PathBuf> = editor.debug_state().breakpoints.keys().cloned().collect();
+    for path in &paths {
+        let _ = editor.debug_sync_breakpoints(path).await;
+    }
+    let _ = editor.dap_manager().sync_exception_breakpoints().await;
 }
 
 /// Spawn background syntax highlighting if the buffer needs it.
@@ -460,12 +450,6 @@ async fn poll_background_tasks(editor: &mut Editor) {
         let _ = open::that_in_background(&url);
     }
     if editor.poll_pending_codex_auth() {
-        editor.mark_dirty();
-    }
-    if editor.poll_pending_make() {
-        editor.mark_dirty();
-    }
-    if editor.poll_pending_test() {
         editor.mark_dirty();
     }
     if editor.poll_search_replace() {

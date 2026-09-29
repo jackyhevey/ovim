@@ -510,18 +510,6 @@ pub enum LspInstallConsent {
     No,
 }
 
-/// A background `:make` job waiting for results.
-pub struct PendingMake {
-    pub receiver: std::sync::mpsc::Receiver<MakeResult>,
-    pub command: String,
-}
-
-/// Result from a `:make` background job.
-pub struct MakeResult {
-    pub output: String,
-    pub success: bool,
-}
-
 /// Cached picker layout rects for mouse hit-testing
 #[derive(Debug, Clone)]
 pub struct PickerLayout {
@@ -1943,8 +1931,8 @@ impl Editor {
         self.sync_current_tab_buffer();
 
         // Mark that we need to send didClose for the old file
-        if old_file_path.is_some() {
-            self.lsp.state.pending_did_close_file = old_file_path;
+        if let Some(old) = old_file_path {
+            self.queue_lsp_did_close(old);
         }
 
         Ok(())

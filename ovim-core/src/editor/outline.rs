@@ -84,9 +84,9 @@ fn is_crumb_kind(kind: &str) -> bool {
     )
 }
 
-/// Chain of symbols containing 0-based `line`, outermost first.
-fn enclosing_chain(symbols: &[OutlineSymbol], line: usize) -> Vec<BreadcrumbItem> {
-    let mut chain = Vec::new();
+/// The symbols containing 0-based `line`, outermost first (of every kind).
+pub(crate) fn enclosing_path(symbols: &[OutlineSymbol], line: usize) -> Vec<&OutlineSymbol> {
+    let mut path = Vec::new();
     let mut level = symbols;
     while let Some(symbol) = level
         .iter()
@@ -96,15 +96,22 @@ fn enclosing_chain(symbols: &[OutlineSymbol], line: usize) -> Vec<BreadcrumbItem
         // Innermost wins when siblings overlap (e.g. one-line members).
         .min_by_key(|symbol| symbol.end_line - symbol.start_line)
     {
-        if is_crumb_kind(&symbol.kind) {
-            chain.push(BreadcrumbItem {
-                name: symbol.name.clone(),
-                kind: symbol.kind.clone(),
-            });
-        }
+        path.push(symbol);
         level = &symbol.children;
     }
-    chain
+    path
+}
+
+/// Chain of "where am I" symbols containing 0-based `line`, outermost first.
+fn enclosing_chain(symbols: &[OutlineSymbol], line: usize) -> Vec<BreadcrumbItem> {
+    enclosing_path(symbols, line)
+        .into_iter()
+        .filter(|symbol| is_crumb_kind(&symbol.kind))
+        .map(|symbol| BreadcrumbItem {
+            name: symbol.name.clone(),
+            kind: symbol.kind.clone(),
+        })
+        .collect()
 }
 
 /// Rows of the outline picker: depth-indented, with kind and line.
@@ -139,13 +146,19 @@ fn outline_rows(symbols: &[OutlineSymbol], file: &str) -> Vec<PickerResult> {
 impl Editor {
     /// The enclosing symbols of the cursor, outermost first ("Circle", "area()").
     pub fn breadcrumbs(&self) -> Vec<BreadcrumbItem> {
+        enclosing_chain(self.outline_symbols(), self.buffer().cursor().line())
+    }
+
+    /// The symbol tree of the current buffer: from the language server, or
+    /// tree-sitter before it answers (empty until either has run).
+    pub(crate) fn outline_symbols(&self) -> &[OutlineSymbol] {
         let state = &self.ui_panels.outline;
         if state.source == OutlineSource::None
             || self.buffer().file_path() != state.file_path.as_deref()
         {
-            return Vec::new();
+            return &[];
         }
-        enclosing_chain(&state.symbols, self.buffer().cursor().line())
+        &state.symbols
     }
 
     /// Breadcrumbs as one line: `Circle › area()`.

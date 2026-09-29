@@ -23,7 +23,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use super::Editor;
-use crate::dap::{DapLaunchRequest, PendingDebugAction};
+use crate::dap::PendingDebugAction;
 use crate::debug_config::DebugRunConfig;
 use crate::launch::console::{LineKind, RunOutcome, RunPhase, RunStatus};
 use crate::launch::lsp::{self, ResolveOutcome, ResolveResult};
@@ -84,6 +84,20 @@ pub struct LaunchRequest {
 }
 
 impl LaunchRequest {
+    /// Runs `command` through the shell in `cwd` (see [`LaunchPlan::shell`]):
+    /// `kind` is [`PlanKind::Test`] for the test panel or [`PlanKind::Task`]
+    /// for `:make`.
+    pub(crate) fn shell(kind: PlanKind, label: &'static str, command: &str, cwd: PathBuf) -> Self {
+        Self {
+            mode: LaunchMode::Run,
+            source: LaunchSource::Plan {
+                project_root: cwd.clone(),
+                plan: Box::new(LaunchPlan::shell(kind, label, command, cwd)),
+            },
+            adapter: None,
+        }
+    }
+
     fn project_root(&self) -> &Path {
         match &self.source {
             LaunchSource::Cursor { project_root, .. }
@@ -158,6 +172,17 @@ impl LaunchJob {
             StreamKind::Stdout => append_capped(&mut self.log_stdout, text),
             StreamKind::Stderr => append_capped(&mut self.log_stderr, text),
         }
+    }
+
+    /// The shell command line behind this job, for `<Space>t*` runs of
+    /// non-JVM languages and `:make`.
+    fn shell_run(&self) -> Option<&plan::ShellRun> {
+        self.plan.as_ref()?.task.as_ref()?.shell.as_ref()
+    }
+
+    /// `:make`: a shell task whose diagnostics go to the quickfix list.
+    fn is_make(&self) -> bool {
+        self.shell_run().is_some() && self.plan.as_ref().is_some_and(|p| p.kind == PlanKind::Task)
     }
 
     fn clear_log(&mut self) {
@@ -730,21 +755,20 @@ impl Editor {
                 }
             }
         }
-        const MARKERS: &[&str] = &[
-            "settings.gradle.kts",
-            "settings.gradle",
-            "pom.xml",
-            "build.gradle.kts",
-            "build.gradle",
-            ".ovim",
-            ".git",
-        ];
-        let markers: Vec<String> = MARKERS.iter().map(|m| m.to_string()).collect();
-        let outermost: Vec<String> = ["settings.gradle.kts", "settings.gradle", "pom.xml"]
-            .map(String::from)
-            .into();
+        // The markers are the language's own (languages.toml), so this is the
+        // root the server would be started with; `.ovim` (project run
+        // configurations) and `.git` cover projects with no build tool.
+        let (mut markers, outermost) = self
+            .language_catalog
+            .detect(&file)
+            .and_then(|language| {
+                let lsp = language.config.lsp.as_ref()?;
+                Some((lsp.root_markers.clone(), lsp.outermost_root_markers.clone()))
+            })
+            .unwrap_or_default();
+        markers.extend([".ovim".to_string(), ".git".to_string()]);
         let root =
-            crate::language_config::find_project_root_with_outermost(&file, &markers, &outermost);
+            crate::project_root::find_project_root_with_outermost(&file, &markers, &outermost);
         if root.as_os_str().is_empty() {
             file.parent()
                 .map(Path::to_path_buf)
@@ -1158,11 +1182,11 @@ impl Editor {
         match (plan.kind, mode) {
             (PlanKind::Attach, _) => {
                 let attach = plan.attach.clone().expect("attach plans carry a target");
-                let request = DapLaunchRequest::Attach(serde_json::json!({
+                let request = serde_json::json!({
                     "host": attach.host,
                     "port": attach.port,
                     "projectRoot": attach.project_root,
-                }));
+                });
                 self.log_console(
                     job.run_id,
                     LineKind::System,
@@ -1195,13 +1219,14 @@ impl Editor {
         // Only the program itself reads stdin, not builds or test tasks.
         let interactive = matches!(stage, Stage::Running | Stage::AwaitingDebugPort { .. })
             && job.plan.as_ref().is_some_and(|p| p.kind == PlanKind::Main);
-        self.log_console(
-            job.run_id,
-            LineKind::System,
-            format!("$ {}", spec.display()),
-        );
+        // A shell command is shown as typed, not as its `sh -c` wrapper.
+        let shown = match job.shell_run() {
+            Some(shell) if stage == Stage::Running => shell.command.clone(),
+            _ => spec.display(),
+        };
+        self.log_console(job.run_id, LineKind::System, format!("$ {shown}"));
         if let Some(run) = self.launch.console.run_mut(job.run_id) {
-            run.command = spec.display();
+            run.command = shown;
             run.cwd = spec.cwd.clone();
         }
         let spawned = if interactive {
@@ -1292,7 +1317,7 @@ impl Editor {
     }
 
     /// Queues the debug adapter start for `request`.
-    fn begin_debugger(&mut self, job: &mut LaunchJob, request: DapLaunchRequest) {
+    fn begin_debugger(&mut self, job: &mut LaunchJob, attach: serde_json::Value) {
         let (command, args) = match self.debug_adapter_for(job) {
             Ok(found) => found,
             Err(message) => {
@@ -1310,7 +1335,7 @@ impl Editor {
         self.dap_manager.pending_action = Some(PendingDebugAction::Start {
             command,
             args,
-            launch: request,
+            attach,
         });
     }
 
@@ -1372,7 +1397,7 @@ impl Editor {
     pub fn launch_debug_failed(&mut self, message: String) {
         self.dap_manager.pending_action = None;
         self.dap_manager.state.end_session_keep_output();
-        self.dap_manager.launch_request = None;
+        self.dap_manager.attach_request = None;
         if let Some(mut job) = self.launch.job.take() {
             self.fail_job(&mut job, format!("Debug failed: {message}"));
         } else {
@@ -1452,6 +1477,13 @@ impl Editor {
                     if let Some(run) = self.launch.console.run_mut(job.run_id) {
                         run.push_line(stream_kind(mapping, stream), text.clone());
                     }
+                    if job.panel_run && job.shell_run().is_some() {
+                        // Shell test output is the panel's content (JUnit
+                        // runs replace theirs with the parsed reports).
+                        if let Some(run) = self.build.test_panel.runs.last_mut() {
+                            run.push_line(text.clone());
+                        }
+                    }
                     if let Stage::AwaitingDebugPort { .. } = job.stage {
                         if let Some(port) = plan::parse_listening_port(&text) {
                             self.attach_to_listening_jvm(job, port);
@@ -1485,12 +1517,14 @@ impl Editor {
             LineKind::System,
             format!("JVM is listening on port {port}; attaching debugger"),
         );
-        let request = DapLaunchRequest::Attach(serde_json::json!({
-            "host": "127.0.0.1",
-            "port": port,
-            "projectRoot": root,
-        }));
-        self.begin_debugger(job, request);
+        self.begin_debugger(
+            job,
+            serde_json::json!({
+                "host": "127.0.0.1",
+                "port": port,
+                "projectRoot": root,
+            }),
+        );
     }
 
     fn on_process_exit(&mut self, job: &mut LaunchJob, info: ExitInfo) {
@@ -1532,22 +1566,25 @@ impl Editor {
                     LineKind::System,
                     format!("Process finished with exit code {code_text}"),
                 );
+                let is_make = job.is_make();
                 self.finish_test_reports(job, ok);
-                if !ok {
+                // Shell runs report through their own output parsing (test
+                // panel, quickfix), not through build diagnostics.
+                if !ok && job.shell_run().is_none() {
                     let summary = self.report_build_problems(job, false);
                     if let Some(s) = summary {
                         self.set_status_message(s);
                     }
                 }
-                self.finish_job(
-                    job,
-                    if ok {
-                        RunOutcome::Succeeded
-                    } else {
-                        RunOutcome::Failed
-                    },
-                    code,
-                );
+                let outcome = if ok {
+                    RunOutcome::Succeeded
+                } else {
+                    RunOutcome::Failed
+                };
+                self.finish_job(job, outcome, code);
+                if is_make {
+                    self.finish_make(job, ok);
+                }
             }
             Stage::AwaitingDebugPort { .. } => {
                 if info.killed {
@@ -1618,23 +1655,65 @@ impl Editor {
         if entries.is_empty() {
             return summary;
         }
-        let first_error = entries
-            .iter()
-            .position(|e| e.entry_type == crate::editor::QuickfixEntryType::Error)
-            .unwrap_or(0);
         let title = job
             .plan
             .as_ref()
             .and_then(|p| p.build.as_ref())
             .map(|b| b.display())
             .unwrap_or_else(|| "build".to_string());
+        self.present_quickfix(entries, title, jump);
+        summary
+    }
+
+    /// Shows `entries` as the quickfix list: the first error (else the first
+    /// entry) selected, the window opened, and with `jump` the cursor taken
+    /// to it. The one place build and `:make` output reaches the user; test
+    /// runs stay silent (their panel is the surface) and set the list only.
+    pub(crate) fn present_quickfix(
+        &mut self,
+        entries: Vec<crate::editor::QuickfixEntry>,
+        title: String,
+        jump: bool,
+    ) {
+        let first_error = entries
+            .iter()
+            .position(|e| e.entry_type == crate::editor::QuickfixEntryType::Error)
+            .unwrap_or(0);
         self.set_quickfix_list(entries, title);
         self.ui_panels.quickfix_list.set_selected(first_error);
         if jump {
             self.jump_to_quickfix_entry();
         }
         self.open_quickfix_window();
-        summary
+    }
+
+    /// End of a `:make` run: diagnostics from the output (paths resolved
+    /// against the directory it ran in) become the quickfix list; the first
+    /// error is opened.
+    fn finish_make(&mut self, job: &LaunchJob, ok: bool) {
+        let Some(shell) = job.shell_run() else { return };
+        let cwd = job
+            .plan
+            .as_ref()
+            .and_then(|p| p.task.as_ref())
+            .map(|t| t.cwd.clone());
+        let entries = job.diagnostics(cwd.as_deref());
+        // Keep :MakeOutput working on the full log.
+        self.build.last_make_output = Some(job.log.clone());
+        let title = format!(":make {}", shell.command);
+        let count = entries.len();
+        if count > 0 {
+            self.present_quickfix(entries, title, true);
+            self.set_status_message(format!("{count} error(s)/warning(s)"));
+        } else {
+            self.set_quickfix_list(entries, title);
+            if ok {
+                self.close_quickfix_window();
+                self.set_status_message("Build succeeded — no errors".to_string());
+            } else {
+                self.set_status_message("Build failed (no parseable errors)".to_string());
+            }
+        }
     }
 
     /// Opens the test panel's record of a test plan (running).
@@ -1643,6 +1722,13 @@ impl Editor {
             return;
         };
         let debug = job.request.mode == LaunchMode::Debug;
+        if let Some(shell) = &task.shell {
+            self.build
+                .test_panel
+                .start_run(shell.label, shell.command.clone(), task.cwd.clone());
+            job.panel_run = true;
+            return;
+        }
         let label = match (debug, task.method_name.is_some(), task.class_name.is_some()) {
             (false, true, _) => "nearest",
             (false, false, true) => "file",
@@ -1670,6 +1756,11 @@ impl Editor {
     /// and surface the outcome in the console, the test panel (per test:
     /// pass/fail, message, jumpable frames) and the quickfix list.
     fn finish_test_reports(&mut self, job: &mut LaunchJob, exit_ok: bool) {
+        if job.panel_run && job.shell_run().is_some() {
+            job.panel_run = false;
+            self.finish_shell_test_run(exit_ok);
+            return;
+        }
         let Some(dir) = job
             .plan
             .as_ref()

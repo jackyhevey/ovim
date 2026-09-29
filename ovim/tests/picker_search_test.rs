@@ -28,14 +28,16 @@ fn tick_picker(picker: &mut Picker) {
     let mut last_count = None;
     let mut last_top = None;
 
-    for _ in 0..300 {
+    for _ in 0..600 {
         let changed = picker.tick();
         let count = picker.filtered_result_count();
         let top = picker.filtered_result(0).map(|r| r.display.clone());
 
         if !changed && last_count == Some(count) && last_top == top {
             stable_polls += 1;
-            if stable_polls >= 5 {
+            // A loaded CI runner can leave the matcher idle for tens of ms
+            // after the first snapshot (items injected, query not yet ranked).
+            if stable_polls >= 40 {
                 break;
             }
         } else {

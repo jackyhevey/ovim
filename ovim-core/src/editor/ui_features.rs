@@ -81,31 +81,18 @@ impl Editor {
 
     /// Opens the file tree explorer at the project root
     pub fn open_file_tree(&mut self) {
-        use crate::language_config::find_project_root;
-        use git2::Repository;
+        use crate::project_root::{find_project_root, vcs_root};
 
-        let file_path = self.buffer().file_path().map(|s| s.to_string());
-
-        let root = if let Some(ref file_path) = file_path {
-            let path = std::path::Path::new(file_path);
-
-            // Try git root first (most reliable for project boundary)
-            if let Ok(repo) = Repository::discover(path) {
-                if let Some(workdir) = repo.workdir() {
-                    workdir.to_path_buf()
-                } else {
-                    // Fallback: use language-specific markers
-                    find_project_root(
-                        path,
-                        &["Cargo.toml".into(), "package.json".into(), ".git".into()],
-                    )
-                }
-            } else {
-                // Not in git repo - use language markers or parent
-                find_project_root(path, &["Cargo.toml".into(), "package.json".into()])
+        let root = match self.buffer().file_path() {
+            Some(file_path) => {
+                let path = std::path::Path::new(file_path);
+                // The repository is the most reliable project boundary;
+                // outside one, the nearest language marker or the directory.
+                vcs_root(path).unwrap_or_else(|| {
+                    find_project_root(path, &["Cargo.toml".into(), "package.json".into()])
+                })
             }
-        } else {
-            std::env::current_dir().unwrap_or_default()
+            None => std::env::current_dir().unwrap_or_default(),
         };
 
         self.ui_panels.file_tree.open(&root);
@@ -209,53 +196,6 @@ impl Editor {
                         .cursor_mut()
                         .set_position(line, GraphemeCol(col));
                 }
-            }
-        }
-    }
-
-    /// Sets a pending `:make` background job.
-    pub fn set_pending_make(&mut self, pending: super::PendingMake) {
-        self.build.pending_make = Some(pending);
-    }
-
-    /// Polls for a completed `:make` job. Returns true if results were applied.
-    pub fn poll_pending_make(&mut self) -> bool {
-        let pending = match self.build.pending_make.take() {
-            Some(p) => p,
-            None => return false,
-        };
-
-        match pending.receiver.try_recv() {
-            Ok(result) => {
-                // Store raw output for :TestOutput / :MakeOutput
-                self.build.last_make_output = Some(result.output.clone());
-
-                let entries = crate::commands::parse_compiler_output(&result.output);
-                let entry_count = entries.len();
-                let title = format!(":make {}", pending.command);
-                self.set_quickfix_list(entries, title);
-
-                if entry_count > 0 {
-                    self.ui_panels.quickfix_list.first();
-                    self.jump_to_quickfix_entry();
-                    self.open_quickfix_window();
-                    self.set_status_message(format!("{} error(s)/warning(s)", entry_count));
-                } else if result.success {
-                    self.close_quickfix_window();
-                    self.set_status_message("Build succeeded — no errors".to_string());
-                } else {
-                    self.set_status_message("Build failed (no parseable errors)".to_string());
-                }
-                true
-            }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // Still running — put it back
-                self.build.pending_make = Some(pending);
-                false
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.set_status_message("Make job failed (thread panicked)".to_string());
-                true
             }
         }
     }

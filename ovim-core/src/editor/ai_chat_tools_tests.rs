@@ -3,8 +3,8 @@ use crate::ai::chat_types::{ChatOpts, ToolCallInfo};
 use crate::ai::path_policy::canonicalize_or_normalize;
 use crate::ai::skills::{SkillCatalog, ACTIVATED_SKILL_MARKER};
 use crate::ai::{FileScope, ToolApprovalMode};
-use crate::editor::ai_tool_execution::find_enclosing_symbol;
 use crate::editor::ai_tool_path::normalize_path;
+use crate::editor::outline::enclosing_path;
 use std::fs;
 
 fn set_active_profile_project_scope(editor: &mut Editor) {
@@ -46,63 +46,48 @@ fn remote_read_diff_result_remains_complete_json() {
 
 fn make_symbol(
     name: &str,
-    kind: lsp_types::SymbolKind,
-    start_line: u32,
-    end_line: u32,
-    children: Option<Vec<lsp_types::DocumentSymbol>>,
-) -> lsp_types::DocumentSymbol {
-    #[allow(deprecated)]
-    lsp_types::DocumentSymbol {
+    kind: &str,
+    start_line: usize,
+    end_line: usize,
+    children: Vec<crate::navigation_types::OutlineSymbol>,
+) -> crate::navigation_types::OutlineSymbol {
+    crate::navigation_types::OutlineSymbol {
         name: name.to_string(),
+        kind: kind.to_string(),
         detail: None,
-        kind,
-        tags: None,
-        deprecated: None,
-        range: lsp_types::Range {
-            start: lsp_types::Position::new(start_line, 0),
-            end: lsp_types::Position::new(end_line, 0),
-        },
-        selection_range: lsp_types::Range {
-            start: lsp_types::Position::new(start_line, 0),
-            end: lsp_types::Position::new(start_line, 10),
-        },
+        start_line,
+        end_line,
         children,
+        selection: None,
     }
 }
 
 #[test]
-fn find_enclosing_symbol_finds_deepest() {
+fn enclosing_path_finds_deepest_symbol_last() {
     let symbols = vec![make_symbol(
         "MyStruct",
-        lsp_types::SymbolKind::STRUCT,
-        10,
-        50,
-        Some(vec![
-            make_symbol("new", lsp_types::SymbolKind::FUNCTION, 15, 25, None),
-            make_symbol("update", lsp_types::SymbolKind::FUNCTION, 30, 45, None),
-        ]),
+        "struct",
+        11,
+        51,
+        vec![
+            make_symbol("new", "function", 16, 26, vec![]),
+            make_symbol("update", "function", 31, 46, vec![]),
+        ],
     )];
+    let names = |line: usize| -> Vec<&str> {
+        enclosing_path(&symbols, line)
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect()
+    };
 
-    // Cursor inside `new` function
-    let result = find_enclosing_symbol(&symbols, 20);
-    assert_eq!(result.unwrap().name, "new");
-
-    // Cursor inside `update` function
-    let result = find_enclosing_symbol(&symbols, 35);
-    assert_eq!(result.unwrap().name, "update");
-
-    // Cursor inside struct but outside any function
-    let result = find_enclosing_symbol(&symbols, 48);
-    assert_eq!(result.unwrap().name, "MyStruct");
-
-    // Cursor outside all symbols
-    let result = find_enclosing_symbol(&symbols, 5);
-    assert!(result.is_none());
-}
-
-#[test]
-fn find_enclosing_symbol_empty() {
-    assert!(find_enclosing_symbol(&[], 10).is_none());
+    // 0-based cursor lines: inside `new`, inside `update`, in the struct
+    // but outside any function, outside every symbol.
+    assert_eq!(names(20), ["MyStruct", "new"]);
+    assert_eq!(names(35), ["MyStruct", "update"]);
+    assert_eq!(names(48), ["MyStruct"]);
+    assert!(names(5).is_empty());
+    assert!(enclosing_path(&[], 10).is_empty());
 }
 
 #[test]

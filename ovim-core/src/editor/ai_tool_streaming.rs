@@ -8,7 +8,6 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use super::ai_chat_state::PendingAiChatJob;
-use super::ai_tool_execution::{find_enclosing_symbol, symbol_kind_label};
 use super::ai_tool_path::to_relative_path_for_boundary;
 use super::Editor;
 
@@ -663,17 +662,13 @@ impl Editor {
         out.push_str(&cursor_line);
         remaining = remaining.saturating_sub(cursor_line.len());
 
-        // --- Enclosing scope (if LSP symbols available) ---
-        if let Some(sym) = find_enclosing_symbol(
-            &self.lsp.state.available_document_symbols,
-            cursor.line() as u32,
-        ) {
-            let kind = symbol_kind_label(sym.kind);
-            let start = sym.range.start.line + 1;
-            let end = sym.range.end.line + 1;
+        // --- Enclosing scope (from the outline, when it exists) ---
+        if let Some(sym) =
+            super::outline::enclosing_path(self.outline_symbols(), cursor.line()).pop()
+        {
             let scope_line = format!(
                 "Enclosing: {} {} (lines {}-{})\n",
-                kind, sym.name, start, end
+                sym.kind, sym.name, sym.start_line, sym.end_line
             );
             if scope_line.len() <= remaining {
                 out.push_str(&scope_line);

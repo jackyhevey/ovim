@@ -8,6 +8,7 @@
 
 use super::nearest::{discover_tests, nearest_test, TestFlavor};
 use super::runners::{build_test_command, TestContext, TestScope};
+use crate::editor::Editor;
 use crate::language_config::TestConfig;
 use crate::syntax::Language;
 use std::fs;
@@ -849,11 +850,10 @@ fn gradle_project() -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn jvm_local_plan_filters_gradle_by_nearest_method() {
-    use super::jvm::local_test_plan;
     let (dir, file) = gradle_project();
     let root = dir.path().canonicalize().unwrap();
     // Cursor inside `adds`.
-    let local = local_test_plan(TestScope::Nearest, &file, JAVA_SRC, 9, Language::Java).unwrap();
+    let local = local_plan(TestScope::Nearest, &file, JAVA_SRC, 9, Language::Java).unwrap();
     let task = local.plan.task.as_ref().unwrap();
     assert_eq!(
         task.argv,
@@ -879,7 +879,7 @@ fn jvm_local_plan_filters_gradle_by_nearest_method() {
     assert_eq!(local.anchor.0, 7, "anchored on the @Test line of `adds`");
 
     // Nested class: binary name with `$`.
-    let local = local_test_plan(TestScope::Nearest, &file, JAVA_SRC, 20, Language::Java).unwrap();
+    let local = local_plan(TestScope::Nearest, &file, JAVA_SRC, 20, Language::Java).unwrap();
     let argv = local.plan.task.unwrap().argv;
     assert!(argv.contains(&"com.example.app.CalcTest$Inner.nestedCase".to_string()));
 }
@@ -887,11 +887,9 @@ fn jvm_local_plan_filters_gradle_by_nearest_method() {
 /// OV-00448: on a class declaration line the nearest test is the class.
 #[test]
 fn jvm_nearest_on_a_class_declaration_runs_the_whole_class() {
-    use super::jvm::local_test_plan;
     let (_dir, file) = gradle_project();
     let filters = |line: usize| -> (Vec<String>, (usize, usize), bool) {
-        let local =
-            local_test_plan(TestScope::Nearest, &file, JAVA_SRC, line, Language::Java).unwrap();
+        let local = local_plan(TestScope::Nearest, &file, JAVA_SRC, line, Language::Java).unwrap();
         let task = local.plan.task.unwrap();
         let filters = task
             .argv
@@ -931,9 +929,8 @@ fn jvm_nearest_on_a_class_declaration_runs_the_whole_class() {
 
 #[test]
 fn jvm_local_plan_file_scope_selects_every_test_class() {
-    use super::jvm::local_test_plan;
     let (_dir, file) = gradle_project();
-    let local = local_test_plan(TestScope::File, &file, JAVA_SRC, 0, Language::Java).unwrap();
+    let local = local_plan(TestScope::File, &file, JAVA_SRC, 0, Language::Java).unwrap();
     let task = local.plan.task.unwrap();
     let filters: Vec<&String> = task
         .argv
@@ -950,16 +947,19 @@ fn jvm_local_plan_file_scope_selects_every_test_class() {
 
 #[test]
 fn jvm_local_plan_uses_maven_with_surefire_filter_and_debug_flag() {
-    use super::jvm::local_test_plan;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
-    fs::write(root.join("pom.xml"), "<project/>").unwrap();
+    fs::write(
+        root.join("pom.xml"),
+        "<project><modules><module>core</module></modules></project>",
+    )
+    .unwrap();
     fs::create_dir_all(root.join("core/src/test/java")).unwrap();
     fs::write(root.join("core/pom.xml"), "<project/>").unwrap();
     let file = root.join("core/src/test/java/CalcTest.java");
     let src = "package p;\nclass CalcTest {\n  @Test\n  void adds() {}\n}\n";
     fs::write(&file, src).unwrap();
-    let local = local_test_plan(TestScope::Nearest, &file, src, 3, Language::Java).unwrap();
+    let local = local_plan(TestScope::Nearest, &file, src, 3, Language::Java).unwrap();
     let task = local.plan.task.unwrap();
     assert_eq!(
         task.argv,
@@ -983,16 +983,182 @@ fn jvm_local_plan_uses_maven_with_surefire_filter_and_debug_flag() {
 
 #[test]
 fn jvm_local_plan_reports_missing_project_and_missing_tests() {
-    use super::jvm::local_test_plan;
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("Lone.java");
-    let err = local_test_plan(TestScope::Nearest, &file, JAVA_SRC, 0, Language::Java)
+    let err = local_plan(TestScope::Nearest, &file, JAVA_SRC, 0, Language::Java)
         .err()
         .unwrap();
     assert!(err.contains("No Gradle or Maven project"), "{err}");
     let (_d, file) = gradle_project();
-    let err = local_test_plan(TestScope::Nearest, &file, "class A {}", 0, Language::Java)
+    let err = local_plan(TestScope::Nearest, &file, "class A {}", 0, Language::Java)
         .err()
         .unwrap();
     assert_eq!(err, "No test found near cursor");
+}
+
+// ---------------------------------------------------------------------------
+// JVM roots: one rule for the language server, launches and local test plans
+// ---------------------------------------------------------------------------
+
+/// A local test plan rooted where a launch would be (`launch_project_root`).
+fn local_plan(
+    scope: TestScope,
+    file: &Path,
+    source: &str,
+    cursor_line: usize,
+    lang: Language,
+) -> Result<super::jvm::LocalTest, String> {
+    let root = Editor::with_content("").launch_project_root(Some(file));
+    super::jvm::local_test_plan(scope, file, source, cursor_line, lang, &root)
+}
+
+/// The root the language server is started with for `file` (Java's
+/// `root_markers` / `outermost_root_markers` from languages.toml).
+fn server_root(file: &Path) -> PathBuf {
+    let markers: Vec<String> = [
+        "settings.gradle",
+        "settings.gradle.kts",
+        "pom.xml",
+        "build.gradle",
+    ]
+    .map(String::from)
+    .into();
+    let outermost: Vec<String> = ["settings.gradle", "settings.gradle.kts", "pom.xml"]
+        .map(String::from)
+        .into();
+    crate::project_root::find_project_root_with_outermost(file, &markers, &outermost)
+}
+
+/// Lays out `files` (relative path, content) under a temp dir and returns
+/// the dir plus the test file's path.
+fn jvm_layout(files: &[(&str, &str)], test_file: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    for (path, content) in files {
+        let full = root.join(path);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, content).unwrap();
+    }
+    (dir, root.join(test_file))
+}
+
+const ONE_TEST: &str = "package p;\nclass CalcTest {\n  @Test\n  void adds() {}\n}\n";
+
+/// The language server, a launch and the local test plan agree on the root
+/// for every layout; the plan addresses the module relative to it.
+/// Was: the plan walked up on its own, and disagreed for a Maven parent that
+/// does not list the module and for a Gradle build with its own settings
+/// inside another (OV-00481).
+#[test]
+fn jvm_root_layouts_agree_between_server_launch_and_local_plan() {
+    struct Row {
+        name: &'static str,
+        files: Vec<(&'static str, &'static str)>,
+        test_file: &'static str,
+        /// Directory (relative to the layout) every one of them is rooted at.
+        root: &'static str,
+        /// Substrings the plan's command line must contain / not contain.
+        argv_has: &'static str,
+        argv_lacks: &'static str,
+    }
+    let test_file = "app/src/test/java/CalcTest.java";
+    let rows = vec![
+        Row {
+            name: "single gradle project",
+            files: vec![("build.gradle", "")],
+            test_file: "src/test/java/CalcTest.java",
+            root: "",
+            argv_has: " :cleanTest :test ",
+            argv_lacks: "-pl",
+        },
+        Row {
+            name: "gradle multi-module with settings",
+            files: vec![("settings.gradle", ""), ("app/build.gradle", "")],
+            test_file,
+            root: "",
+            argv_has: " :app:cleanTest :app:test ",
+            argv_lacks: "-pl",
+        },
+        Row {
+            name: "gradle build with its own settings inside another: the outer one wins",
+            files: vec![
+                ("settings.gradle", ""),
+                ("app/settings.gradle", ""),
+                ("app/build.gradle", ""),
+            ],
+            test_file,
+            root: "",
+            argv_has: " :app:cleanTest :app:test ",
+            argv_lacks: "-pl",
+        },
+        Row {
+            name: "maven aggregator lists the module",
+            files: vec![
+                (
+                    "pom.xml",
+                    "<project><modules><module>app</module></modules></project>",
+                ),
+                ("app/pom.xml", "<project/>"),
+            ],
+            test_file,
+            root: "",
+            argv_has: "-pl app -am",
+            argv_lacks: "zzz",
+        },
+        Row {
+            name: "maven parent does not list the module: it is not the reactor",
+            files: vec![
+                (
+                    "pom.xml",
+                    "<project><modules><module>other</module></modules></project>",
+                ),
+                ("app/pom.xml", "<project/>"),
+            ],
+            test_file,
+            root: "app",
+            argv_has: "mvn",
+            argv_lacks: "-pl",
+        },
+        // Known gap (OV-00481): the reactor rule climbs one directory at a
+        // time, so an aggregator listing `mid/app` is not found.
+        Row {
+            name: "maven aggregator lists a nested module path",
+            files: vec![
+                (
+                    "pom.xml",
+                    "<project><modules><module>mid/app</module></modules></project>",
+                ),
+                ("mid/app/pom.xml", "<project/>"),
+            ],
+            test_file: "mid/app/src/test/java/CalcTest.java",
+            root: "mid/app",
+            argv_has: "mvn",
+            argv_lacks: "-pl",
+        },
+    ];
+    for row in rows {
+        let mut files = row.files.clone();
+        files.push((row.test_file, ONE_TEST));
+        let (dir, file) = jvm_layout(&files, row.test_file);
+        let base = dir.path().canonicalize().unwrap();
+        let expected = if row.root.is_empty() {
+            base.clone()
+        } else {
+            base.join(row.root)
+        };
+        assert_eq!(server_root(&file), expected, "server root: {}", row.name);
+        assert_eq!(
+            Editor::with_content("").launch_project_root(Some(&file)),
+            expected,
+            "launch root: {}",
+            row.name
+        );
+        let plan = local_plan(TestScope::Nearest, &file, ONE_TEST, 3, Language::Java)
+            .unwrap_or_else(|e| panic!("{}: {e}", row.name))
+            .plan;
+        assert_eq!(plan.project_root, expected, "plan root: {}", row.name);
+        let argv = format!("{} ", plan.task.unwrap().argv.join(" "));
+        assert!(argv.contains(row.argv_has), "{}: {argv}", row.name);
+        assert!(!argv.contains(row.argv_lacks), "{}: {argv}", row.name);
+    }
 }

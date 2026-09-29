@@ -2870,27 +2870,25 @@ impl Editor {
         fn flatten(
             output: &mut Vec<SnapshotSymbol>,
             path: &RepoPath,
-            symbols: &[lsp_types::DocumentSymbol],
+            symbols: &[crate::navigation_types::OutlineSymbol],
         ) {
             for symbol in symbols {
+                // The name's position (0-based), else the symbol's first line.
+                let (line, column) = symbol
+                    .selection
+                    .unwrap_or((symbol.start_line.saturating_sub(1), 0));
                 output.push(SnapshotSymbol {
                     name: symbol.name.clone(),
-                    kind: format!("{:?}", symbol.kind).to_lowercase(),
+                    kind: symbol.kind.clone(),
                     path: path.clone(),
-                    line: symbol.range.start.line as usize + 1,
-                    column: symbol.range.start.character as usize + 1,
+                    line: line + 1,
+                    column: column + 1,
                 });
-                if let Some(children) = symbol.children.as_deref() {
-                    flatten(output, path, children);
-                }
+                flatten(output, path, &symbol.children);
             }
         }
         let mut captured = Vec::new();
-        flatten(
-            &mut captured,
-            &path,
-            &self.lsp.state.available_document_symbols,
-        );
+        flatten(&mut captured, &path, self.outline_symbols());
         captured
     }
 

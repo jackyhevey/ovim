@@ -11,7 +11,6 @@
 
 use super::super::picker::PickerResult;
 use super::super::Editor;
-use crate::lsp::uri_from_file_path;
 use crate::lsp::uri_to_file_path;
 use anyhow::Result;
 use lsp_types::Location;
@@ -34,27 +33,6 @@ impl Editor {
         });
 
         self.lsp.slots.references.fire(task, rx);
-        Ok(true)
-    }
-
-    pub(in crate::editor) async fn document_symbols_impl(&mut self) -> Result<bool> {
-        let ctx = self.prepare_lsp_request("document-symbols").await?;
-
-        self.set_lsp_status("Fetching document symbols...".to_string());
-        let file_path = ctx.file_path.clone();
-
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async move {
-            let result = ctx.lsp.document_symbols(&ctx.uri, &ctx.language_id).await;
-            let _ = tx.send(
-                result.map(|symbols| crate::editor::lsp_slot::DocumentSymbolsResult {
-                    symbols,
-                    file_path,
-                }),
-            );
-        });
-
-        self.lsp.slots.document_symbols.fire(task, rx);
         Ok(true)
     }
 
@@ -95,25 +73,6 @@ impl Editor {
                     return;
                 }
                 self.lsp.state.available_references[index].clone()
-            }
-            crate::editor::LspResultType::DocumentSymbols => {
-                if index >= self.lsp.state.available_document_symbols.len() {
-                    self.set_lsp_status("Invalid symbol index".to_string());
-                    return;
-                }
-                let symbol = &self.lsp.state.available_document_symbols[index];
-                let Some(file_path) = self.buffer().file_path() else {
-                    self.set_lsp_status("Document symbols require a saved file".to_string());
-                    return;
-                };
-                let Some(uri) = uri_from_file_path(file_path) else {
-                    self.set_lsp_status("Invalid file path".to_string());
-                    return;
-                };
-                Location {
-                    uri,
-                    range: symbol.selection_range,
-                }
             }
             crate::editor::LspResultType::WorkspaceSymbols => {
                 if index >= self.lsp.state.available_workspace_symbols.len() {
@@ -172,25 +131,26 @@ impl Editor {
         }
     }
 
-    /// Helper method to open a location picker with LSP results
+    /// Opens a picker of locations (LSP results, recent files, buffers),
+    /// titled `title` and shown relative to the project root like every other
+    /// picker. Replaces a hierarchy browser.
     pub(in crate::editor) fn open_location_picker(
         &mut self,
         items: Vec<PickerResult>,
-        _title: &str,
+        title: &str,
     ) {
-        // Any picker opened here replaces a hierarchy browser.
         self.lsp.state.hierarchy = None;
-        self.open_location_picker_keeping_hierarchy(items);
+        self.open_location_picker_keeping_hierarchy(items, title);
     }
 
     /// Opens the location picker without touching hierarchy state.
     pub(in crate::editor) fn open_location_picker_keeping_hierarchy(
         &mut self,
         items: Vec<PickerResult>,
+        title: &str,
     ) {
-        let base_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-        let picker = crate::editor::picker::Picker::new_with_results(base_dir, items);
+        let picker = crate::editor::picker::Picker::new_with_results(self.picker_dirs().0, items)
+            .with_title(title);
         self.set_picker(picker);
         self.set_mode(crate::mode::Mode::Picker);
         self.mark_picker_selection_changed();
