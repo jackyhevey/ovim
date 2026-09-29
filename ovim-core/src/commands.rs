@@ -628,6 +628,43 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
                 ok(format!("Renaming to '{}'...", new_name))
             }
         }
+        // ---- Run / debug (see launch::) ----
+        "Run" | "RunCursor" => {
+            editor.launch_at_cursor(crate::launch::LaunchMode::Run);
+            crate::command_result::ok_silent()
+        }
+        "Debug" => {
+            editor.launch_at_cursor(crate::launch::LaunchMode::Debug);
+            crate::command_result::ok_silent()
+        }
+        "RunConfig" | "RunPick" => {
+            editor.launch_pick_config(crate::launch::LaunchMode::Run);
+            crate::command_result::ok_silent()
+        }
+        "DebugConfig" | "DebugPick" => {
+            editor.launch_pick_config(crate::launch::LaunchMode::Debug);
+            crate::command_result::ok_silent()
+        }
+        "RunLast" | "DebugLast" => {
+            editor.launch_last();
+            crate::command_result::ok_silent()
+        }
+        "RunStop" => {
+            editor.launch_stop();
+            crate::command_result::ok_silent()
+        }
+        "RunConsole" | "RunToggle" => {
+            editor.toggle_run_console();
+            crate::command_result::ok_silent()
+        }
+        "RunFocus" => {
+            editor.focus_run_console();
+            crate::command_result::ok_silent()
+        }
+        "RunClear" => {
+            editor.clear_run_console();
+            crate::command_result::ok_silent()
+        }
         "TestFile" | "TF" => {
             editor.run_test_file();
             ok("Running tests for current file...")
@@ -1602,6 +1639,37 @@ fn execute_make_command(editor: &mut Editor, args: &str) -> CommandResult {
 
 /// Parse compiler output for file:line:col: error/warning patterns
 pub fn parse_compiler_output(output: &str) -> Vec<QuickfixEntry> {
+    parse_compiler_output_in(output, None)
+}
+
+/// Like [`parse_compiler_output`], resolving relative paths against `base_dir`
+/// (the directory the build ran in). javac, kotlinc, Gradle and Maven output
+/// is handled by [`crate::launch::diagnostics`] first (with columns from
+/// javac's caret line and `symbol:`/`location:` details); the remaining lines
+/// go through the rustc / gcc / tsc patterns below.
+pub fn parse_compiler_output_in(
+    output: &str,
+    base_dir: Option<&std::path::Path>,
+) -> Vec<QuickfixEntry> {
+    let jvm = crate::launch::diagnostics::parse_jvm_diagnostics(output, base_dir);
+    let mut entries = parse_generic_compiler_output(output, &jvm.consumed);
+    if let Some(base) = base_dir {
+        for entry in &mut entries {
+            if let Some(path) = entry.filename.as_mut() {
+                if path.is_relative() {
+                    *path = base.join(&*path);
+                }
+            }
+        }
+    }
+    let mut all = jvm.entries;
+    all.append(&mut entries);
+    all
+}
+
+/// rustc / gcc / tsc / panic patterns. Lines flagged in `skip` were already
+/// claimed by a more specific parser.
+fn parse_generic_compiler_output(output: &str, skip: &[bool]) -> Vec<QuickfixEntry> {
     use crate::editor::{QuickfixEntry, QuickfixEntryType};
     use std::path::PathBuf;
 
@@ -1611,7 +1679,10 @@ pub fn parse_compiler_output(output: &str) -> Vec<QuickfixEntry> {
     // - rustc/cargo:  "  --> file.rs:line:col"
     // - gcc/clang:    "file.rs:line:col: error: message"
     // - typescript:    "file.ts(line,col): error TS1234: message"
-    for line in output.lines() {
+    for (line_index, line) in output.lines().enumerate() {
+        if skip.get(line_index).copied().unwrap_or(false) {
+            continue;
+        }
         let trimmed = line.trim();
 
         // Rust/cargo style: "  --> file.rs:42:10"
@@ -2160,55 +2231,54 @@ fn handle_debug_command(editor: &mut Editor, command: &str) -> CommandResult {
             ok("Step out")
         }
         "stop" => {
-            editor.dap_manager_mut().pending_action = Some(PendingDebugAction::Stop);
-            ok("Stopping debug session")
+            if editor.launch_stop() {
+                ok("Stopping")
+            } else {
+                crate::command_result::ok_silent()
+            }
+        }
+        "run" => {
+            editor.launch_at_cursor(crate::launch::LaunchMode::Run);
+            crate::command_result::ok_silent()
         }
         "start" => {
-            // Auto-detect DAP adapter from the current file's language config
-            let dap_config = editor
-                .buffer()
-                .file_path()
-                .and_then(|fp| {
-                    crate::language_config::LanguageRegistry::try_get()
-                        .and_then(|reg| reg.detect(fp))
-                })
-                .and_then(|lang| lang.dap.as_ref());
-
-            let Some(config) = dap_config else {
-                return err("No DAP adapter configured for this language. Use :debug start <command> [args...]");
-            };
-            let Some(cmd) = crate::language_config::find_dap_command(config) else {
-                let hint = config.install_hint.as_deref().unwrap_or("Install the debug adapter and ensure it's in PATH");
-                return err(format!("DAP adapter '{}' not found. {}", config.command, hint));
-            };
-            let args = config.args.clone();
-            editor.dap_manager_mut().pending_action = Some(PendingDebugAction::Start {
-                command: cmd.clone(),
-                args: args.clone(),
-                run_config: None,
-            });
-            ok(format!("Starting debug adapter: {} {}", cmd, args.join(" ")))
+            // Same path as F5: resolve what is at the cursor (or fall back to
+            // configurations), build, launch, attach.
+            editor.launch_at_cursor(crate::launch::LaunchMode::Debug);
+            crate::command_result::ok_silent()
+        }
+        "last" | "restart" => {
+            editor.launch_last();
+            crate::command_result::ok_silent()
+        }
+        "config" | "pick" => {
+            editor.launch_pick_config(crate::launch::LaunchMode::Debug);
+            crate::command_result::ok_silent()
+        }
+        "console" => {
+            editor.toggle_run_console();
+            crate::command_result::ok_silent()
         }
         s if s.starts_with("start ") => {
+            // :debug start <adapter> [args...] — same flow, custom adapter.
             let rest = s["start ".len()..].trim();
             let mut parts = rest.split_whitespace();
             let Some(cmd) = parts.next() else {
                 return err("Usage: :debug start [command] [args...]");
             };
             let args: Vec<String> = parts.map(String::from).collect();
-            editor.dap_manager_mut().pending_action = Some(PendingDebugAction::Start {
-                command: cmd.to_string(),
-                args,
-                run_config: None,
-            });
-            ok(format!("Starting debug adapter: {}", cmd))
+            editor.launch_at_cursor_with(
+                crate::launch::LaunchMode::Debug,
+                Some((cmd.to_string(), args)),
+            );
+            crate::command_result::ok_silent()
         }
         "" => ok(
-                "Usage: :debug [start <cmd>|stop|continue|next|stepin|stepout|breakpoint|panels]"
+                "Usage: :debug [start [cmd]|run|last|config|stop|continue|next|stepin|stepout|breakpoint|panels|console]"
                     .to_string(),
             ),
         _ => err(format!(
-                "Unknown debug subcommand: '{}'. Usage: :debug [start|stop|continue|next|stepin|stepout|breakpoint|panels]",
+                "Unknown debug subcommand: '{}'. Usage: :debug [start|run|last|config|stop|continue|next|stepin|stepout|breakpoint|panels|console]",
                 subcmd
             )),
     }

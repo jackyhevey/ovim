@@ -191,8 +191,18 @@ impl DebugState {
         self.breakpoint_condition(path, line).is_some()
     }
 
-    /// Clear all debug state (on session end).
+    /// Clear all live debug state (on session end).
+    ///
+    /// Output lines are deliberately kept: they are the only record of why a
+    /// program ended. They are reset when the next session starts.
     pub fn clear(&mut self) {
+        self.end_session_keep_output();
+        // Keep breakpoints — they persist across sessions.
+    }
+
+    /// Everything tied to a live debuggee goes: session flag, stop state,
+    /// frames, variables and the execution marker.
+    pub fn end_session_keep_output(&mut self) {
         self.session_active = false;
         self.is_running = false;
         self.stopped_thread = None;
@@ -202,9 +212,7 @@ impl DebugState {
         self.scopes.clear();
         self.variables.clear();
         self.expanded_refs.clear();
-        self.output_lines.clear();
         self.execution_file = None;
         self.execution_line = None;
-        // Keep breakpoints — they persist across sessions.
     }
 }

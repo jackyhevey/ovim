@@ -25,6 +25,7 @@ pub mod indentation;
 pub mod key;
 pub mod language_catalog;
 pub mod language_config;
+pub mod launch;
 pub mod line_layout;
 pub mod log;
 pub mod lsp;

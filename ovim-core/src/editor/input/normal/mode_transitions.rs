@@ -35,14 +35,6 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             editor.clear_pending_operator();
             editor.clear_pending_command();
             editor.reset_input_state();
-            // Cancel pending FetchRunConfigs if waiting for LSP response
-            if matches!(
-                editor.dap_manager_mut().pending_action,
-                Some(crate::dap::PendingDebugAction::FetchRunConfigs)
-            ) {
-                editor.dap_manager_mut().pending_action = None;
-                editor.set_status_message(String::new());
-            }
             Ok(true)
         }
         // i - insert before cursor
@@ -202,15 +194,23 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             editor.toggle_file_tree();
             Ok(true)
         }
-        // F5 - continue (if active) or fetch run configs asynchronously
+        // Shift+F5 - stop the run / debug session
+        KeyCode::F(5) if key_event.modifiers.contains(Modifiers::SHIFT) => {
+            editor.launch_stop();
+            Ok(true)
+        }
+        // Ctrl+F5 - run (no debugger) whatever is at the cursor
+        KeyCode::F(5) if key_event.modifiers.contains(Modifiers::CONTROL) => {
+            editor.launch_at_cursor(crate::launch::LaunchMode::Run);
+            Ok(true)
+        }
+        // F5 - continue (if a session is stopped/running) or debug whatever is at the cursor
         KeyCode::F(5) => {
             if editor.is_debug_active() {
                 editor.dap_manager_mut().pending_action =
                     Some(crate::dap::PendingDebugAction::Continue);
             } else {
-                editor.dap_manager_mut().pending_action =
-                    Some(crate::dap::PendingDebugAction::FetchRunConfigs);
-                editor.set_status_message("Loading run configurations...".to_string());
+                editor.launch_at_cursor(crate::launch::LaunchMode::Debug);
             }
             Ok(true)
         }

@@ -32,6 +32,11 @@ pub async fn process_editor_tick(editor: &mut Editor, channels: &mut FrontendCha
     // === Debug adapter ===
     process_dap_events(editor);
     process_pending_debug_action(editor).await;
+    // Build / run / debug launch state machine (non-blocking: child output
+    // and language-server answers are polled, never awaited).
+    if editor.poll_launch() {
+        editor.mark_dirty();
+    }
 
     // === LSP responses & intents ===
     if editor.poll_pending_lsp_responses() {
@@ -190,11 +195,10 @@ async fn process_pending_debug_action(editor: &mut Editor) {
         PendingDebugAction::Start {
             command,
             args,
-            run_config,
+            launch,
         } => {
-            editor.dap_manager_mut().run_config = run_config;
-            if let Err(e) = editor.start_debug_session(&command, &args).await {
-                editor.set_status_message(format!("Debug start failed: {e}"));
+            if let Err(e) = editor.start_debug_session(&command, &args, launch).await {
+                editor.launch_debug_failed(e.to_string());
             }
             editor.mark_dirty();
         }
@@ -237,8 +241,20 @@ async fn process_pending_debug_action(editor: &mut Editor) {
             for path in &paths {
                 let _ = editor.debug_sync_breakpoints(path).await;
             }
-            if let Err(e) = editor.dap_manager_mut().configuration_done().await {
-                editor.set_status_message(format!("configurationDone failed: {e}"));
+            match editor.dap_manager_mut().configuration_done().await {
+                Ok(()) => editor.launch_debug_started(),
+                Err(e) => {
+                    let _ = editor.stop_debug_session().await;
+                    editor.launch_debug_failed(format!("configurationDone failed: {e}"));
+                }
+            }
+            editor.mark_dirty();
+        }
+        PendingDebugAction::UpdateBreakpoints => {
+            let paths: Vec<std::path::PathBuf> =
+                editor.debug_state().breakpoints.keys().cloned().collect();
+            for path in &paths {
+                let _ = editor.debug_sync_breakpoints(path).await;
             }
             editor.mark_dirty();
         }
@@ -295,165 +311,33 @@ async fn process_pending_debug_action(editor: &mut Editor) {
             let _ = editor.debug_fetch_variables(var_ref).await;
             editor.mark_dirty();
         }
-        PendingDebugAction::FetchRunConfigs => {
-            process_dap_fetch_run_configs(editor).await;
-        }
     }
 }
 
-/// Handle DAP launch/attach based on the stored run config.
+/// Send the DAP `launch` / `attach` request for the session being started.
+///
+/// Every way of starting a session (F5, `:debug start`, `<Space>dc`, the
+/// config picker, test debugging) arrives here with a fully resolved request.
 async fn process_dap_launch_or_attach(editor: &mut Editor) {
-    use crate::dap::PendingDebugAction;
-    use crate::debug_config::DebugRunKind;
+    use crate::dap::{DapLaunchRequest, PendingDebugAction};
 
-    let result = if let Some(run_cfg) = editor.dap_manager_mut().run_config.clone() {
-        let default_root = std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .to_string_lossy()
-            .to_string();
-        match run_cfg.kind {
-            DebugRunKind::Gradle {
-                task,
-                args,
-                project_root,
-            } => {
-                let root = project_root.unwrap_or_else(|| default_root.clone());
-                editor.set_status_message(format!("Running gradle {task} --debug-jvm..."));
-                editor.mark_dirty();
-                match spawn_gradle_and_wait(&task, &args, &root).await {
-                    Ok(child) => {
-                        editor.dap_manager_mut().gradle_child = Some(child);
-                        let attach_config = serde_json::json!({
-                            "host": "127.0.0.1",
-                            "port": 5005,
-                            "projectRoot": root,
-                        });
-                        editor.dap_manager_mut().attach(attach_config).await
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            DebugRunKind::Attach {
-                host,
-                port,
-                project_root,
-            } => {
-                let root = project_root.unwrap_or(default_root);
-                let attach_cfg = serde_json::json!({
-                    "host": host,
-                    "port": port,
-                    "projectRoot": root,
-                });
-                editor.dap_manager_mut().attach(attach_cfg).await
-            }
-            DebugRunKind::Launch {
-                main_class,
-                classpath,
-                args,
-                jvm_args,
-                cwd,
-                project_root,
-            } => {
-                let root = project_root.unwrap_or(default_root);
-                let mut launch_cfg = serde_json::json!({
-                    "mainClass": main_class,
-                    "projectRoot": root,
-                });
-                if let Some(cp) = classpath {
-                    launch_cfg["classpath"] = serde_json::json!(cp);
-                }
-                if !args.is_empty() {
-                    launch_cfg["args"] = serde_json::json!(args);
-                }
-                if !jvm_args.is_empty() {
-                    launch_cfg["jvmArgs"] = serde_json::json!(jvm_args);
-                }
-                if let Some(cwd) = cwd {
-                    launch_cfg["cwd"] = serde_json::json!(cwd);
-                }
-                editor.dap_manager_mut().launch(launch_cfg).await
-            }
-        }
-    } else {
-        Ok(())
+    let Some(request) = editor.dap_manager().launch_request.clone() else {
+        // Nothing was asked for; a stray `initialized` event. Do not send
+        // `configurationDone` to an adapter that has no debuggee.
+        return;
     };
-
+    let result = match request {
+        DapLaunchRequest::Launch(arguments) => editor.dap_manager_mut().launch(arguments).await,
+        DapLaunchRequest::Attach(arguments) => editor.dap_manager_mut().attach(arguments).await,
+    };
     match result {
         Ok(()) => {
             editor.dap_manager_mut().pending_action = Some(PendingDebugAction::SyncBreakpoints);
         }
         Err(e) => {
-            editor.set_status_message(format!("Debug launch/attach failed: {e}"));
+            let _ = editor.stop_debug_session().await;
+            editor.launch_debug_failed(format!("launch/attach failed: {e}"));
         }
-    }
-    editor.mark_dirty();
-}
-
-/// Fetch debug run configs from TOML and LSP, then start or open picker.
-async fn process_dap_fetch_run_configs(editor: &mut Editor) {
-    use crate::dap::PendingDebugAction;
-
-    let project_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-
-    let mut configs = crate::debug_config::load_debug_configs(&project_root);
-
-    if let Some(lsp_manager) = editor.lsp_manager() {
-        let lsp_configs = lsp_manager.run_configurations().await;
-        configs.extend(crate::debug_config::parse_lsp_run_configs(&lsp_configs));
-    }
-
-    editor.clear_status_message();
-
-    if configs.is_empty() {
-        let dap_start = editor
-            .buffer()
-            .file_path()
-            .and_then(|fp| {
-                crate::language_config::LanguageRegistry::try_get().and_then(|reg| reg.detect(fp))
-            })
-            .and_then(|lang| lang.dap.as_ref())
-            .and_then(|config| {
-                crate::language_config::find_dap_command(config)
-                    .map(|cmd| (cmd, config.args.clone()))
-            });
-        if let Some((command, args)) = dap_start {
-            editor.dap_manager_mut().pending_action = Some(PendingDebugAction::Start {
-                command,
-                args,
-                run_config: None,
-            });
-        } else {
-            editor.set_status_message(
-                "No debug configs found. Create .ovim/debug.toml or configure a DAP adapter.",
-            );
-        }
-    } else if configs.len() == 1 {
-        let config = configs.into_iter().next().unwrap();
-        let dap_start = editor
-            .buffer()
-            .file_path()
-            .and_then(|fp| {
-                crate::language_config::LanguageRegistry::try_get().and_then(|reg| reg.detect(fp))
-            })
-            .and_then(|lang| lang.dap.as_ref())
-            .and_then(|dap_config| {
-                crate::language_config::find_dap_command(dap_config)
-                    .map(|cmd| (cmd, dap_config.args.clone()))
-            });
-        if let Some((command, args)) = dap_start {
-            editor.dap_manager_mut().pending_action = Some(PendingDebugAction::Start {
-                command,
-                args,
-                run_config: Some(config),
-            });
-        }
-    } else {
-        let names: Vec<String> = configs.iter().map(|c| c.name.clone()).collect();
-        editor.dap_manager_mut().available_debug_configs = configs;
-        let picker = crate::editor::picker::Picker::new_debug_config(project_root, names);
-        editor.set_picker(picker);
-        editor.set_mode(crate::mode::Mode::Picker);
-        editor.mark_picker_selection_changed();
     }
     editor.mark_dirty();
 }
@@ -620,64 +504,6 @@ fn spawn_pending_installs(editor: &mut Editor) {
             });
         });
     }
-}
-
-/// Spawn `gradle <task> --debug-jvm [extra_args]` and wait for the JVM to start listening.
-///
-/// Reads stderr lines until "Listening for transport dt_socket at address:" appears,
-/// then returns the child process (caller stores it for cleanup). Times out after 60s.
-async fn spawn_gradle_and_wait(
-    task: &str,
-    extra_args: &[String],
-    cwd: &str,
-) -> anyhow::Result<tokio::process::Child> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
-    use tokio::process::Command;
-
-    let gradle_cmd = if cfg!(windows) {
-        "gradlew.bat"
-    } else {
-        "./gradlew"
-    };
-    // Fall back to system gradle if wrapper doesn't exist.
-    let cmd = if std::path::Path::new(cwd).join(gradle_cmd).exists() {
-        gradle_cmd
-    } else {
-        "gradle"
-    };
-
-    let mut child = Command::new(cmd)
-        .arg(task)
-        .arg("--debug-jvm")
-        .args(extra_args)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("failed to spawn gradle: {e}"))?;
-
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("no stderr from gradle"))?;
-
-    let mut reader = BufReader::new(stderr).lines();
-
-    let listening = tokio::time::timeout(std::time::Duration::from_secs(60), async {
-        while let Ok(Some(line)) = reader.next_line().await {
-            if line.contains("Listening for transport dt_socket at address:") {
-                return Ok(());
-            }
-        }
-        Err(anyhow::anyhow!(
-            "gradle process exited before JVM started listening"
-        ))
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for gradle --debug-jvm to start"))?;
-
-    listening?;
-    Ok(child)
 }
 
 #[cfg(test)]

@@ -60,6 +60,7 @@ mod input;
 mod input_context;
 mod input_state;
 mod keymap;
+mod launch_flow;
 mod lsp_integration;
 pub mod lsp_manager_panel;
 pub(crate) mod lsp_slot;
@@ -145,6 +146,7 @@ pub use input::InputHandler;
 pub use input_context::InputContext;
 pub use input_state::{CharMotion, InputState, TextObjectPrefix};
 pub use keymap::{KeyMapManager, KeyMapping, MapMode};
+pub use launch_flow::{LaunchRequest, LaunchSource};
 pub use lsp_manager_panel::LspManagerPanel;
 pub use lsp_state::{HoverContentType, LspIntents, LspResultType, LspState, ProjectedDiagnostics};
 pub use lsp_ui::LspUi;
@@ -424,6 +426,8 @@ pub struct Editor {
     git_branch: Option<String>,
     /// Build/test subsystem state
     pub(crate) build: build_state::BuildState,
+    /// Run/debug launch flow and the run console
+    pub(crate) launch: Box<launch_flow::LaunchState>,
     /// Unified virtual text decorations (inlay hints, diagnostics, etc.)
     pub decorations: decoration::DecorationMap,
     /// Channel for receiving background git refresh results (status + blame)
@@ -604,6 +608,7 @@ impl Editor {
             active_session: None,
             git_branch: None,
             build: build_state::BuildState::default(),
+            launch: Box::default(),
             decorations: decoration::DecorationMap::new(),
             git_refresh_generation: 0,
             git_refresh_rx: git_rx,
@@ -657,6 +662,7 @@ impl Editor {
             active_session: None,
             git_branch: None,
             build: build_state::BuildState::default(),
+            launch: Box::default(),
             decorations: decoration::DecorationMap::new(),
             git_refresh_generation: 0,
             git_refresh_rx: git_rx,

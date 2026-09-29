@@ -47,6 +47,7 @@ mod dashboard_mode;
 
 /// LSP Manager mode handler
 mod lsp_manager_mode;
+mod run_console_mode;
 
 /// Rename input mode handler
 mod rename_input_mode;
@@ -195,6 +196,7 @@ impl InputHandler {
                 Mode::LspManager => lsp_manager_mode::handle_lsp_manager_mode(editor, key_event),
                 Mode::RenameInput => rename_input_mode::handle_rename_input_mode(editor, key_event),
                 Mode::AiChat => ai_chat_mode::handle_ai_chat_mode(editor, key_event),
+                Mode::RunConsole => run_console_mode::handle_run_console_mode(editor, key_event),
             }
         };
 
