@@ -496,7 +496,7 @@ async fn registered_file_watchers_receive_changes_to_unopened_files() {
         .wait_until("deleted event", |s| change_types(s).contains(&3))
         .await;
 
-    let notes_uri = ovim::lsp::uri_from_file_path(&root.join("notes.txt")).unwrap();
+    let notes_uri = ovim::lsp::uri_from_file_path(root.join("notes.txt")).unwrap();
     assert!(
         !session
             .events("workspace/didChangeWatchedFiles")

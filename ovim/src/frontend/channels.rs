@@ -33,6 +33,12 @@ pub struct FrontendChannels {
     pub(super) lsp_startup: crate::lsp_init::LspStartup,
 }
 
+impl Default for FrontendChannels {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FrontendChannels {
     /// Build the channel set with the capacities every frontend has used
     /// historically: 100 for preview loads, 1000 for file-finder results, 16

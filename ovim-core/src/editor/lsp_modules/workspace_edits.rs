@@ -1011,6 +1011,6 @@ mod tests {
         assert!(editor
             .buffers
             .iter()
-            .any(|b| b.rope().to_string() == "class Doomed {}\n"));
+            .any(|b| *b.rope() == "class Doomed {}\n"));
     }
 }
