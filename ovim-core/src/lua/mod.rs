@@ -226,6 +226,8 @@ impl LuaContext {
 
     /// Reloads configuration
     pub fn reload_config(&mut self) -> Result<()> {
+        // Options set through `ovim.lsp.configure` are re-declared by the script.
+        crate::lsp::user_settings::clear_lua();
         self.config_loaded = false;
         self.load_config()?;
         Ok(())

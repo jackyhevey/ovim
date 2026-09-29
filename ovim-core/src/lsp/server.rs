@@ -99,6 +99,10 @@ pub(crate) fn workspace_settings_for_root(
     language: &str,
     root: &std::path::Path,
 ) -> Option<serde_json::Value> {
+    super::user_settings::workspace_settings(language, builtin_workspace_settings(language, root))
+}
+
+fn builtin_workspace_settings(language: &str, root: &std::path::Path) -> Option<serde_json::Value> {
     match language {
         // The `vim` and `ovim` host tables (and the embedded Lua 5.4
         // runtime they live in) exist only inside ovim's own config and
@@ -1169,6 +1173,13 @@ impl LanguageServer {
                 None
             }
         };
+
+        // The user's own `initialization_options` (languages.toml / init.lua)
+        // are merged over the built-in ones.
+        let initialization_options = super::user_settings::initialization_options(
+            &self.inner.language,
+            initialization_options,
+        );
 
         #[allow(deprecated)] // root_uri/root_path deprecated but needed for LSP backwards compat
         let params = InitializeParams {

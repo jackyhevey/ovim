@@ -1321,3 +1321,51 @@ async fn a_java_file_without_a_build_file_says_why_no_test_can_run() {
     .await;
     s.stop_lsp().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lsp_exec_runs_a_server_command_with_json_arguments_and_reports_the_result() {
+    let mut s = Session::new(&resolve_commands()).await;
+    s.script_resolve(json!({"reloaded": true}));
+    s.test
+        .command(r#"LspExec hyperion.resolveLaunch {"flag": 1} "two""#);
+    s.until("the server command result", |s| {
+        s.test.editor.status_message().contains("reloaded")
+    })
+    .await;
+    let calls = s.lsp_events("workspace/executeCommand");
+    let params = &calls.last().expect("the server got the command")["params"];
+    assert_eq!(params["command"], "hyperion.resolveLaunch");
+    assert_eq!(params["arguments"], json!([{"flag": 1}, "two"]));
+
+    // A command the server does not list is refused with an explanation.
+    s.test.command("LspExec no.such.command");
+    s.until("the refusal", |s| {
+        s.test.editor.status_message().contains("does not provide")
+    })
+    .await;
+    s.stop_lsp().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_lsp_settings_reach_the_server_as_initialization_options_and_workspace_settings() {
+    ovim_core::lsp::user_settings::configure(
+        &["controlled".to_string()],
+        ovim_core::lsp::user_settings::UserLspSettings {
+            initialization_options: Some(json!({"hyperion": {"buildToolClasspath": true}})),
+            settings: Some(json!({"hyperion": {"buildToolClasspath": true}})),
+        },
+    );
+    let mut s = Session::new(&resolve_commands()).await;
+    s.wait_for_event("workspace/didChangeConfiguration").await;
+    let init = s.lsp_events("initialize");
+    assert_eq!(
+        init[0]["params"]["initializationOptions"]["hyperion"]["buildToolClasspath"],
+        true
+    );
+    let config = s.lsp_events("workspace/didChangeConfiguration");
+    assert_eq!(
+        config[0]["params"]["settings"]["hyperion"]["buildToolClasspath"],
+        true
+    );
+    s.stop_lsp().await;
+}

@@ -512,6 +512,31 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
             editor.open_scratch_buffer("LspInfo", &info);
             crate::command_result::ok_silent()
         }
+        "LspReloadProject" => {
+            editor.lsp_execute_command("hyperion.reloadProject", Vec::new());
+            crate::command_result::ok_silent()
+        }
+        cmd if cmd == "LspExec" || cmd.starts_with("LspExec ") => {
+            let rest = cmd.trim_start_matches("LspExec").trim();
+            let (name, args) = match rest.split_once(char::is_whitespace) {
+                Some((name, args)) => (name, args.trim()),
+                None => (rest, ""),
+            };
+            if name.is_empty() {
+                return err("Usage: LspExec <command> [json arguments...]");
+            }
+            let parsed: Result<Vec<serde_json::Value>, _> =
+                serde_json::Deserializer::from_str(args)
+                    .into_iter::<serde_json::Value>()
+                    .collect();
+            match parsed {
+                Ok(arguments) => {
+                    editor.lsp_execute_command(name, arguments);
+                    crate::command_result::ok_silent()
+                }
+                Err(e) => err(format!("LspExec: arguments must be JSON values: {e}")),
+            }
+        }
         "LspRestart" => restart_lsp_servers(editor, None),
         cmd if cmd.starts_with("LspRestart ") => {
             let target = cmd.trim_start_matches("LspRestart ").trim();

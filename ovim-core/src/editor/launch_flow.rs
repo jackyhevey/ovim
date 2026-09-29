@@ -196,6 +196,9 @@ pub(crate) struct LaunchState {
     pending_pick: Option<PendingPick>,
     debug_port_timeout: Duration,
     pub(crate) code_lens: super::code_lens::CodeLensState,
+    /// `:LspExec` in flight: (command, result).
+    pub(crate) server_command:
+        Option<oneshot::Receiver<(String, Result<serde_json::Value, String>)>>,
 }
 
 impl Default for LaunchState {
@@ -208,6 +211,7 @@ impl Default for LaunchState {
             pending_pick: None,
             debug_port_timeout: DEBUG_PORT_TIMEOUT,
             code_lens: Default::default(),
+            server_command: None,
         }
     }
 }
@@ -253,6 +257,73 @@ impl Editor {
     // ------------------------------------------------------------------
     // Entry points (called from keys and commands; never block)
     // ------------------------------------------------------------------
+
+    /// `:LspExec <command> [json args]`: runs a `workspace/executeCommand`
+    /// on the language server that owns the current file and reports the
+    /// outcome (result in the status line, or a scratch buffer when long).
+    pub fn lsp_execute_command(&mut self, command: &str, arguments: Vec<serde_json::Value>) {
+        let Some(file) = self.buffer().file_path().map(PathBuf::from) else {
+            self.set_status_message("Open a file first: the command runs on its language server");
+            return;
+        };
+        let Some(language_id) = self.language_id_for_path(&file.to_string_lossy()) else {
+            self.set_status_message(format!("No language server for {}", file.display()));
+            return;
+        };
+        let Some(manager) = self.lsp_manager() else {
+            self.set_status_message("LSP is not enabled");
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.set_status_message("Cannot run a server command: no async runtime available");
+            return;
+        }
+        let (tx, rx) = oneshot::channel();
+        let command = command.to_string();
+        let name = command.clone();
+        tokio::spawn(async move {
+            let result =
+                lsp::execute_for_document(manager, &language_id, &file, &command, arguments).await;
+            let _ = tx.send((command, result));
+        });
+        self.launch.server_command = Some(rx);
+        self.set_status_message(format!("Running {name}..."));
+    }
+
+    fn poll_server_command(&mut self) -> bool {
+        let Some(rx) = self.launch.server_command.as_mut() else {
+            return false;
+        };
+        let (command, result) = match rx.try_recv() {
+            Ok(done) => done,
+            Err(oneshot::error::TryRecvError::Empty) => return false,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.launch.server_command = None;
+                return false;
+            }
+        };
+        self.launch.server_command = None;
+        match result {
+            Err(message) => self.set_status_message(format!("{command} failed: {message}")),
+            Ok(value) => {
+                let compact = if value.is_null() {
+                    String::new()
+                } else {
+                    value.to_string()
+                };
+                if compact.is_empty() {
+                    self.set_status_message(format!("{command}: done"));
+                } else if compact.len() <= 120 {
+                    self.set_status_message(format!("{command}: {compact}"));
+                } else {
+                    let pretty = serde_json::to_string_pretty(&value).unwrap_or(compact);
+                    self.open_scratch_buffer("LspExec", &pretty);
+                    self.set_status_message(format!("{command}: result in the LspExec buffer"));
+                }
+            }
+        }
+        true
+    }
 
     /// Run or debug whatever is at the cursor (`target: auto`).
     pub fn launch_at_cursor(&mut self, mode: LaunchMode) {
@@ -1172,6 +1243,7 @@ impl Editor {
     /// Advances the launch state machine. Returns true when a redraw is needed.
     pub fn poll_launch(&mut self) -> bool {
         let mut changed = self.ingest_debug_output();
+        changed |= self.poll_server_command();
         let Some(mut job) = self.launch.job.take() else {
             changed |= self.acknowledge_orphan_session_end();
             self.start_queued_launch();

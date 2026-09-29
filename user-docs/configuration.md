@@ -103,6 +103,54 @@ ovim lsp languages --verbose
 
 See [LANGUAGE_SUPPORT.md](LANGUAGE_SUPPORT.md) for examples.
 
+### Language server options (`[[lsp_settings]]` / `ovim.lsp.configure`)
+
+Pass `initializationOptions` and workspace settings to a language server without
+touching its definition. In `~/.config/ovim/languages.toml`:
+
+```toml
+[[lsp_settings]]
+languages = ["java", "kotlin"]        # or language = "java"
+initialization_options = { hyperion = { buildToolClasspath = true } }
+settings = { hyperion = { buildToolClasspath = true } }
+```
+
+or in `init.lua`:
+
+```lua
+ovim.lsp.configure({ "java", "kotlin" }, {
+  initialization_options = { hyperion = { buildToolClasspath = true } },
+  settings = { hyperion = { buildToolClasspath = true } },
+})
+```
+
+`initialization_options` go into the `initialize` request; `settings` are sent
+with `workspace/didChangeConfiguration` right after `initialized` and answer
+`workspace/configuration` requests. Both are deep-merged over ovim's built-in
+defaults for that language; `init.lua` wins over `languages.toml`. Servers read
+them when they start, so `:LspRestart java` applies a change (a `:ConfigReload`
+re-runs `init.lua`, and the servers pick the result up on their next restart).
+Settings come only from your own config, never from files in the project you
+open.
+
+Example: **Hyperion runs Gradle/Maven for the classpath.** By default Hyperion
+only reads what a previous build left in `~/.gradle` / `~/.m2`, so a fresh clone
+has no libraries. With `hyperion.buildToolClasspath = true` it runs `./gradlew`
+(or `gradle`, `mvn`) itself to ask for the classpath. That executes the
+project's build scripts, hence opt-in. After changing build files (or the
+setting) run `:LspReloadProject`.
+
+To run any server command on the server that owns the current file:
+
+```vim
+:LspExec hyperion.reloadProject
+:LspExec some.command {"key": "value"} "second argument"
+```
+
+Arguments are JSON values; a short result shows in the status line, a long one
+opens in an `LspExec` buffer. `:LspReloadProject` is shorthand for
+`:LspExec hyperion.reloadProject`.
+
 ### Test runners (`[language.test]`)
 
 Rust, JavaScript/TypeScript, Python, and Go have built-in test runners (see

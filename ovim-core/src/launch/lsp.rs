@@ -130,6 +130,33 @@ pub async fn resolve_launch(
     ResolveOutcome::Failed(last_error)
 }
 
+/// Runs `command` on the first ready server for `file` that lists it in its
+/// `executeCommandProvider` (`:LspExec`). `Err` carries a message fit for
+/// the status line.
+pub async fn execute_for_document(
+    manager: Arc<LspManager>,
+    language_id: &str,
+    file: &Path,
+    command: &str,
+    args: Vec<Value>,
+) -> Result<Value, String> {
+    let servers = match capable_servers(&manager, language_id, file, command).await {
+        Ok(s) => s,
+        Err(ResolveOutcome::NoServer(reason) | ResolveOutcome::Unsupported(reason)) => {
+            return Err(reason)
+        }
+        Err(other) => return Err(format!("{other:?}")),
+    };
+    let mut last = String::new();
+    for server_id in servers {
+        match execute(&manager, &server_id, command, args.clone()).await {
+            Ok(value) => return Ok(value),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
 /// `hyperion.runConfigurations` from the server owning `file`.
 pub async fn run_configurations(
     manager: &LspManager,
