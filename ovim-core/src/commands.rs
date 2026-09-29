@@ -2426,6 +2426,9 @@ pub fn handle_set_command(editor: &mut Editor, args: &str) -> CommandResult {
 }
 
 #[cfg(test)]
+mod characterization_tests;
+
+#[cfg(test)]
 mod tests {
     use super::execute_command;
     use crate::command_result::CommandResult;
