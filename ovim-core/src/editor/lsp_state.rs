@@ -326,7 +326,6 @@ pub struct SignatureHelpState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LspResultType {
     References,
-    DocumentSymbols,
     WorkspaceSymbols,
     CallHierarchy,
     TypeHierarchy,
@@ -358,7 +357,6 @@ pub struct LspIntents {
     pub call_hierarchy_outgoing: bool,
     pub type_hierarchy: bool,
     pub find_references: bool,
-    pub document_symbols: bool,
     /// Pending `workspace/symbol` query (live symbol picker).
     pub workspace_symbols: Option<String>,
     pub organize_imports: bool,
@@ -485,8 +483,6 @@ pub struct LspState {
     pub pending_completion_commands: Vec<lsp_types::Command>,
     /// Available LSP references at current cursor position
     pub available_references: Vec<lsp_types::Location>,
-    /// Available document symbols for current file
-    pub available_document_symbols: Vec<lsp_types::DocumentSymbol>,
     /// Available workspace symbols
     pub available_workspace_symbols: Vec<lsp_types::SymbolInformation>,
     /// Available call hierarchy items (incoming or outgoing)
@@ -558,7 +554,6 @@ impl LspState {
             available_completions: Vec::new(),
             pending_completion_commands: Vec::new(),
             available_references: Vec::new(),
-            available_document_symbols: Vec::new(),
             available_workspace_symbols: Vec::new(),
             available_call_hierarchy: Vec::new(),
             available_type_hierarchy: Vec::new(),

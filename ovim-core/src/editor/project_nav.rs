@@ -170,14 +170,6 @@ impl Editor {
         self.picker_dirs().0
     }
 
-    fn show_location_picker(&mut self, base_dir: PathBuf, items: Vec<PickerResult>, title: &str) {
-        self.lsp.state.hierarchy = None;
-        let picker = Picker::new_with_results(base_dir, items).with_title(title);
-        self.set_picker(picker);
-        self.set_mode(Mode::Picker);
-        self.mark_picker_selection_changed();
-    }
-
     /// Files the user opened in this project, most recent first.
     pub fn recent_file_results(&mut self) -> Vec<PickerResult> {
         self.track_recent_file();
@@ -227,8 +219,7 @@ impl Editor {
             self.set_status_message("No recent files in this project yet");
             return;
         }
-        let root = self.project_root_for_pickers();
-        self.show_location_picker(root, items, "Recent files");
+        self.open_location_picker(items, "Recent files");
     }
 
     /// `<Space>sb` / `:Buffers` — open file buffers, most recently used first.
@@ -288,7 +279,7 @@ impl Editor {
                 }
             })
             .collect();
-        self.show_location_picker(root, items, "Open buffers");
+        self.open_location_picker(items, "Open buffers");
     }
 
     /// Picker rows for a `workspace/symbol` answer: the name, with `kind ·
@@ -629,5 +620,20 @@ mod tests {
             "Circle.java:5"
         );
         assert_eq!((items[0].line, items[0].col), (4, 11));
+    }
+
+    /// Every location picker (LSP references, recent files, ...) is titled
+    /// and rooted at the project, not at the process working directory.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn location_pickers_keep_their_title_and_use_the_project_root() {
+        let project = project(&["a.txt"]);
+        fs::create_dir(project.root.join("sub")).unwrap();
+        fs::write(project.root.join("sub/b.txt"), "x\n").unwrap();
+        let mut editor = editor_for(&project);
+        editor.load_file(project.root.join("sub/b.txt")).unwrap();
+        editor.open_location_picker(Vec::new(), "References");
+        let picker = editor.picker().unwrap();
+        assert_eq!(picker.title(), Some("References"));
+        assert_eq!(picker.base_dir(), project.root.as_path());
     }
 }

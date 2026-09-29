@@ -11,7 +11,6 @@
 //! columns in `char`s so callers can map them to buffer columns.
 
 use ignore::overrides::OverrideBuilder;
-use ignore::WalkBuilder;
 use regex::{Regex, RegexBuilder};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -149,13 +148,7 @@ pub fn search_project(
     let root = &root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let overrides = build_overrides(root, &options.globs)?;
 
-    let mut walker = WalkBuilder::new(root);
-    walker
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .require_git(false);
+    let mut walker = crate::editor::grep::build_walker(root);
     if let Some(overrides) = overrides {
         walker.overrides(overrides);
     }

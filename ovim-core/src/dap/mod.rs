@@ -58,25 +58,17 @@ pub enum DapEvent {
     Initialized,
 }
 
-/// What to send to the adapter once it is initialised: DAP `launch` or
-/// `attach` arguments, already fully resolved (see `launch::plan`).
-#[derive(Debug, Clone, PartialEq)]
-pub enum DapLaunchRequest {
-    Launch(serde_json::Value),
-    Attach(serde_json::Value),
-}
-
 /// Pending debug action to execute in the async event loop.
 #[derive(Debug, Clone)]
 pub enum PendingDebugAction {
-    /// Spawn the debug adapter, then launch or attach as requested.
+    /// Spawn the debug adapter, then attach with `attach` (the DAP `attach`
+    /// arguments, already fully resolved: see `launch::plan`). ovim starts the
+    /// debuggee itself; the adapter never launches one.
     Start {
         command: String,
         args: Vec<String>,
-        launch: DapLaunchRequest,
+        attach: serde_json::Value,
     },
-    /// Stop the current session.
-    Stop,
     /// Continue execution.
     Continue,
     /// Step over.
@@ -87,8 +79,8 @@ pub enum PendingDebugAction {
     StepOut,
     /// Fetch stack trace + scopes + variables for the stopped thread.
     FetchState,
-    /// Send launch or attach based on run config, then sync breakpoints.
-    LaunchOrAttach,
+    /// Send `attach` (from `attach_request`), then sync breakpoints.
+    Attach,
     /// Sync all breakpoints to the adapter and send configurationDone.
     SyncBreakpoints,
     /// Select a stack frame and refresh variables.
@@ -122,8 +114,8 @@ pub struct DapManager {
     /// hear about it. Also its own flag: a session that keeps stopping queues
     /// a state fetch every tick, which would overwrite a queued sync.
     breakpoint_sync_requested: bool,
-    /// The launch/attach request for the session being started.
-    pub launch_request: Option<DapLaunchRequest>,
+    /// The DAP `attach` arguments for the session being started.
+    pub attach_request: Option<serde_json::Value>,
     /// Debuggee/adapter output not yet copied into the run console.
     console_output: Vec<(String, String)>,
     /// Set when the session ended (adapter `terminated`/`exited`/EOF) and the
@@ -160,7 +152,7 @@ impl DapManager {
             pending_action: None,
             stop_requested: false,
             breakpoint_sync_requested: false,
-            launch_request: None,
+            attach_request: None,
             console_output: Vec::new(),
             session_end: None,
             exit_code: None,
@@ -292,16 +284,6 @@ impl DapManager {
             .map(|f| f.id.clone())
             .collect();
         client.set_exception_breakpoints(&enabled).await
-    }
-
-    /// Launch a debuggee (send launch request).
-    pub async fn launch(&self, config: serde_json::Value) -> Result<()> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
-        client.launch(config).await?;
-        Ok(())
     }
 
     /// Attach to a running debuggee.
@@ -510,7 +492,7 @@ impl DapManager {
             }
             None => Ok(()),
         };
-        self.launch_request = None;
+        self.attach_request = None;
         self.state.clear();
         if had_session && self.session_end.is_none() {
             self.session_end = Some(SessionEnd {
@@ -530,7 +512,7 @@ impl DapManager {
         }
         self.state.end_session_keep_output();
         self.kill_adapter();
-        self.launch_request = None;
+        self.attach_request = None;
         if self.session_end.is_none() {
             self.session_end = Some(SessionEnd {
                 exit_code: self.exit_code,
@@ -607,10 +589,10 @@ impl DapManager {
                     }
                 }
                 DapEvent::Initialized => {
-                    // The adapter is ready: send launch/attach first, then
-                    // breakpoints and configurationDone.
-                    if self.launch_request.is_some() {
-                        self.pending_action = Some(PendingDebugAction::LaunchOrAttach);
+                    // The adapter is ready: attach first, then breakpoints
+                    // and configurationDone.
+                    if self.attach_request.is_some() {
+                        self.pending_action = Some(PendingDebugAction::Attach);
                     }
                 }
             }
@@ -660,7 +642,7 @@ mod tests {
         dap.pending_action = Some(PendingDebugAction::Start {
             command: "x".into(),
             args: vec![],
-            launch: DapLaunchRequest::Attach(serde_json::json!({})),
+            attach: serde_json::json!({}),
         });
         dap.request_stop();
         assert!(dap.pending_action.is_none());

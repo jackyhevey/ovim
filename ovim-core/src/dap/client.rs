@@ -200,11 +200,6 @@ impl DebugAdapterClient {
         Ok(caps)
     }
 
-    pub async fn launch(&self, config: Value) -> Result<()> {
-        self.request("launch", Some(config)).await?;
-        Ok(())
-    }
-
     pub async fn attach(&self, config: Value) -> Result<()> {
         self.request("attach", Some(config)).await?;
         Ok(())

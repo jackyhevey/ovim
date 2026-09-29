@@ -626,7 +626,6 @@ impl Editor {
                 report.stale += file.edits.len();
                 continue;
             };
-            let was_clean = !self.buffer_index_is_modified(index);
 
             // Re-verify against the live buffer text: only edit lines that
             // still read exactly what the reviewer saw.
@@ -675,7 +674,6 @@ impl Editor {
             // itself wrote: a buffer that already held the user's unsaved work
             // is saved too (it is the same buffer the edit went into), and a
             // failed write leaves it modified and reported.
-            let _ = was_clean;
             if self.buffer_index_is_modified(index)
                 && !self.write_through_workspace_edit_buffer(index)
             {

@@ -722,50 +722,6 @@ impl Editor {
             }
         }
 
-        // Document symbols
-        if let Some(result) = self.lsp.slots.document_symbols.poll_with_timeout(timeout) {
-            match result {
-                Ok(r) if !r.symbols.is_empty() => {
-                    let count = r.symbols.len();
-                    self.lsp.state.available_document_symbols = r.symbols.clone();
-                    self.lsp.state.active_lsp_result_type =
-                        Some(crate::editor::LspResultType::DocumentSymbols);
-                    let file_path = r.file_path;
-                    let items: Vec<crate::editor::picker::PickerResult> = r
-                        .symbols
-                        .iter()
-                        .map(|sym| {
-                            let line = sym.range.start.line as usize;
-                            let col = self.utf16_to_grapheme_col(line, sym.range.start.character);
-                            crate::editor::picker::PickerResult {
-                                display: format!(
-                                    "{}:{}:{} {}",
-                                    file_path,
-                                    line + 1,
-                                    col + 1,
-                                    sym.name
-                                ),
-                                location: file_path.to_string(),
-                                line,
-                                col,
-                                match_positions: Vec::new(),
-                                content: None,
-                            }
-                        })
-                        .collect();
-                    self.open_location_picker(items, "Document Symbols");
-                    self.set_lsp_status(format!("Found {} symbols", count));
-                    changed = true;
-                }
-                Ok(_) => {
-                    self.set_lsp_status("No symbols found".to_string());
-                }
-                Err(e) => {
-                    self.set_lsp_status(format!("Document symbols request failed: {}", e));
-                }
-            }
-        }
-
         // Workspace symbols (live picker: results replace the list in place)
         if let Some(result) = self.lsp.slots.workspace_symbols.poll_with_timeout(timeout) {
             match result {
@@ -1186,7 +1142,6 @@ impl Editor {
         self.lsp.state.available_code_actions.clear();
         self.lsp.state.available_completions.clear();
         self.lsp.state.available_references.clear();
-        self.lsp.state.available_document_symbols.clear();
         self.lsp.state.available_workspace_symbols.clear();
         self.lsp.state.available_call_hierarchy.clear();
         self.lsp.state.available_type_hierarchy.clear();
@@ -1315,11 +1270,6 @@ impl Editor {
     /// Request find references at current cursor position
     pub fn request_find_references(&mut self) {
         self.lsp.intents.find_references = true;
-    }
-
-    /// Request document symbols for the current document
-    pub fn request_document_symbols(&mut self) {
-        self.lsp.intents.document_symbols = true;
     }
 
     /// Request workspace symbols
@@ -2351,9 +2301,6 @@ impl Editor {
         }
         if std::mem::take(&mut self.lsp.intents.find_references) {
             let _ = self.find_references_impl().await;
-        }
-        if std::mem::take(&mut self.lsp.intents.document_symbols) {
-            let _ = self.document_symbols_impl().await;
         }
         // The live symbol picker asks again whenever its query changes.
         if let Some(query) = self

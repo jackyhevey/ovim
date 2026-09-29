@@ -1,8 +1,8 @@
 //! Debug run configuration loading.
 //!
-//! Reads `.ovim/debug.toml` for project-local debug launch/attach configs.
-//! Optionally imports IntelliJ run configurations from `.idea/runConfigurations/`
-//! and `.run/` directories.
+//! Reads `.ovim/debug.toml` for project-local run/debug configs (`gradle`,
+//! `attach` and `launch` kinds) and parses the `hyperion.runConfigurations`
+//! the language server offers. There is no IntelliJ import.
 
 use serde::Deserialize;
 use serde_json::Value;

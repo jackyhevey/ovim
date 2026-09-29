@@ -824,12 +824,6 @@ impl Editor {
         let lsp = match &self.lsp.state.lsp_manager {
             Some(lsp) => Arc::clone(lsp),
             None => {
-                // Fall back to cached data for document_symbols
-                if name == "document_symbols" {
-                    return format_document_symbols_cached(
-                        &self.lsp.state.available_document_symbols,
-                    );
-                }
                 return ToolResult::Error(
                     "LSP not available. The language server is not running for this file."
                         .to_string(),
@@ -837,13 +831,8 @@ impl Editor {
             }
         };
 
-        // Clone cached symbols for fallback
-        let cached_symbols = self.lsp.state.available_document_symbols.clone();
-
         match name {
-            "document_symbols" => {
-                handle_lsp_document_symbols(lsp, uri, language_id, cached_symbols)
-            }
+            "document_symbols" => handle_lsp_document_symbols(lsp, uri, language_id),
             "hover" => handle_lsp_hover(lsp, uri, language_id, args),
             "goto_definition" => handle_lsp_goto_definition(lsp, uri, language_id, args),
             _ => ToolResult::Error(format!("unknown LSP tool: {name}")),
@@ -855,48 +844,8 @@ impl Editor {
 // Free functions: enclosing symbol, symbol kind labels, LSP tool handlers
 // ---------------------------------------------------------------------------
 
-/// Walk a hierarchical `DocumentSymbol` tree to find the deepest symbol
-/// whose range contains `cursor_line`.
-pub(crate) fn find_enclosing_symbol(
-    symbols: &[lsp_types::DocumentSymbol],
-    cursor_line: u32,
-) -> Option<&lsp_types::DocumentSymbol> {
-    let mut best: Option<&lsp_types::DocumentSymbol> = None;
-
-    for sym in symbols {
-        let range = &sym.range;
-        if cursor_line >= range.start.line && cursor_line <= range.end.line {
-            // This symbol contains the cursor. Check if it's more specific than current best.
-            let is_tighter = best
-                .map(|b| {
-                    let b_span = b.range.end.line - b.range.start.line;
-                    let s_span = range.end.line - range.start.line;
-                    s_span < b_span
-                })
-                .unwrap_or(true);
-            if is_tighter {
-                best = Some(sym);
-            }
-            // Recurse into children for a tighter match
-            if let Some(children) = &sym.children {
-                if let Some(child) = find_enclosing_symbol(children, cursor_line) {
-                    let child_span = child.range.end.line - child.range.start.line;
-                    let best_span = best
-                        .map(|b| b.range.end.line - b.range.start.line)
-                        .unwrap_or(u32::MAX);
-                    if child_span < best_span {
-                        best = Some(child);
-                    }
-                }
-            }
-        }
-    }
-
-    best
-}
-
 /// Human-readable label for an LSP SymbolKind.
-pub(super) fn symbol_kind_label(kind: lsp_types::SymbolKind) -> &'static str {
+fn symbol_kind_label(kind: lsp_types::SymbolKind) -> &'static str {
     match kind {
         lsp_types::SymbolKind::FILE => "File",
         lsp_types::SymbolKind::MODULE => "Module",
@@ -938,20 +887,6 @@ fn format_symbol_tree(symbols: &[lsp_types::DocumentSymbol], indent: usize, out:
     }
 }
 
-/// Format cached document symbols (used when LSP is unavailable).
-fn format_document_symbols_cached(symbols: &[lsp_types::DocumentSymbol]) -> ToolResult {
-    if symbols.is_empty() {
-        return ToolResult::Success(
-            "No document symbols available. The language server may not be running \
-             or hasn't finished indexing yet."
-                .to_string(),
-        );
-    }
-    let mut out = String::from("Document symbols (cached):\n");
-    format_symbol_tree(symbols, 0, &mut out);
-    ToolResult::Success(out)
-}
-
 /// Extract 1-indexed line/column from tool args, converting to 0-indexed.
 fn extract_position(args: &serde_json::Value) -> Result<(u32, u32), String> {
     let line = args
@@ -975,7 +910,6 @@ fn handle_lsp_document_symbols(
     lsp: Arc<crate::lsp::LspManager>,
     uri: lsp_types::Uri,
     language_id: String,
-    cached_symbols: Vec<lsp_types::DocumentSymbol>,
 ) -> ToolResult {
     let result = tokio::task::block_in_place(|| {
         tokio::runtime::Handle::current()
@@ -988,14 +922,12 @@ fn handle_lsp_document_symbols(
             format_symbol_tree(&symbols, 0, &mut out);
             ToolResult::Success(out)
         }
-        Ok(_) => {
-            // Live LSP returned empty — fall back to cached
-            format_document_symbols_cached(&cached_symbols)
-        }
-        Err(_) => {
-            // LSP request failed — fall back to cached
-            format_document_symbols_cached(&cached_symbols)
-        }
+        // An empty answer and a failed request read the same to the model.
+        Ok(_) | Err(_) => ToolResult::Success(
+            "No document symbols available. The language server may not be running \
+             or hasn't finished indexing yet."
+                .to_string(),
+        ),
     }
 }
 

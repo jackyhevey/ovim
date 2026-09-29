@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use super::process::CommandSpec;
 use crate::debug_config::{DebugRunConfig, DebugRunKind};
@@ -42,7 +42,7 @@ pub enum PlanKind {
     Attach,
 }
 
-/// A `java` invocation, plus the raw JSON handed to the debug adapter.
+/// A `java` invocation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JavaLaunch {
     pub main_class: String,
@@ -51,8 +51,6 @@ pub struct JavaLaunch {
     pub jvm_args: Vec<String>,
     pub cwd: PathBuf,
     pub env: BTreeMap<String, String>,
-    /// Exactly what the DAP `launch` request receives.
-    pub dap_arguments: Value,
 }
 
 impl JavaLaunch {
@@ -358,7 +356,6 @@ fn java_launch_from_json(raw: &Value, fallback_cwd: &Path) -> Result<JavaLaunch,
         jvm_args: string_list(raw.get("jvmArgs")),
         cwd,
         env: env_map(raw.get("env")),
-        dap_arguments: raw.clone(),
     })
 }
 
@@ -565,20 +562,6 @@ pub fn plan_from_config(config: &DebugRunConfig, default_root: &Path) -> LaunchP
             let root = resolve_against(default_root, project_root.as_deref())
                 .unwrap_or_else(|| default_root.to_path_buf());
             let cwd = resolve_against(&root, cwd.as_deref()).unwrap_or_else(|| root.clone());
-            let mut dap = json!({
-                "mainClass": main_class,
-                "projectRoot": root,
-                "cwd": cwd,
-            });
-            if let Some(cp) = classpath {
-                dap["classpath"] = json!(cp);
-            }
-            if !args.is_empty() {
-                dap["args"] = json!(args);
-            }
-            if !jvm_args.is_empty() {
-                dap["jvmArgs"] = json!(jvm_args);
-            }
             let launch = JavaLaunch {
                 main_class: main_class.clone(),
                 classpath: classpath.clone().unwrap_or_default(),
@@ -586,7 +569,6 @@ pub fn plan_from_config(config: &DebugRunConfig, default_root: &Path) -> LaunchP
                 jvm_args: jvm_args.clone(),
                 cwd,
                 env: BTreeMap::new(),
-                dap_arguments: dap,
             };
             LaunchPlan {
                 project_root: root.clone(),
@@ -691,6 +673,7 @@ mod tests {
     }
 
     use super::*;
+    use serde_json::json;
 
     fn sample_main() -> Value {
         json!({
@@ -722,9 +705,6 @@ mod tests {
         let launch = plan.launch.as_ref().unwrap();
         assert_eq!(launch.main_class, "com.example.Main");
         assert_eq!(launch.env.get("K").map(String::as_str), Some("V"));
-        // The DAP launch arguments are the launch block, verbatim.
-        assert_eq!(launch.dap_arguments["mainClass"], "com.example.Main");
-        assert_eq!(launch.dap_arguments["projectRoot"], "/r");
         let cmd = launch.run_command();
         assert_eq!(
             &cmd.argv[1..],
@@ -854,7 +834,6 @@ mod tests {
             PathBuf::from("/proj/work")
         );
         assert_eq!(plan.build.as_ref().unwrap().cwd, PathBuf::from("/proj"));
-        assert_eq!(plan.launch.unwrap().dap_arguments["cwd"], "/proj/work");
     }
 
     #[test]

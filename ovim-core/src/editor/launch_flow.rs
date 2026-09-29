@@ -23,7 +23,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use super::Editor;
-use crate::dap::{DapLaunchRequest, PendingDebugAction};
+use crate::dap::PendingDebugAction;
 use crate::debug_config::DebugRunConfig;
 use crate::launch::console::{LineKind, RunOutcome, RunPhase, RunStatus};
 use crate::launch::lsp::{self, ResolveOutcome, ResolveResult};
@@ -1182,11 +1182,11 @@ impl Editor {
         match (plan.kind, mode) {
             (PlanKind::Attach, _) => {
                 let attach = plan.attach.clone().expect("attach plans carry a target");
-                let request = DapLaunchRequest::Attach(serde_json::json!({
+                let request = serde_json::json!({
                     "host": attach.host,
                     "port": attach.port,
                     "projectRoot": attach.project_root,
-                }));
+                });
                 self.log_console(
                     job.run_id,
                     LineKind::System,
@@ -1317,7 +1317,7 @@ impl Editor {
     }
 
     /// Queues the debug adapter start for `request`.
-    fn begin_debugger(&mut self, job: &mut LaunchJob, request: DapLaunchRequest) {
+    fn begin_debugger(&mut self, job: &mut LaunchJob, attach: serde_json::Value) {
         let (command, args) = match self.debug_adapter_for(job) {
             Ok(found) => found,
             Err(message) => {
@@ -1335,7 +1335,7 @@ impl Editor {
         self.dap_manager.pending_action = Some(PendingDebugAction::Start {
             command,
             args,
-            launch: request,
+            attach,
         });
     }
 
@@ -1397,7 +1397,7 @@ impl Editor {
     pub fn launch_debug_failed(&mut self, message: String) {
         self.dap_manager.pending_action = None;
         self.dap_manager.state.end_session_keep_output();
-        self.dap_manager.launch_request = None;
+        self.dap_manager.attach_request = None;
         if let Some(mut job) = self.launch.job.take() {
             self.fail_job(&mut job, format!("Debug failed: {message}"));
         } else {
@@ -1517,12 +1517,14 @@ impl Editor {
             LineKind::System,
             format!("JVM is listening on port {port}; attaching debugger"),
         );
-        let request = DapLaunchRequest::Attach(serde_json::json!({
-            "host": "127.0.0.1",
-            "port": port,
-            "projectRoot": root,
-        }));
-        self.begin_debugger(job, request);
+        self.begin_debugger(
+            job,
+            serde_json::json!({
+                "host": "127.0.0.1",
+                "port": port,
+                "projectRoot": root,
+            }),
+        );
     }
 
     fn on_process_exit(&mut self, job: &mut LaunchJob, info: ExitInfo) {

@@ -127,7 +127,7 @@ impl Editor {
             .iter()
             .filter_map(|entry| self.hierarchy_picker_item(entry))
             .collect();
-        self.open_location_picker_keeping_hierarchy(items);
+        self.open_location_picker_keeping_hierarchy(items, &level.title);
         if let Some(picker) = self.picker_mut() {
             picker.set_selected_index(level.selected);
         }
