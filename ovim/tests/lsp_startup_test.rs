@@ -576,3 +576,122 @@ async fn explorer_rename_asks_will_rename_first_and_reports_did_rename() {
         .await;
     session.stop().await;
 }
+
+fn hierarchy_item(name: &str, detail: &str, uri: &str, line: u32) -> Value {
+    json!({
+        "name": name, "kind": 5, "detail": detail, "uri": uri,
+        "range": {"start": {"line": line, "character": 0}, "end": {"line": line + 3, "character": 1}},
+        "selectionRange": {"start": {"line": line, "character": 6}, "end": {"line": line, "character": 12}}
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn type_hierarchy_uses_dynamic_registration_and_drills_down_with_names() {
+    let mut session = StartupSession::new();
+    let root = session.dir.path().canonicalize().unwrap();
+    // Like Hyperion: no static typeHierarchyProvider, registered dynamically.
+    std::fs::write(
+        root.join("register-capability.json"),
+        json!([{
+            "id": "th", "method": "textDocument/prepareTypeHierarchy",
+            "registerOptions": {"documentSelector": [{"language": "controlled"}]}
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    session.ready();
+    session.wait_for_event("textDocument/didOpen").await;
+    session
+        .wait_until("registration ack", |s| {
+            std::fs::read_to_string(s.dir.path().join("events.jsonl"))
+                .unwrap_or_default()
+                .contains("\"id\": 9001")
+        })
+        .await;
+    // The client advertised dynamic registration (what Hyperion checks).
+    let init = &session.events("initialize")[0];
+    assert_eq!(
+        init["params"]["capabilities"]["textDocument"]["typeHierarchy"]["dynamicRegistration"],
+        true
+    );
+
+    let uri =
+        ovim::lsp::uri_from_file_path(session.test.editor.buffer().file_path().unwrap()).unwrap();
+    let uri = uri.as_str();
+    let script = |method: &str, result: Value| {
+        std::fs::write(
+            root.join(format!("response-{method}.json")),
+            json!({"result": result}).to_string(),
+        )
+        .unwrap();
+    };
+    script(
+        "textDocument_prepareTypeHierarchy",
+        json!([hierarchy_item("Circle", "demo.core", uri, 2)]),
+    );
+    script(
+        "typeHierarchy_supertypes",
+        json!([hierarchy_item("Shape", "demo.core", uri, 10)]),
+    );
+    script(
+        "typeHierarchy_subtypes",
+        json!([hierarchy_item("Ring", "demo.core", uri, 20)]),
+    );
+
+    session.test.keys(" th");
+    session
+        .wait_until("hierarchy picker", |s| {
+            s.test
+                .editor
+                .picker()
+                .is_some_and(|p| !p.filtered_results().is_empty())
+        })
+        .await;
+    let rows: Vec<String> = session
+        .test
+        .editor
+        .picker()
+        .unwrap()
+        .filtered_results()
+        .iter()
+        .map(|r| r.display.clone())
+        .collect();
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("Shape") && r.contains("demo.core")),
+        "{rows:?}"
+    );
+    assert!(rows.iter().any(|r| r.contains("Ring")), "{rows:?}");
+    assert!(
+        rows.iter().all(|r| !r.starts_with("first.controlled")),
+        "names, not file:line: {rows:?}"
+    );
+
+    // Drill into the first row (Shape, a supertype): its own supertypes.
+    script(
+        "typeHierarchy_supertypes",
+        json!([hierarchy_item("Object", "java.lang", uri, 30)]),
+    );
+    session.test.keys("<Tab>");
+    session
+        .wait_until("second level", |s| {
+            s.test.editor.picker().is_some_and(|p| {
+                p.filtered_results()
+                    .iter()
+                    .any(|r| r.display.contains("Object"))
+            })
+        })
+        .await;
+    // ... and back up.
+    session.test.press_key(ovim_core::KeyCode::BackTab);
+    session
+        .wait_until("back to first level", |s| {
+            s.test.editor.picker().is_some_and(|p| {
+                p.filtered_results()
+                    .iter()
+                    .any(|r| r.display.contains("Shape"))
+            })
+        })
+        .await;
+    session.stop().await;
+}

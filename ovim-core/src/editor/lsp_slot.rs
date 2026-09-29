@@ -628,22 +628,16 @@ pub struct OrganizeImportsResult {
     pub buffer_version: usize,
 }
 
-/// Result of a call-hierarchy request (incoming or outgoing).
-pub struct CallHierarchyResult {
-    pub locations: Vec<lsp_types::Location>,
-    pub direction: CallHierarchyDirection,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum CallHierarchyDirection {
-    Incoming,
-    Outgoing,
-}
-
-/// Result of a type-hierarchy request.
-pub struct TypeHierarchyResult {
-    pub types: Vec<(String, lsp_types::Location)>,
-    pub all_locations: Vec<lsp_types::Location>,
+/// Result of a hierarchy request (call hierarchy, type hierarchy, or drilling
+/// into an entry of either).
+pub struct HierarchyResult {
+    pub title: String,
+    pub entries: Vec<super::lsp_state::HierarchyEntry>,
+    pub empty_message: String,
+    /// True when this expands an entry of the current level (pushes a level),
+    /// false when it starts a new hierarchy.
+    pub expanding: bool,
+    pub language_id: String,
 }
 
 /// Result of a semantic-tokens request.
@@ -674,8 +668,9 @@ pub struct LspSlots {
     pub code_actions: Slot<CodeActionsResult>,
     pub rename: Slot<RenameResult>,
     pub organize_imports: Slot<OrganizeImportsResult>,
-    pub call_hierarchy: Slot<CallHierarchyResult>,
-    pub type_hierarchy: Slot<TypeHierarchyResult>,
+    pub call_hierarchy: Slot<HierarchyResult>,
+    pub type_hierarchy: Slot<HierarchyResult>,
+    pub hierarchy_expand: Slot<HierarchyResult>,
     pub semantic_tokens: Slot<SemanticTokensSlotResult>,
 }
 
@@ -698,6 +693,7 @@ impl LspSlots {
         self.organize_imports.cancel();
         self.call_hierarchy.cancel();
         self.type_hierarchy.cancel();
+        self.hierarchy_expand.cancel();
         self.semantic_tokens.cancel();
     }
 
@@ -719,6 +715,7 @@ impl LspSlots {
             || self.organize_imports.is_pending()
             || self.call_hierarchy.is_pending()
             || self.type_hierarchy.is_pending()
+            || self.hierarchy_expand.is_pending()
             || self.semantic_tokens.is_pending()
     }
 }
@@ -745,6 +742,7 @@ impl Default for LspSlots {
             organize_imports: Slot::new(),
             call_hierarchy: Slot::new(),
             type_hierarchy: Slot::new(),
+            hierarchy_expand: Slot::new(),
             semantic_tokens: Slot::new(),
         }
     }

@@ -828,67 +828,8 @@ impl Editor {
             }
         }
 
-        // Call hierarchy
-        if let Some(result) = self.lsp.slots.call_hierarchy.poll_with_timeout(timeout) {
-            match result {
-                Ok(r) if !r.locations.is_empty() => {
-                    let count = r.locations.len();
-                    let direction_label = match r.direction {
-                        crate::editor::lsp_slot::CallHierarchyDirection::Incoming => {
-                            "Incoming Calls"
-                        }
-                        crate::editor::lsp_slot::CallHierarchyDirection::Outgoing => {
-                            "Outgoing Calls"
-                        }
-                    };
-                    self.store_call_hierarchy(&r.locations);
-                    let picker_items = self.locations_to_picker_items(&r.locations);
-                    self.open_location_picker(picker_items, direction_label);
-                    self.set_lsp_status(format!(
-                        "Found {} {}",
-                        count,
-                        direction_label.to_lowercase()
-                    ));
-                    changed = true;
-                }
-                Ok(r) => {
-                    let msg = match r.direction {
-                        crate::editor::lsp_slot::CallHierarchyDirection::Incoming => {
-                            "No incoming calls found"
-                        }
-                        crate::editor::lsp_slot::CallHierarchyDirection::Outgoing => {
-                            "No outgoing calls found"
-                        }
-                    };
-                    self.set_lsp_status(msg.to_string());
-                }
-                Err(e) => {
-                    self.set_lsp_status(format!("Call hierarchy request failed: {}", e));
-                }
-            }
-        }
-
-        // Type hierarchy
-        if let Some(result) = self.lsp.slots.type_hierarchy.poll_with_timeout(timeout) {
-            match result {
-                Ok(r) if !r.all_locations.is_empty() => {
-                    let count = r.all_locations.len();
-                    self.lsp.state.available_type_hierarchy = r.types;
-                    self.lsp.state.active_lsp_result_type =
-                        Some(crate::editor::LspResultType::TypeHierarchy);
-                    let picker_items = self.locations_to_picker_items(&r.all_locations);
-                    self.open_location_picker(picker_items, "Type Hierarchy");
-                    self.set_lsp_status(format!("Found {} types", count));
-                    changed = true;
-                }
-                Ok(_) => {
-                    self.set_lsp_status("No type hierarchy found".to_string());
-                }
-                Err(e) => {
-                    self.set_lsp_status(format!("Type hierarchy request failed: {}", e));
-                }
-            }
-        }
+        // Call hierarchy, type hierarchy, and drilling into either
+        changed |= self.poll_hierarchy_slots(timeout);
 
         // Semantic tokens
         if let Some(result) = self.lsp.slots.semantic_tokens.poll_with_timeout(timeout) {
@@ -1166,6 +1107,7 @@ impl Editor {
         self.lsp.state.available_workspace_symbols.clear();
         self.lsp.state.available_call_hierarchy.clear();
         self.lsp.state.available_type_hierarchy.clear();
+        self.lsp.state.hierarchy = None;
         self.lsp.state.active_lsp_result_type = None;
         self.lsp.state.inlay_hints.clear();
         // Drop the cached diagnostic vector too — it belongs to the file we're
@@ -2210,10 +2152,10 @@ impl Editor {
             let _ = self.type_hierarchy_impl().await;
         }
         if std::mem::take(&mut self.lsp.intents.call_hierarchy_incoming) {
-            let _ = self.call_hierarchy_incoming_impl().await;
+            let _ = self.call_hierarchy_impl(true).await;
         }
         if std::mem::take(&mut self.lsp.intents.call_hierarchy_outgoing) {
-            let _ = self.call_hierarchy_outgoing_impl().await;
+            let _ = self.call_hierarchy_impl(false).await;
         }
         if std::mem::take(&mut self.lsp.intents.find_references) {
             let _ = self.find_references_impl().await;

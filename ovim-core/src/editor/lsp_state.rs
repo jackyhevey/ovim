@@ -342,6 +342,47 @@ impl LspIntents {
     }
 }
 
+/// A call- or type-hierarchy item as returned by the server.
+#[derive(Debug, Clone)]
+pub enum HierarchyItem {
+    Call(lsp_types::CallHierarchyItem),
+    Type(lsp_types::TypeHierarchyItem),
+}
+
+/// What drilling into a hierarchy entry asks the server for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HierarchyExpand {
+    Incoming,
+    Outgoing,
+    Supertypes,
+    Subtypes,
+}
+
+/// One row of a hierarchy level.
+#[derive(Debug, Clone)]
+pub struct HierarchyEntry {
+    pub item: HierarchyItem,
+    pub expand: HierarchyExpand,
+    /// Direction marker shown before the name (type hierarchy only).
+    pub marker: &'static str,
+    pub location: lsp_types::Location,
+}
+
+/// One screen of the hierarchy browser. The browser is a stack of levels:
+/// drilling down pushes one, going back pops it.
+#[derive(Debug, Clone)]
+pub struct HierarchyLevel {
+    pub title: String,
+    pub entries: Vec<HierarchyEntry>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HierarchyState {
+    pub language_id: String,
+    pub levels: Vec<HierarchyLevel>,
+}
+
 /// Container for all LSP-related state in the editor
 pub struct LspState {
     /// LSP manager (optional, only if LSP is enabled)
@@ -370,6 +411,8 @@ pub struct LspState {
     pub pending_did_close_file: Option<String>,
     /// File-explorer rename waiting for its `willRenameFiles` round trip.
     pub pending_file_rename: Option<(std::path::PathBuf, String)>,
+    /// Hierarchy browser stack while a call/type hierarchy picker is open.
+    pub hierarchy: Option<HierarchyState>,
     /// Watches the workspace for changes made outside the editor (feeds
     /// `workspace/didChangeWatchedFiles`).
     pub workspace_watcher: super::workspace_watch::WorkspaceWatcher,
@@ -439,6 +482,7 @@ impl LspState {
             needs_lsp_init: false,
             pending_did_close_file: None,
             pending_file_rename: None,
+            hierarchy: None,
             workspace_watcher: Default::default(),
             available_code_actions: Vec::new(),
             available_completions: Vec::new(),

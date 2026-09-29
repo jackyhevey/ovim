@@ -964,6 +964,15 @@ impl LanguageServer {
                     honors_change_annotations: Some(true),
                 }),
                 rename: Some(Default::default()),
+                // Servers such as Hyperion only offer these through dynamic
+                // registration (`client/registerCapability`), and only when
+                // the client says it can handle that.
+                call_hierarchy: Some(lsp_types::CallHierarchyClientCapabilities {
+                    dynamic_registration: Some(true),
+                }),
+                type_hierarchy: Some(lsp_types::TypeHierarchyClientCapabilities {
+                    dynamic_registration: Some(true),
+                }),
                 formatting: Some(Default::default()),
                 range_formatting: Some(Default::default()),
                 publish_diagnostics: Some(lsp_types::PublishDiagnosticsClientCapabilities {
@@ -1188,6 +1197,13 @@ impl LanguageServer {
             .await
             .context("Failed to send initialize request")?;
 
+        // lsp-types has no typeHierarchyProvider field on ServerCapabilities,
+        // so static support has to be read from the raw response.
+        let static_type_hierarchy = result
+            .get("capabilities")
+            .and_then(|caps| caps.get("typeHierarchyProvider"))
+            .is_some_and(|provider| !provider.is_null() && *provider != json!(false));
+
         let init_result: InitializeResult =
             serde_json::from_value(result).context("Failed to parse initialize response")?;
 
@@ -1198,6 +1214,9 @@ impl LanguageServer {
 
         // Cache capability flags for lock-free access
         self.cache_capabilities(&init_result.capabilities);
+        if static_type_hierarchy {
+            self.inner.set_cap(LspCapFlags::TYPE_HIERARCHY, true);
+        }
 
         // Send initialized notification
         self.notify("initialized", serde_json::to_value(InitializedParams {})?)
@@ -1793,9 +1812,8 @@ impl LanguageServer {
             flags |= F::INCREMENTAL_SYNC;
         }
 
-        // TODO(OV-00132): type_hierarchy_provider requires lsp-types 0.96+
-        // Hardcoded off until we upgrade from 0.95.
-        // flags |= F::TYPE_HIERARCHY;
+        // Type hierarchy: read from the raw initialize response (see
+        // `do_initialize`) or enabled by dynamic registration.
 
         self.inner.cap_flags.store(flags.bits(), Ordering::Relaxed);
     }
@@ -1823,6 +1841,7 @@ impl LanguageServer {
             "textDocument/documentHighlight" => F::DOCUMENT_HIGHLIGHT,
             "textDocument/foldingRange" => F::FOLDING_RANGE,
             "textDocument/prepareCallHierarchy" => F::CALL_HIERARCHY,
+            "textDocument/prepareTypeHierarchy" | "textDocument/typeHierarchy" => F::TYPE_HIERARCHY,
             "workspace/executeCommand" => F::EXECUTE_COMMAND,
             "textDocument/inlayHint" => F::INLAY_HINT,
             "textDocument/semanticTokens"

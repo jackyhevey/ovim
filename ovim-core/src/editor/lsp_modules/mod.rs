@@ -12,6 +12,7 @@ pub(in crate::editor) mod actions;
 mod completion;
 mod diagnostics;
 mod goto;
+mod hierarchy;
 mod hover;
 mod inlay_hints;
 pub(in crate::editor) mod navigation;
