@@ -58,15 +58,16 @@ impl Editor {
         Ok(true)
     }
 
-    pub(in crate::editor) async fn workspace_symbols_impl(&mut self) -> Result<bool> {
+    pub(in crate::editor) async fn workspace_symbols_impl(
+        &mut self,
+        query: String,
+    ) -> Result<bool> {
         let ctx = self.prepare_lsp_request("workspace-symbols").await?;
 
         self.set_lsp_status("Fetching workspace symbols...".to_string());
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            // TODO: Support query parameter for filtering
-            let query = String::new();
             let result = ctx.lsp.workspace_symbols(&ctx.language_id, query).await;
             let _ = tx.send(
                 result.map(|symbols| crate::editor::lsp_slot::WorkspaceSymbolsResult { symbols }),

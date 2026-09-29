@@ -81,6 +81,7 @@ mod performance;
 pub mod picker;
 mod picker_manager;
 pub mod picker_state;
+pub mod project_nav;
 mod pseudocode;
 pub mod search_replace;
 pub use pseudocode::MarkdownDocument;

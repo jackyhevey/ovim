@@ -1558,6 +1558,7 @@ async fn run_editor(
     let mut editor = Editor::new().with_services(services);
     editor.load_ai_chat_preference();
     editor.enable_diff_review_persistence();
+    editor.enable_recent_files();
     if let Err(error) = editor.enable_lua() {
         editor.set_status_message(format!("Lua configuration: {error}"));
     }
@@ -3458,6 +3459,7 @@ fn picker(editor: &Editor) -> Option<GuiPicker> {
         crate::editor::PickerMode::Completion => "Completions",
         crate::editor::PickerMode::LspLocations => "Locations",
     };
+    let title = picker.title().unwrap_or(title);
     let total = picker.filtered_result_count();
     let selected = picker.selected_index();
     let start = centered_window_start(selected, total, MAX_PICKER_ITEMS);

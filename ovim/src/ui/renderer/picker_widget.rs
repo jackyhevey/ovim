@@ -136,6 +136,7 @@ pub fn render_picker(frame: &mut Frame, editor: &mut Editor) {
     frame.render_widget(ratatui::widgets::Clear, picker_area);
     frame.render_widget(Fill::bg(picker_colors::BG), picker_area);
 
+    let custom_title = picker.title().map(|title| format!(" {title} "));
     let mode_name = match picker.mode() {
         crate::editor::PickerMode::FindFiles => " \u{f0224} Find Files ",
         crate::editor::PickerMode::LiveGrep => " \u{f0dae} Live Grep ",
@@ -151,6 +152,7 @@ pub fn render_picker(frame: &mut Frame, editor: &mut Editor) {
         format!(" {}/{} ", filtered, total)
     };
 
+    let mode_name = custom_title.as_deref().unwrap_or(mode_name);
     let block = Block::default()
         .title_top(Line::from(Span::styled(
             mode_name,

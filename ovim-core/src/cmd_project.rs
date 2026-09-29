@@ -17,6 +17,24 @@ pub fn try_handle(editor: &mut Editor, command: &str) -> Option<CommandResult> {
         "SearchReplace" | "Sr" | "ReplaceInFiles" => Some(search_replace(editor, args)),
         "ReplaceApply" => Some(replace_apply(editor)),
         "ReplaceUndo" => Some(replace_undo(editor)),
+        "Recent" | "RecentFiles" => {
+            editor.open_recent_files_picker();
+            Some(crate::command_result::ok_silent())
+        }
+        "Buffers" => {
+            editor.open_buffer_picker();
+            Some(crate::command_result::ok_silent())
+        }
+        "Symbols" | "WorkspaceSymbols" => {
+            editor.open_workspace_symbol_picker();
+            if !args.is_empty() {
+                if let Some(picker) = editor.picker_mut() {
+                    picker.set_query(args.to_string());
+                    picker.mark_filter_pending();
+                }
+            }
+            Some(crate::command_result::ok_silent())
+        }
         "update" | "up" => Some(update(editor)),
         "grep" | "gr" | "vimgrep" | "vim" => Some(grep(editor, args)),
         _ => None,

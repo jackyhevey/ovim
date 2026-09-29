@@ -321,7 +321,7 @@ fn convert_document_symbol(sym: &lsp_types::DocumentSymbol) -> OutlineSymbol {
     }
 }
 
-fn symbol_kind_str(kind: lsp_types::SymbolKind) -> String {
+pub(crate) fn symbol_kind_str(kind: lsp_types::SymbolKind) -> String {
     match kind {
         lsp_types::SymbolKind::FILE => "file",
         lsp_types::SymbolKind::MODULE => "module",

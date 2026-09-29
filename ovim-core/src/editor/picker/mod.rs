@@ -35,9 +35,49 @@ pub struct Picker {
     pub(super) pending_filter: bool,
     /// Typed backend owning mode-specific state
     pub(super) backend: PickerBackend,
+    /// Heading shown instead of the mode's generic name ("Recent files", ...)
+    pub(super) title: Option<String>,
+    /// Workspace-symbol pickers re-query the server when the query changes
+    pub(super) symbol_query_pending: bool,
 }
 
 impl Picker {
+    /// Names the picker ("Recent files", "Workspace symbols", ...).
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Custom heading, if the opener gave one.
+    pub fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+
+    /// Replaces the results of a list picker whose entries come from elsewhere
+    /// (workspace symbols arriving from the language server).
+    pub fn set_results(&mut self, results: Vec<PickerResult>) {
+        self.all_results = results.clone();
+        self.filtered_results = results;
+        self.selected_index = 0;
+    }
+
+    /// True for the live workspace-symbol picker.
+    pub fn is_symbol_search(&self) -> bool {
+        matches!(
+            self.backend,
+            PickerBackend::FuzzyList(FuzzyListKind::WorkspaceSymbols)
+        )
+    }
+
+    /// The query to send to the server if it changed since the last request.
+    pub fn take_symbol_query(&mut self) -> Option<String> {
+        if self.is_symbol_search() && std::mem::take(&mut self.symbol_query_pending) {
+            Some(self.query.text().to_string())
+        } else {
+            None
+        }
+    }
+
     /// Starts an in-process grep search, cancelling any previous one.
     pub fn start_grep_search(&mut self) {
         if let PickerBackend::Grep(ref mut g) = self.backend {
@@ -189,6 +229,12 @@ impl Picker {
             PickerBackend::Nucleo(_) => {
                 unreachable!("apply_filter_internal should not be called for Nucleo backend");
             }
+            PickerBackend::FuzzyList(FuzzyListKind::WorkspaceSymbols) => {
+                // The language server ranks and filters; ask it again.
+                self.symbol_query_pending = true;
+                self.pending_filter = false;
+                return;
+            }
             PickerBackend::FuzzyList(_) => {
                 let mut scored_results: Vec<(PickerResult, i32, Vec<usize>)> = self
                     .all_results
@@ -333,13 +379,13 @@ impl Picker {
             PickerBackend::FuzzyList(FuzzyListKind::Completion) => {
                 Some(PickerAction::ApplyCompletion { index: result.line })
             }
-            PickerBackend::FuzzyList(FuzzyListKind::LspLocations) => {
-                Some(PickerAction::OpenFileWithTag {
-                    path: result.location.clone(),
-                    line: result.line,
-                    col: result.col,
-                })
-            }
+            PickerBackend::FuzzyList(
+                FuzzyListKind::LspLocations | FuzzyListKind::WorkspaceSymbols,
+            ) => Some(PickerAction::OpenFileWithTag {
+                path: result.location.clone(),
+                line: result.line,
+                col: result.col,
+            }),
             PickerBackend::FuzzyList(FuzzyListKind::DebugConfig) => {
                 Some(PickerAction::SelectDebugConfig { index: result.line })
             }
@@ -384,7 +430,9 @@ impl Picker {
                 | FuzzyListKind::DebugConfig
                 | FuzzyListKind::MessageAction => &PickerMode::Custom,
                 FuzzyListKind::Completion => &PickerMode::Completion,
-                FuzzyListKind::LspLocations => &PickerMode::LspLocations,
+                FuzzyListKind::LspLocations | FuzzyListKind::WorkspaceSymbols => {
+                    &PickerMode::LspLocations
+                }
             },
         }
     }

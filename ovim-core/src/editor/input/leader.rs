@@ -380,6 +380,21 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
             editor.reset_input_state();
         }
 
+        (&['s'], 'h') => {
+            // <Space>sh - Recent files (this project, across sessions)
+            editor.open_recent_files_picker();
+            editor.reset_input_state();
+        }
+        (&['s'], 'b') => {
+            // <Space>sb - Open buffers
+            editor.open_buffer_picker();
+            editor.reset_input_state();
+        }
+        (&['s'], 'S') => {
+            // <Space>sS - Workspace symbols (live query)
+            editor.open_workspace_symbol_picker();
+            editor.reset_input_state();
+        }
         (&['s'], 'r') => {
             // <Space>sr - Replace in files (prefilled with the word under the cursor)
             let word = editor.buffer().word_under_cursor().map(|(word, _, _)| word);

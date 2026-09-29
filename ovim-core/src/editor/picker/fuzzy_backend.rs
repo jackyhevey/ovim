@@ -4,6 +4,8 @@ pub enum FuzzyListKind {
     Custom,
     Completion,
     LspLocations,
+    /// Live `workspace/symbol` results; the server does the filtering.
+    WorkspaceSymbols,
     DebugConfig,
     /// Actions offered by a server's `window/showMessageRequest`.
     MessageAction,

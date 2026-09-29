@@ -5,7 +5,7 @@
 
 // Submodules for focused functionality
 #[path = "lsp_modules/mod.rs"]
-mod lsp_modules;
+pub(in crate::editor) mod lsp_modules;
 
 use super::*;
 use crate::lsp::{uri_from_file_path, LspManager};
@@ -687,43 +687,21 @@ impl Editor {
             }
         }
 
-        // Workspace symbols
+        // Workspace symbols (live picker: results replace the list in place)
         if let Some(result) = self.lsp.slots.workspace_symbols.poll_with_timeout(timeout) {
             match result {
-                Ok(r) if !r.symbols.is_empty() => {
-                    let count = r.symbols.len();
-                    self.lsp.state.available_workspace_symbols = r.symbols.clone();
+                Ok(r) => {
+                    let items = self.workspace_symbol_items(&r.symbols);
+                    let count = items.len();
+                    self.lsp.state.available_workspace_symbols = r.symbols;
                     self.lsp.state.active_lsp_result_type =
                         Some(crate::editor::LspResultType::WorkspaceSymbols);
-                    let items: Vec<crate::editor::picker::PickerResult> = r
-                        .symbols
-                        .iter()
-                        .filter_map(|sym| {
-                            let path = crate::lsp::uri_to_file_path(&sym.location.uri)?;
-                            let line = sym.location.range.start.line as usize;
-                            let col = self
-                                .utf16_to_grapheme_col(line, sym.location.range.start.character);
-                            Some(crate::editor::picker::PickerResult {
-                                display: format!(
-                                    "{}:{}:{}",
-                                    path.file_name().unwrap_or_default().to_string_lossy(),
-                                    line + 1,
-                                    col + 1
-                                ),
-                                location: path.to_string_lossy().to_string(),
-                                line,
-                                col,
-                                match_positions: Vec::new(),
-                                content: None,
-                            })
-                        })
-                        .collect();
-                    self.open_location_picker(items, "Workspace Symbols");
-                    self.set_lsp_status(format!("Found {} symbols", count));
-                    changed = true;
-                }
-                Ok(_) => {
-                    self.set_lsp_status("No workspace symbols found".to_string());
+                    if let Some(picker) = self.picker_mut().filter(|p| p.is_symbol_search()) {
+                        picker.set_results(items);
+                        self.mark_picker_selection_changed();
+                        self.set_lsp_status(format!("{count} symbols"));
+                        changed = true;
+                    }
                 }
                 Err(e) => {
                     self.set_lsp_status(format!("Workspace symbols request failed: {}", e));
@@ -1241,7 +1219,7 @@ impl Editor {
 
     /// Request workspace symbols
     pub fn request_workspace_symbols(&mut self) {
-        self.lsp.intents.workspace_symbols = true;
+        self.open_workspace_symbol_picker();
     }
 
     /// Request rename at current cursor position
@@ -2246,8 +2224,15 @@ impl Editor {
         if std::mem::take(&mut self.lsp.intents.document_symbols) {
             let _ = self.document_symbols_impl().await;
         }
-        if std::mem::take(&mut self.lsp.intents.workspace_symbols) {
-            let _ = self.workspace_symbols_impl().await;
+        // The live symbol picker asks again whenever its query changes.
+        if let Some(query) = self
+            .picker_mut()
+            .and_then(|picker| picker.take_symbol_query())
+        {
+            self.lsp.intents.workspace_symbols = Some(query);
+        }
+        if let Some(query) = self.lsp.intents.workspace_symbols.take() {
+            let _ = self.workspace_symbols_impl(query).await;
         }
         if std::mem::take(&mut self.lsp.intents.organize_imports) {
             let _ = self.organize_imports_impl().await;

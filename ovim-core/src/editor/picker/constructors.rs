@@ -21,6 +21,8 @@ impl Picker {
             preferred_dir,
             pending_filter: false,
             backend: PickerBackend::Nucleo(Box::new(NucleoState::new())),
+            title: None,
+            symbol_query_pending: false,
         }
     }
 
@@ -37,6 +39,8 @@ impl Picker {
             preferred_dir,
             pending_filter: false,
             backend: PickerBackend::Grep(GrepState::new()),
+            title: None,
+            symbol_query_pending: false,
         }
     }
 
@@ -57,6 +61,8 @@ impl Picker {
             preferred_dir,
             pending_filter: false,
             backend: PickerBackend::FuzzyList(kind),
+            title: None,
+            symbol_query_pending: false,
         }
     }
 
@@ -117,6 +123,20 @@ impl Picker {
             results,
             FuzzyListKind::LspLocations,
         )
+    }
+
+    /// Creates the live workspace-symbol picker; results arrive from the server.
+    pub fn new_workspace_symbols(base_dir: PathBuf) -> Self {
+        let preferred_dir = base_dir.clone();
+        let mut picker = Self::new_fuzzy_list(
+            base_dir,
+            preferred_dir,
+            Vec::new(),
+            FuzzyListKind::WorkspaceSymbols,
+        )
+        .with_title("Workspace symbols");
+        picker.symbol_query_pending = true;
+        picker
     }
 
     /// Creates a new debug config picker
