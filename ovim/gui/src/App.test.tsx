@@ -1346,6 +1346,46 @@ describe("Ovim Solid workbench", () => {
         }
     });
 
+    it("renders signature help with the active parameter highlighted", () => {
+        mockSnapshot.signatureHelp = {
+            before: "join(String delimiter, ",
+            active: "String... parts",
+            after: ")",
+            documentation: "the parts to join",
+            signatureIndex: 1,
+            signatureCount: 3,
+            line: 0,
+            displayColumn: 5,
+        };
+        try {
+            const result = render(() => <App />);
+            const popover =
+                result.container.querySelector(".signature-popover");
+            expect(popover).not.toBeNull();
+            expect(
+                popover?.querySelector(".signature-active")?.textContent,
+            ).toBe("String... parts");
+            expect(popover?.textContent).toContain("2/3");
+            expect(popover?.textContent).toContain("the parts to join");
+        } finally {
+            delete mockSnapshot.signatureHelp;
+        }
+    });
+
+    it("marks a closed fold header with the hidden line count", () => {
+        const pane = mockSnapshot.panes[0];
+        const original = pane.lines[0].folded;
+        pane.lines[0].folded = 12;
+        try {
+            const result = render(() => <App />);
+            expect(
+                result.container.querySelector(".fold-marker")?.textContent,
+            ).toContain("12 lines");
+        } finally {
+            pane.lines[0].folded = original;
+        }
+    });
+
     it("renders the selected language server detail projected by the core", () => {
         mockSnapshot.lspManager = {
             filter: "",

@@ -41,6 +41,55 @@ pub fn project_root_of(path: &Path) -> PathBuf {
     path.parent().map(Path::to_path_buf).unwrap_or_default()
 }
 
+/// The columns of one workspace-symbol row: the name is `PickerResult::display`,
+/// the rest is derived here so the TUI and GUI agree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolRowColumns {
+    /// Kind label (`class`, `method`, ...).
+    pub kind: String,
+    /// Nerd Font glyph for the kind.
+    pub glyph: &'static str,
+    /// Enclosing type/package, when the server sent one.
+    pub container: Option<String>,
+    /// `relative/path.java:LINE`.
+    pub file: String,
+}
+
+/// Splits a workspace-symbol picker row into its columns.
+pub fn symbol_row_columns(result: &PickerResult, root: &Path) -> SymbolRowColumns {
+    let detail = result.content.as_deref().unwrap_or_default();
+    let (kind, container) = match detail.split_once(" · ") {
+        Some((kind, container)) => (kind, Some(container.to_string())),
+        None => (detail, None),
+    };
+    SymbolRowColumns {
+        glyph: symbol_kind_glyph(kind),
+        kind: kind.to_string(),
+        container,
+        file: format!(
+            "{}:{}",
+            relative_display(root, Path::new(&result.location)),
+            result.line + 1
+        ),
+    }
+}
+
+/// Codicon glyph for a symbol kind label (see `symbol_kind_str`).
+fn symbol_kind_glyph(kind: &str) -> &'static str {
+    match kind {
+        "class" | "struct" => "\u{eb5b}",
+        "interface" => "\u{eb61}",
+        "enum" => "\u{ea95}",
+        "enum_member" => "\u{eb5e}",
+        "method" | "function" | "constructor" => "\u{ea8c}",
+        "field" | "property" => "\u{eb5f}",
+        "variable" => "\u{ea88}",
+        "constant" => "\u{eb5d}",
+        "package" | "module" | "namespace" => "\u{ea8b}",
+        _ => "\u{eb63}",
+    }
+}
+
 fn relative_display(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
@@ -253,12 +302,12 @@ impl Editor {
         self.show_location_picker(root, items, "Open buffers");
     }
 
-    /// Picker rows for a `workspace/symbol` answer: `Name  kind · container  file:line`.
+    /// Picker rows for a `workspace/symbol` answer: the name, with `kind ·
+    /// container` as the detail and the file drawn by the frontends.
     pub(crate) fn workspace_symbol_items(
         &self,
         symbols: &[lsp_types::SymbolInformation],
     ) -> Vec<PickerResult> {
-        let root = self.project_root_for_pickers();
         symbols
             .iter()
             .filter_map(|symbol| {
@@ -274,17 +323,15 @@ impl Editor {
                     .map(|name| format!(" · {name}"))
                     .unwrap_or_default();
                 Some(PickerResult {
-                    display: format!(
-                        "{}  {kind}{container}  {}:{}",
-                        symbol.name,
-                        relative_display(&root, &path),
-                        line + 1
-                    ),
+                    // Name only: it is what the query matches and what stays
+                    // readable however long the path is. Kind, container and
+                    // file are separate columns (`symbol_row_detail`).
+                    display: symbol.name.clone(),
                     location: path.to_string_lossy().to_string(),
                     line,
                     col,
                     match_positions: Vec::new(),
-                    content: None,
+                    content: Some(format!("{kind}{container}")),
                 })
             })
             .take(200)
@@ -465,6 +512,45 @@ mod tests {
         assert_eq!(editor.picker().unwrap().title(), Some("Open buffers"));
     }
 
+    /// OV-00452: a symbol row is name + kind + container + file, and stays
+    /// in the server's order.
+    #[test]
+    fn workspace_symbol_rows_carry_name_kind_container_and_file() {
+        let editor = Editor::default();
+        #[allow(deprecated)]
+        let symbol = |name: &str, kind, container: Option<&str>, path: &str, line: u32| {
+            lsp_types::SymbolInformation {
+                name: name.to_string(),
+                kind,
+                tags: None,
+                deprecated: None,
+                location: lsp_types::Location {
+                    uri: crate::lsp::uri_from_file_path(path).unwrap(),
+                    range: lsp_types::Range::new(
+                        lsp_types::Position::new(line, 13),
+                        lsp_types::Position::new(line, 19),
+                    ),
+                },
+                container_name: container.map(str::to_string),
+            }
+        };
+        let rows = editor.workspace_symbol_items(&[
+            symbol("CustomerService", lsp_types::SymbolKind::CLASS, Some("com.pay.service"), "/proj/src/CustomerService.java", 18),
+            symbol("createCustomer", lsp_types::SymbolKind::METHOD, Some("CustomerService"), "/proj/src/CustomerService.java", 22),
+        ]);
+        // Server order kept, name is the display text.
+        assert_eq!(rows[0].display, "CustomerService");
+        assert_eq!(rows[1].display, "createCustomer");
+        assert_eq!(rows[0].content.as_deref(), Some("class · com.pay.service"));
+        assert_eq!((rows[1].line, rows[1].col), (22, 13));
+
+        let columns = symbol_row_columns(&rows[1], Path::new("/proj"));
+        assert_eq!(columns.kind, "method");
+        assert_eq!(columns.container.as_deref(), Some("CustomerService"));
+        assert_eq!(columns.file, "src/CustomerService.java:23");
+        assert_ne!(columns.glyph, symbol_row_columns(&rows[0], Path::new("/proj")).glyph);
+    }
+
     #[test]
     fn workspace_symbol_picker_asks_the_server_again_when_the_query_changes() {
         let mut picker = Picker::new_workspace_symbols(PathBuf::from("/tmp"));
@@ -485,12 +571,12 @@ mod tests {
 
         // Results from the server are shown as delivered, never re-filtered.
         picker.set_results(vec![PickerResult {
-            display: "Circle  class  shapes  src/Circle.java:3".to_string(),
+            display: "Circle".to_string(),
             location: "/tmp/src/Circle.java".to_string(),
             line: 2,
             col: 13,
             match_positions: Vec::new(),
-            content: None,
+            content: Some("class · shapes".to_string()),
         }]);
         assert_eq!(picker.filtered_result_count(), 1);
         assert!(matches!(

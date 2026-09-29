@@ -3511,7 +3511,19 @@ fn picker(editor: &Editor) -> Option<GuiPicker> {
             index,
             display: item.display.clone(),
             location: item.location.clone(),
-            detail: item.content.clone(),
+            detail: if picker.is_symbol_search() {
+                // `kind · container  file:line`
+                let columns =
+                    ovim_core::editor::project_nav::symbol_row_columns(item, picker.base_dir());
+                Some(match &columns.container {
+                    Some(container) => {
+                        format!("{} \u{b7} {}  {}", columns.kind, container, columns.file)
+                    }
+                    None => format!("{}  {}", columns.kind, columns.file),
+                })
+            } else {
+                item.content.clone()
+            },
             matched: item.match_positions.clone(),
         })
         .collect();

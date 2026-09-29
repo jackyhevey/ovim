@@ -2402,7 +2402,8 @@ function App() {
     ) => {
         const height = rows * LINE_HEIGHT + 14;
         const lineTop = Math.max(0, line - view().firstLine) * LINE_HEIGHT + 6;
-        const top = lineTop >= height ? lineTop - height : lineTop + LINE_HEIGHT;
+        const top =
+            lineTop >= height ? lineTop - height : lineTop + LINE_HEIGHT;
         const containerWidth = editorBody?.clientWidth || 960;
         const width = Math.min(560, containerWidth - 24);
         const anchorX =
@@ -2642,7 +2643,8 @@ function App() {
                                                                 class="fold-marker"
                                                                 title="Closed fold (zo to open)"
                                                             >
-                                                                ⋯ {count()} lines
+                                                                ⋯ {count()}{" "}
+                                                                lines
                                                             </span>
                                                         )}
                                                     </Show>
@@ -4621,7 +4623,9 @@ function App() {
 
                         <Show
                             when={
-                                !view().aiChat ? view().signatureHelp : undefined
+                                !view().aiChat
+                                    ? view().signatureHelp
+                                    : undefined
                             }
                         >
                             {(signature) => (
@@ -4641,10 +4645,14 @@ function App() {
                                             {signature().active}
                                         </strong>
                                         <span>{signature().after}</span>
-                                        <Show when={signature().signatureCount > 1}>
+                                        <Show
+                                            when={
+                                                signature().signatureCount > 1
+                                            }
+                                        >
                                             <em class="signature-count">
-                                                {signature().signatureIndex + 1}/
-                                                {signature().signatureCount}
+                                                {signature().signatureIndex + 1}
+                                                /{signature().signatureCount}
                                             </em>
                                         </Show>
                                     </div>

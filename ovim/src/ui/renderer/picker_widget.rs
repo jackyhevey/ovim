@@ -563,6 +563,103 @@ fn disambiguate_filenames(paths: &[&str]) -> Vec<String> {
     }
 }
 
+/// One workspace-symbol row: `<kind glyph> Name  kind · container      file:line`.
+/// The name keeps priority; the file is right-aligned and shortened from its
+/// start so the file name stays readable.
+fn workspace_symbol_line(
+    picker: &crate::editor::Picker,
+    result: &crate::editor::PickerResult,
+    is_selected: bool,
+    width: usize,
+) -> Line<'static> {
+    let columns = crate::editor::project_nav::symbol_row_columns(result, picker.base_dir());
+    let (text_color, bg_color) = if is_selected {
+        (picker_colors::TEXT_BRIGHT, picker_colors::SELECTED)
+    } else {
+        (picker_colors::TEXT, picker_colors::BG)
+    };
+    let bold = if is_selected {
+        Modifier::BOLD
+    } else {
+        Modifier::empty()
+    };
+    let glyph_style = Style::default()
+        .fg(if is_selected {
+            picker_colors::GREEN
+        } else {
+            picker_colors::FILENAME
+        })
+        .bg(bg_color)
+        .add_modifier(bold);
+    let muted = Style::default().fg(picker_colors::TEXT_MUTED).bg(bg_color);
+
+    let lead = format!("{} ", columns.glyph);
+    let marker = if is_selected { "\u{25b8} " } else { "  " };
+    let lead_width = UnicodeWidthStr::width(lead.as_str()) + UnicodeWidthStr::width(marker);
+
+    // File column: at most 45% of the row, kept from its end.
+    let file_budget = (width.saturating_sub(lead_width) * 9 / 20).max(12);
+    let file = truncate_start(&columns.file, file_budget);
+    let file_width = UnicodeWidthStr::width(file.as_str());
+    let left_budget = width.saturating_sub(lead_width + file_width + 2);
+
+    let name = truncate_to_width(&result.display, left_budget);
+    let name_width = UnicodeWidthStr::width(name.as_str());
+    let detail_text = match &columns.container {
+        Some(container) => format!("  {} \u{b7} {}", columns.kind, container),
+        None => format!("  {}", columns.kind),
+    };
+    let detail = truncate_to_width(&detail_text, left_budget.saturating_sub(name_width));
+    let detail_width = UnicodeWidthStr::width(detail.as_str());
+
+    let positions = rematch_positions(picker.query(), &name);
+    let mut spans = vec![
+        Span::styled(lead, glyph_style),
+        Span::styled(
+            marker.to_string(),
+            Style::default()
+                .fg(text_color)
+                .bg(bg_color)
+                .add_modifier(bold),
+        ),
+    ];
+    spans.extend(build_highlighted_spans(
+        &name,
+        &positions,
+        text_color,
+        bg_color,
+        is_selected,
+    ));
+    spans.push(Span::styled(detail, muted));
+    let used = lead_width + name_width + detail_width + file_width;
+    let padding = width.saturating_sub(used);
+    spans.push(Span::styled(
+        " ".repeat(padding),
+        Style::default().bg(bg_color),
+    ));
+    spans.push(Span::styled(file, muted));
+    Line::from(spans)
+}
+
+/// Keeps the end of `text` (`…rest/of/path.java:12`).
+fn truncate_start(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    let mut kept: Vec<char> = Vec::new();
+    let mut used = 1; // the ellipsis
+    for character in text.chars().rev() {
+        let w = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+        if used + w > max_width {
+            break;
+        }
+        used += w;
+        kept.push(character);
+    }
+    kept.reverse();
+    format!("…{}", kept.into_iter().collect::<String>())
+}
+
 /// Renders the picker results list
 /// Returns the scroll offset used for rendering (needed for mouse hit-testing).
 fn render_picker_results(frame: &mut Frame, picker: &crate::editor::Picker, area: Rect) -> usize {
@@ -587,6 +684,13 @@ fn render_picker_results(frame: &mut Frame, picker: &crate::editor::Picker, area
     };
 
     let is_live_grep = matches!(picker.mode(), crate::editor::PickerMode::LiveGrep);
+    let is_symbol_search = picker.is_symbol_search();
+    // Only real paths are shortened from the middle; everything else keeps its
+    // start (a symbol name, a command) and loses its tail.
+    let display_is_path = matches!(
+        picker.mode(),
+        crate::editor::PickerMode::FindFiles | crate::editor::PickerMode::LiveGrep
+    );
 
     // Collect visible results first so we can disambiguate filenames across them
     let visible_entries: Vec<(usize, &crate::editor::PickerResult)> = (scroll_offset
@@ -611,8 +715,16 @@ fn render_picker_results(frame: &mut Frame, picker: &crate::editor::Picker, area
         .map(|(vis_idx, &(actual_idx, result))| {
             let is_selected = actual_idx == selected_idx;
 
+            if is_symbol_search {
+                return workspace_symbol_line(picker, result, is_selected, result_width);
+            }
+
             let max_display_len = result_width.saturating_sub(5);
-            let display = crate::editor::Picker::truncate_path(&result.display, max_display_len);
+            let display = if display_is_path {
+                crate::editor::Picker::truncate_path(&result.display, max_display_len)
+            } else {
+                truncate_to_width(&result.display, max_display_len)
+            };
 
             let icon = if result.line > 0 {
                 "\u{f002}"
@@ -1128,4 +1240,84 @@ fn render_picker_empty_state(frame: &mut Frame, area: Rect) {
         height: 1,
     };
     frame.render_widget(paragraph, centered_area);
+}
+
+#[cfg(test)]
+mod symbol_row_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    fn row(name: &str, content: &str, path: &str, line: usize) -> crate::editor::PickerResult {
+        crate::editor::PickerResult {
+            display: name.to_string(),
+            location: path.to_string(),
+            line,
+            col: 0,
+            match_positions: Vec::new(),
+            content: Some(content.to_string()),
+        }
+    }
+
+    fn screen(picker: &crate::editor::Picker, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_picker_results(frame, picker, Rect::new(0, 0, width, height));
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// OV-00452: rows were only `.../File.java:16:14` because the whole
+    /// display string was path-truncated from the left, cutting the symbol
+    /// name off. Every row must show name, kind, container and file.
+    #[test]
+    fn workspace_symbol_rows_show_name_kind_container_and_file() {
+        let root = std::path::PathBuf::from("/work/proj");
+        let mut picker = crate::editor::Picker::new_workspace_symbols(root);
+        picker.set_results(vec![
+            row(
+                "CustomerService",
+                "class · com.paystream.service",
+                "/work/proj/src/main/java/com/paystream/service/CustomerService.java",
+                18,
+            ),
+            row(
+                "createCustomer",
+                "method · CustomerService",
+                "/work/proj/src/main/java/com/paystream/service/CustomerService.java",
+                22,
+            ),
+        ]);
+        let lines = screen(&picker, 100, 4);
+        assert!(lines[0].contains("CustomerService"), "{}", lines[0]);
+        assert!(lines[0].contains("class · com.paystream.service"), "{}", lines[0]);
+        assert!(lines[0].contains("CustomerService.java:19"), "{}", lines[0]);
+        assert!(lines[1].contains("createCustomer"), "{}", lines[1]);
+        assert!(lines[1].contains("method · CustomerService"), "{}", lines[1]);
+        assert!(lines[1].contains("CustomerService.java:23"), "{}", lines[1]);
+    }
+
+    #[test]
+    fn narrow_rows_keep_the_name_and_the_file_tail() {
+        let root = std::path::PathBuf::from("/work/proj");
+        let mut picker = crate::editor::Picker::new_workspace_symbols(root);
+        picker.set_results(vec![row(
+            "OrderRepository",
+            "interface · com.example.a.very.long.package.name",
+            "/work/proj/src/main/java/com/example/a/very/long/package/name/OrderRepository.java",
+            7,
+        )]);
+        let line = screen(&picker, 60, 2).remove(0);
+        assert!(line.contains("OrderRepository"), "{line}");
+        assert!(line.contains("OrderRepository.java:8"), "{line}");
+        assert!(line.contains('…'), "the long path is shortened: {line}");
+    }
 }
