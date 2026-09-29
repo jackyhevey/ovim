@@ -27,6 +27,9 @@ mod runners;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod run_tests;
+
 pub use runners::TestScope;
 use runners::{build_test_command, TestContext, TestInvocation};
 
