@@ -22,6 +22,103 @@ fn parse_lsp_response<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Why a completion request is being made (LSP `CompletionTriggerKind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionTrigger {
+    /// Explicit request (Ctrl-Space) or identifier typing.
+    Invoked,
+    /// A server-advertised trigger character was typed.
+    Character(char),
+    /// The previous list was `isIncomplete` and the user kept typing.
+    Incomplete,
+}
+
+/// Completion answer with the list-level flags the menu needs.
+#[derive(Debug, Clone, Default)]
+pub struct CompletionOutcome {
+    pub items: Vec<lsp_types::CompletionItem>,
+    /// `CompletionList.isIncomplete`: typing further must ask again.
+    pub is_incomplete: bool,
+}
+
+/// Applies `CompletionList.itemDefaults` (LSP 3.17) to the raw response:
+/// commit characters, edit range, insert text format/mode and data are copied
+/// into every item that does not override them, and `textEditText` becomes the
+/// `textEdit.newText`. The rest of the editor then only sees fully-specified
+/// items. (`lsp-types` predates `itemDefaults`, hence raw JSON.)
+pub fn apply_completion_item_defaults(mut response: serde_json::Value) -> serde_json::Value {
+    use serde_json::{json, Value};
+
+    let Some(list) = response.as_object_mut() else {
+        return response;
+    };
+    let Some(defaults) = list.remove("itemDefaults") else {
+        return response;
+    };
+    let Some(items) = list.get_mut("items").and_then(Value::as_array_mut) else {
+        return response;
+    };
+    let Some(defaults) = defaults.as_object() else {
+        return response;
+    };
+    for item in items {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+        for key in [
+            "commitCharacters",
+            "insertTextFormat",
+            "insertTextMode",
+            "data",
+        ] {
+            if !item.contains_key(key) {
+                if let Some(value) = defaults.get(key) {
+                    item.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        if !item.contains_key("textEdit") {
+            if let Some(edit_range) = defaults.get("editRange") {
+                let new_text = item
+                    .get("textEditText")
+                    .or_else(|| item.get("insertText"))
+                    .or_else(|| item.get("label"))
+                    .cloned()
+                    .unwrap_or_else(|| json!(""));
+                let mut edit = serde_json::Map::new();
+                edit.insert("newText".to_string(), new_text);
+                match edit_range.as_object() {
+                    // {insert, replace} vs a plain Range {start, end}
+                    Some(range) if range.contains_key("insert") => {
+                        edit.insert("insert".to_string(), range["insert"].clone());
+                        edit.insert("replace".to_string(), range["replace"].clone());
+                    }
+                    _ => {
+                        edit.insert("range".to_string(), edit_range.clone());
+                    }
+                }
+                item.insert("textEdit".to_string(), Value::Object(edit));
+            }
+        }
+        item.remove("textEditText");
+    }
+    response
+}
+
+/// Flattens a completion response into its items and the list-level flag.
+pub fn completion_outcome(response: lsp_types::CompletionResponse) -> CompletionOutcome {
+    match response {
+        lsp_types::CompletionResponse::Array(items) => CompletionOutcome {
+            items,
+            is_incomplete: false,
+        },
+        lsp_types::CompletionResponse::List(list) => CompletionOutcome {
+            items: list.items,
+            is_incomplete: list.is_incomplete,
+        },
+    }
+}
+
 impl LspManager {
     pub async fn goto_definition(
         &self,
@@ -234,67 +331,62 @@ impl LspManager {
         line: u32,
         character: u32,
         language_id: &str,
-        trigger_char: Option<char>,
-    ) -> Result<Vec<lsp_types::CompletionItem>> {
-        use lsp_types::{
-            CompletionContext, CompletionParams, CompletionResponse, CompletionTriggerKind,
-            Position, TextDocumentIdentifier, TextDocumentPositionParams,
-        };
-
+        trigger: CompletionTrigger,
+    ) -> Result<CompletionOutcome> {
         let server = self
             .servers
             .get(language_id)
             .ok_or_else(|| anyhow::anyhow!("No server for language: {}", language_id))?;
 
-        // Check if server supports completion
-        if !server.supports_completion().await {
-            return Ok(Vec::new()); // Return empty list if not supported
-        }
-
         // Cancel any pending completion requests before sending new one
         // Completion is high-frequency and only latest matters (user is still typing)
-        if let Err(e) = server
-            .cancel_requests_by_method("textDocument/completion")
-            .await
-        {
-            lsp_warn!(
-                "LSP-COMPLETION",
-                "Failed to cancel previous completion requests: {}",
-                e
-            );
-            // Continue anyway - cancellation failure is not critical
+        if server.supports_completion().await {
+            if let Err(e) = server
+                .cancel_requests_by_method("textDocument/completion")
+                .await
+            {
+                lsp_warn!(
+                    "LSP-COMPLETION",
+                    "Failed to cancel previous completion requests: {}",
+                    e
+                );
+                // Continue anyway - cancellation failure is not critical
+            }
         }
 
-        let params = CompletionParams {
-            text_document_position: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
-                position: Position { line, character },
-            },
-            work_done_progress_params: Default::default(),
-            partial_result_params: Default::default(),
-            context: Some(CompletionContext {
-                trigger_kind: if trigger_char.is_some() {
-                    CompletionTriggerKind::TRIGGER_CHARACTER
-                } else {
-                    CompletionTriggerKind::INVOKED
-                },
-                trigger_character: trigger_char.map(|c| c.to_string()),
-            }),
-        };
+        Self::completion_on_server(&server, uri, line, character, trigger).await
+    }
 
-        let result = server
-            .request("textDocument/completion", serde_json::to_value(params)?)
-            .await?;
-
-        let response: Option<CompletionResponse> =
-            parse_lsp_response(result, "textDocument/completion");
-
-        Ok(response
-            .map(|resp| match resp {
-                CompletionResponse::Array(items) => items,
-                CompletionResponse::List(list) => list.items,
-            })
-            .unwrap_or_default())
+    /// Resolves the lazily-computed fields (documentation, detail, ...) of a
+    /// completion item with `completionItem/resolve`. Tries each of
+    /// `server_ids` that advertises `resolveProvider` until one answers; the
+    /// original item is returned when none does.
+    pub async fn resolve_completion_item(
+        &self,
+        server_ids: &[String],
+        item: lsp_types::CompletionItem,
+    ) -> Result<lsp_types::CompletionItem> {
+        for server_id in server_ids {
+            let Some(server) = self
+                .servers
+                .get(server_id.as_str())
+                .map(|entry| entry.value().clone())
+            else {
+                continue;
+            };
+            if !server.supports_completion_resolve().await {
+                continue;
+            }
+            let result = server
+                .request("completionItem/resolve", serde_json::to_value(&item)?)
+                .await?;
+            let resolved: Option<lsp_types::CompletionItem> =
+                parse_lsp_response(result, "completionItem/resolve");
+            if let Some(resolved) = resolved {
+                return Ok(resolved);
+            }
+        }
+        Ok(item)
     }
 
     /// Requests document formatting
@@ -1657,18 +1749,23 @@ impl LspManager {
         line: u32,
         character: u32,
         server_ids: &[String],
-        trigger_char: Option<char>,
-    ) -> Result<Vec<lsp_types::CompletionItem>> {
-        let results: Vec<Vec<lsp_types::CompletionItem>> = self
+        trigger: CompletionTrigger,
+    ) -> Result<CompletionOutcome> {
+        let results: Vec<CompletionOutcome> = self
             .fan_out(server_ids, |server| {
                 let uri = uri.clone();
                 async move {
-                    Self::completion_on_server(&server, &uri, line, character, trigger_char).await
+                    Self::completion_on_server(&server, &uri, line, character, trigger).await
                 }
             })
             .await;
 
-        Ok(results.into_iter().flatten().collect())
+        let mut merged = CompletionOutcome::default();
+        for outcome in results {
+            merged.is_incomplete |= outcome.is_incomplete;
+            merged.items.extend(outcome.items);
+        }
+        Ok(merged)
     }
 
     /// Internal: completion on a single server
@@ -1677,17 +1774,28 @@ impl LspManager {
         uri: &Uri,
         line: u32,
         character: u32,
-        trigger_char: Option<char>,
-    ) -> Result<Vec<lsp_types::CompletionItem>> {
+        trigger: CompletionTrigger,
+    ) -> Result<CompletionOutcome> {
         use lsp_types::{
-            CompletionContext, CompletionParams, CompletionResponse, CompletionTriggerKind,
-            Position, TextDocumentIdentifier, TextDocumentPositionParams,
+            CompletionContext, CompletionParams, CompletionTriggerKind, Position,
+            TextDocumentIdentifier, TextDocumentPositionParams,
         };
 
         if !server.supports_completion().await {
-            return Ok(Vec::new());
+            return Ok(CompletionOutcome::default());
         }
 
+        let (trigger_kind, trigger_character) = match trigger {
+            CompletionTrigger::Invoked => (CompletionTriggerKind::INVOKED, None),
+            CompletionTrigger::Character(c) => (
+                CompletionTriggerKind::TRIGGER_CHARACTER,
+                Some(c.to_string()),
+            ),
+            CompletionTrigger::Incomplete => (
+                CompletionTriggerKind::TRIGGER_FOR_INCOMPLETE_COMPLETIONS,
+                None,
+            ),
+        };
         let params = CompletionParams {
             text_document_position: TextDocumentPositionParams {
                 text_document: TextDocumentIdentifier { uri: uri.clone() },
@@ -1696,12 +1804,8 @@ impl LspManager {
             work_done_progress_params: Default::default(),
             partial_result_params: Default::default(),
             context: Some(CompletionContext {
-                trigger_kind: if trigger_char.is_some() {
-                    CompletionTriggerKind::TRIGGER_CHARACTER
-                } else {
-                    CompletionTriggerKind::INVOKED
-                },
-                trigger_character: trigger_char.map(|c| c.to_string()),
+                trigger_kind,
+                trigger_character,
             }),
         };
 
@@ -1709,14 +1813,20 @@ impl LspManager {
             .request("textDocument/completion", serde_json::to_value(params)?)
             .await?;
 
-        let response: Option<CompletionResponse> =
-            parse_lsp_response(result, "textDocument/completion");
-        Ok(response
-            .map(|resp| match resp {
-                CompletionResponse::Array(items) => items,
-                CompletionResponse::List(list) => list.items,
-            })
-            .unwrap_or_default())
+        let response: Option<lsp_types::CompletionResponse> = parse_lsp_response(
+            apply_completion_item_defaults(result),
+            "textDocument/completion",
+        );
+        let mut outcome = response.map(completion_outcome).unwrap_or_default();
+        let all_commit_characters = server.completion_all_commit_characters().await;
+        if !all_commit_characters.is_empty() {
+            for item in &mut outcome.items {
+                if item.commit_characters.is_none() {
+                    item.commit_characters = Some(all_commit_characters.clone());
+                }
+            }
+        }
+        Ok(outcome)
     }
 
     /// Goto definition from multiple servers, returning first non-empty result.

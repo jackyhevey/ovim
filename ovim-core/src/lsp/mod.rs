@@ -38,6 +38,9 @@ pub use position::{char_col_to_utf16, utf16_to_char_col};
 pub use messages::{MessageRequest, MessageSeverity, ServerMessage};
 pub use protocol::{JsonRpcMessage, RequestId};
 pub use recovery::{ServerStatusReport, MAX_AUTO_RESTARTS};
+pub use requests::{
+    apply_completion_item_defaults, completion_outcome, CompletionOutcome, CompletionTrigger,
+};
 pub use server::{LanguageServer, LanguageServerHealth, LspServerError};
 pub use supervisor::{RestartPolicy, TaskSupervisor};
 pub use trigger_chars::fallback_completion_trigger_characters;
@@ -616,6 +619,18 @@ impl LspManager {
         uri_to_file_path(uri)
             .map(|path| self.servers_for_document(language_id, &path))
             .unwrap_or_default()
+    }
+
+    /// Whether any of `server_ids` can answer `completionItem/resolve`.
+    pub async fn any_supports_completion_resolve(&self, server_ids: &[String]) -> bool {
+        for sid in server_ids {
+            if let Some(server) = self.servers.get(sid.as_str()).map(|e| e.value().clone()) {
+                if server.supports_completion_resolve().await {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub async fn completion_trigger_characters_for_servers(

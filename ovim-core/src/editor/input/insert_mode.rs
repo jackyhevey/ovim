@@ -9,7 +9,7 @@
 //! - Visual block insert state handling
 //! - Tab/auto-indent
 
-use crate::editor::{Change, Editor, InsertEntryMode};
+use crate::editor::{Change, CompletionAcceptMode, Editor, InsertEntryMode};
 use crate::mode::Mode;
 use crate::repeat_action::RepeatAction;
 use crate::unicode::{CharCol, GraphemeCol};
@@ -17,18 +17,6 @@ use crate::{KeyCode, KeyEvent, Modifiers};
 use anyhow::Result;
 
 use super::helpers;
-
-fn is_completion_trigger_char(c: char) -> bool {
-    matches!(c, '.')
-}
-
-// Looser than the motion-word rule on purpose: hyphens count so Tailwind
-// classes like `w-1/2` stay as one prefix and the menu doesn't collapse
-// mid-token. Keep in sync with `is_completion_keyword_char` in
-// `ovim-core/src/editor/lsp_modules/completion.rs`.
-fn is_completion_ident_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '-'
-}
 
 /// Cleans up whitespace-only lines before exiting insert mode.
 ///
@@ -78,6 +66,7 @@ fn exit_insert_mode(editor: &mut Editor) {
 /// the buffer. Ctrl-O keeps the insertion position and starts a fresh undo
 /// unit when the normal command completes.
 fn finish_insert_mode(editor: &mut Editor, temporary: bool) {
+    editor.end_snippet_session();
     editor.clear_signature_help();
     // Save last insert position BEFORE moving cursor (this is where we can continue inserting)
     let cursor = editor.buffer().cursor();
@@ -348,25 +337,25 @@ pub fn handle_insert_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
     }
 
     let signature_help_was_active = editor.signature_help_active();
+    if !matches!(
+        key_event.code,
+        KeyCode::Char(_) | KeyCode::Backspace | KeyCode::Tab | KeyCode::BackTab
+    ) {
+        editor.snippet_clear_pending();
+    }
     match key_event.code {
         KeyCode::Esc => {
-            if editor.completion_menu().is_visible() {
-                editor.hide_completion_menu();
-            }
+            editor.dismiss_completion();
             exit_insert_mode(editor);
         }
         // Ctrl-[ is equivalent to Esc
         KeyCode::Char('[') if key_event.modifiers.contains(Modifiers::CONTROL) => {
-            if editor.completion_menu().is_visible() {
-                editor.hide_completion_menu();
-            }
+            editor.dismiss_completion();
             exit_insert_mode(editor);
         }
         // Ctrl-C exits insert mode (like Esc but without triggering InsertLeave)
         KeyCode::Char('c') if key_event.modifiers.contains(Modifiers::CONTROL) => {
-            if editor.completion_menu().is_visible() {
-                editor.hide_completion_menu();
-            }
+            editor.dismiss_completion();
             exit_insert_mode(editor);
         }
         // Ctrl-W - Delete word backward
@@ -406,12 +395,16 @@ pub fn handle_insert_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         KeyCode::Char('n') if key_event.modifiers.contains(Modifiers::CONTROL) => {
             if editor.completion_menu().is_visible() {
                 editor.completion_next();
+            } else {
+                editor.request_completion();
             }
         }
         // Ctrl-P - Previous completion item
         KeyCode::Char('p') if key_event.modifiers.contains(Modifiers::CONTROL) => {
             if editor.completion_menu().is_visible() {
                 editor.completion_previous();
+            } else {
+                editor.request_completion();
             }
         }
         // Ctrl-Y - Accept completion (Vim behavior)
@@ -420,52 +413,37 @@ pub fn handle_insert_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
                 editor.accept_completion();
             }
         }
-        // Tab - Accept completion if menu is visible, otherwise insert tab
+        // Tab - Accept the completion (replacing the identifier under the
+        // cursor, IntelliJ style) if the menu is visible; otherwise jump to
+        // the next snippet tab stop; otherwise insert a tab.
         KeyCode::Tab if editor.completion_menu().is_visible() => {
-            editor.accept_completion();
+            editor.accept_completion_with(CompletionAcceptMode::Replace);
         }
         KeyCode::Tab => {
-            helpers::insert_tab(editor)?;
+            if !(editor.snippet_active() && editor.snippet_jump(true)) {
+                helpers::insert_tab(editor)?;
+            }
+        }
+        // Shift-Tab - previous snippet tab stop
+        KeyCode::BackTab => {
+            if editor.snippet_active() {
+                editor.snippet_jump(false);
+            }
         }
         KeyCode::Char(c) => {
+            // A commit character accepts the highlighted item before it is
+            // typed itself (`foo.` accepts `foo` when the server says so).
+            if editor.completion_menu().is_visible() {
+                editor.try_commit_completion(c);
+            }
+            // First keystroke over a freshly entered snippet placeholder
+            // replaces its default text.
+            editor.snippet_replace_pending_placeholder();
             helpers::electric_dedent_close_bracket(editor, c)?;
             helpers::insert_char(editor, c)?;
-            // Basic autocomplete:
-            // - Trigger on '.' (member access) immediately
-            // - Trigger on '::' after typing the second ':' (Rust/C++ style paths)
-            // - Trigger when typing an identifier prefix of length >= 2
-            // - If menu is already visible, keep it updated while typing
-            if editor.completion_menu().is_visible() {
-                if is_completion_trigger_char(c) || is_completion_ident_char(c) {
-                    let prefix = editor.completion_prefix_from_trigger_col();
-                    editor.completion_menu_mut().filter(&prefix);
-                    editor.request_completion();
-                } else {
-                    editor.hide_completion_menu();
-                }
-            } else if is_completion_trigger_char(c) {
-                editor.request_completion();
-            } else if c == ':' {
-                let cursor = editor.buffer().cursor();
-                if cursor.col().0 >= 2 {
-                    let index = editor.buffer().line_index(cursor.line());
-                    if index
-                        .grapheme_at(crate::unicode::GraphemeCol(cursor.col().0 - 1))
-                        .as_deref()
-                        == Some(":")
-                        && index
-                            .grapheme_at(crate::unicode::GraphemeCol(cursor.col().0 - 2))
-                            .as_deref()
-                            == Some(":")
-                    {
-                        editor.request_completion();
-                    }
-                }
-            } else if is_completion_ident_char(c) {
-                if editor.has_completion_trigger_prefix() {
-                    editor.request_completion();
-                }
-            }
+            // Auto-popup: keep an open menu filtered, or start one on
+            // identifier typing / server trigger characters.
+            editor.completion_after_typed_char(c);
         }
         KeyCode::Enter => {
             // If completion menu is visible, accept the selected completion
@@ -476,31 +454,20 @@ pub fn handle_insert_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
             }
         }
         KeyCode::Backspace => {
-            helpers::delete_char_before_cursor(editor)?;
-            if editor.completion_menu().is_visible() {
-                let prefix = editor.completion_prefix_from_trigger_col();
-                if prefix.is_empty() {
-                    // If we deleted back to the trigger column, keep showing member completions only
-                    editor.request_completion();
-                } else {
-                    editor.completion_menu_mut().filter(&prefix);
-                    editor.request_completion();
-                }
+            if !editor.snippet_replace_pending_placeholder() {
+                helpers::delete_char_before_cursor(editor)?;
             }
+            editor.completion_after_backspace();
         }
         KeyCode::Left => {
-            if editor.completion_menu().is_visible() {
-                editor.hide_completion_menu();
-            }
+            editor.dismiss_completion();
             let cursor = editor.buffer_mut().cursor_mut();
             if cursor.col().0 > 0 {
                 cursor.move_left(1);
             }
         }
         KeyCode::Right => {
-            if editor.completion_menu().is_visible() {
-                editor.hide_completion_menu();
-            }
+            editor.dismiss_completion();
             helpers::move_right(editor);
         }
         KeyCode::Up => {
@@ -519,6 +486,7 @@ pub fn handle_insert_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         _ => {}
     }
+    editor.snippet_after_key();
     request_signature_help_after_key(editor, &key_event, signature_help_was_active);
     Ok(())
 }

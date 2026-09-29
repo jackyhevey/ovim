@@ -553,6 +553,12 @@ pub struct SignatureHelpResult {
 #[derive(Debug)]
 pub struct CompletionResult {
     pub items: Vec<lsp_types::CompletionItem>,
+    /// `CompletionList.isIncomplete`: the list must be re-requested as the
+    /// user keeps typing.
+    pub is_incomplete: bool,
+    /// Where the request was made; lets the answer be applied after the user
+    /// typed further (see `Editor::completion_typed_since`).
+    pub anchor: super::completion::CompletionAnchor,
     /// File path at the time the request was fired. Used to drop responses
     /// that arrive after the user switched files.
     pub file_path: String,
@@ -563,6 +569,16 @@ pub struct CompletionResult {
     /// If we successfully flushed content to LSP, record the new synced content.
     pub synced_content: Option<String>,
     pub synced_lsp_version: Option<i32>,
+}
+
+/// Result of a `completionItem/resolve` request.
+#[derive(Debug)]
+pub struct CompletionResolveResult {
+    /// Index of the item in the menu's item list when it was requested.
+    pub source_index: usize,
+    /// Buffer the menu was opened in; a late answer for another menu drops.
+    pub menu_generation: u64,
+    pub item: lsp_types::CompletionItem,
 }
 
 /// Result of an inlay hint request.
@@ -675,6 +691,7 @@ pub struct LspSlots {
     pub folding_ranges: Slot<FoldingRangesResult>,
     // -- Query (Step 4) --
     pub completion: Slot<CompletionResult>,
+    pub completion_resolve: Slot<CompletionResolveResult>,
     pub inlay_hints: TrackedSlot<InlayHintResult>,
     pub diagnostics: TrackedSlot<DiagnosticResult>,
     // -- Actions (Step 5) --
@@ -701,6 +718,7 @@ impl LspSlots {
         self.signature_help.cancel();
         self.folding_ranges.cancel();
         self.completion.cancel();
+        self.completion_resolve.cancel();
         self.inlay_hints.cancel();
         self.diagnostics.cancel();
         self.format.cancel();
@@ -751,6 +769,7 @@ impl Default for LspSlots {
             signature_help: Slot::new(),
             folding_ranges: Slot::new(),
             completion: Slot::new(),
+            completion_resolve: Slot::new(),
             // Match CHANGE_DEBOUNCE_MS (150ms) so the first refresh fires
             // promptly after the last edit lands on the server rather
             // than waiting 350ms longer than necessary.

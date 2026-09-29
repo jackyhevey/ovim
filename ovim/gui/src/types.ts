@@ -489,12 +489,24 @@ export interface GuiSnapshot {
     };
     completion?: {
         selected: number;
+        /** Number of matching items; `items` is the visible window. */
+        total?: number;
         items: Array<{
             index: number;
             label: string;
+            /** Text right after the label (labelDetails.detail). */
             detail?: string;
+            /** Right-aligned dimmed text (labelDetails.description). */
+            description?: string;
             kind?: string;
+            kindGlyph?: string;
+            kindClass?: string;
+            deprecated?: boolean;
+            /** Char positions of `label` matched by what was typed. */
+            matched?: number[];
         }>;
+        /** Markdown: signature and documentation of the selected item. */
+        documentation?: string;
     };
     hover?: { content: string; line?: number; displayColumn?: number };
     signatureHelp?: {

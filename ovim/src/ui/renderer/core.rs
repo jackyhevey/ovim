@@ -427,7 +427,7 @@ fn render_overlays(
 
     // Completion menu (LSP)
     if editor.completion_menu().is_visible() {
-        render_completion_menu(frame, editor, ctx);
+        render_completion_menu(frame, editor, ctx, theme);
     }
 
     // Parameter hints while typing a call

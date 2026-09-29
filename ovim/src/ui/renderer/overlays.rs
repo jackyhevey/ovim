@@ -240,18 +240,150 @@ pub fn render_hover_window(
     }
 }
 
-/// Renders the completion menu popup
-pub fn render_completion_menu(frame: &mut Frame, editor: &Editor, ctx: &OverlayContext) {
+/// Theme colour of a completion kind's glyph.
+fn completion_kind_color(class: ovim_core::editor::CompletionKindClass) -> Color {
+    use ovim_core::editor::CompletionKindClass as C;
+    match class {
+        C::Function => Color::Rgb(130, 170, 255),
+        C::Type => Color::Rgb(255, 199, 119),
+        C::Variable => Color::Rgb(137, 220, 235),
+        C::Constant => Color::Rgb(199, 146, 234),
+        C::Keyword => Color::Rgb(240, 130, 190),
+        C::Module => Color::Rgb(166, 227, 161),
+        C::Snippet => Color::Rgb(148, 226, 213),
+        C::Other => Color::Rgb(160, 168, 184),
+    }
+}
+
+/// Cuts `text` to `max` terminal columns, ending in `…` when it was cut.
+fn fit_width(text: &str, max: usize) -> String {
+    if text.width() <= max {
+        return text.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w + 1 > max {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
+}
+
+/// One row of the completion menu: `kind label detail ....... description`.
+#[allow(clippy::too_many_arguments)]
+fn completion_row_line(
+    item: &lsp_types::CompletionItem,
+    matched: &[usize],
+    selected: bool,
+    inner_width: usize,
+    row_bg: Color,
+) -> Line<'static> {
+    use ovim_core::editor::{
+        completion_item_is_deprecated, completion_kind_style, completion_row_text,
+    };
+
+    let kind = completion_kind_style(item.kind);
+    let text = completion_row_text(item);
+    let deprecated = completion_item_is_deprecated(item);
+
+    let base = Style::default().bg(row_bg).fg(Color::Rgb(220, 224, 232));
+    let mut label_style = base;
+    let mut dim_style = Style::default().bg(row_bg).fg(Color::Rgb(128, 136, 152));
+    if selected {
+        label_style = label_style.add_modifier(Modifier::BOLD).fg(Color::White);
+        dim_style = dim_style.fg(Color::Rgb(190, 200, 220));
+    }
+    if deprecated {
+        label_style = label_style
+            .add_modifier(Modifier::CROSSED_OUT)
+            .fg(Color::Rgb(140, 146, 160));
+        dim_style = dim_style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    let match_style = label_style
+        .fg(Color::Rgb(255, 214, 102))
+        .add_modifier(Modifier::BOLD);
+    let icon_style = Style::default()
+        .bg(row_bg)
+        .fg(completion_kind_color(kind.class))
+        .add_modifier(Modifier::BOLD);
+
+    // " k " + label + suffix + gap + description + " "
+    let fixed = 3 + 1;
+    let room = inner_width.saturating_sub(fixed);
+    let label_w = item.label.width();
+    let suffix_w = text.label_suffix.width();
+    let desc_w = text.description.width();
+
+    // Give the description at most a third of the room, but never squeeze the
+    // label itself; the label suffix yields before the label does.
+    let mut desc = text.description.clone();
+    let mut suffix = text.label_suffix.clone();
+    let mut label = item.label.clone();
+    let mut positions: Vec<usize> = matched.to_vec();
+    if label_w + suffix_w + if desc_w > 0 { 2 + desc_w } else { 0 } > room {
+        let desc_budget = if desc_w > 0 {
+            (room / 3).min(desc_w)
+        } else {
+            0
+        };
+        desc = fit_width(&desc, desc_budget);
+        let after_desc = room.saturating_sub(if desc.is_empty() { 0 } else { desc.width() + 2 });
+        if label_w > after_desc {
+            label = fit_width(&label, after_desc);
+            positions.retain(|&p| p < label.chars().count());
+            suffix.clear();
+        } else {
+            suffix = fit_width(&suffix, after_desc - label_w);
+        }
+    }
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::styled(format!(" {} ", kind.glyph), icon_style));
+    for (i, ch) in label.chars().enumerate() {
+        let style = if positions.contains(&i) {
+            match_style
+        } else {
+            label_style
+        };
+        spans.push(Span::styled(ch.to_string(), style));
+    }
+    if !suffix.is_empty() {
+        spans.push(Span::styled(suffix.clone(), dim_style));
+    }
+    let used = 3 + label.width() + suffix.width();
+    let desc_cols = if desc.is_empty() { 0 } else { desc.width() + 1 };
+    let pad = inner_width.saturating_sub(used + desc_cols + 1);
+    spans.push(Span::styled(" ".repeat(pad), base));
+    if !desc.is_empty() {
+        spans.push(Span::styled(format!(" {desc}"), dim_style));
+    }
+    spans.push(Span::styled(" ", base));
+    Line::from(spans)
+}
+
+/// Renders the completion menu popup and, beside it, the documentation of the
+/// selected item.
+pub fn render_completion_menu(
+    frame: &mut Frame,
+    editor: &Editor,
+    ctx: &OverlayContext,
+    theme: &Theme,
+) {
+    use ovim_core::editor::completion_row_text;
+
     let layout = ctx.layout;
     let viewport_start = ctx.viewport_start;
     let buffer_area = layout.buffer_area;
     let completion_menu = editor.completion_menu();
     if !completion_menu.is_visible() {
-        return;
-    }
-
-    let items = completion_menu.items();
-    if items.is_empty() {
         return;
     }
 
@@ -275,24 +407,39 @@ pub fn render_completion_menu(frame: &mut Frame, editor: &Editor, ctx: &OverlayC
     let menu_x = buffer_area.x + gutter_width as u16 + visual_col as u16;
     let menu_y = buffer_area.y + screen_line as u16 + 1; // Below current line
 
-    // Determine menu dimensions
-    let max_items_to_show = 10;
-    let num_items = items.len().min(max_items_to_show);
+    // Rows that fit: up to 10, fewer when the buffer area is short.
+    let max_rows = 10usize
+        .min(buffer_area.height.saturating_sub(3) as usize)
+        .max(1);
+    let window = completion_menu.window(max_rows);
+    let num_items = window.len();
     let menu_height = num_items as u16 + 2; // +2 for borders
 
-    // Calculate width based on longest label
+    // Width: widest visible row (icon, label, detail, right-aligned description).
     // Use UnicodeWidthStr::width() instead of len() because CJK characters
-    // are 2 columns wide while ASCII characters are 1 column wide
-    let max_label_len = items
-        .iter()
-        .take(max_items_to_show)
-        .map(|item| item.label.width())
+    // are 2 columns wide while ASCII characters are 1 column wide.
+    let content_width = window
+        .clone()
+        .filter_map(|i| completion_menu.get(i))
+        .map(|item| {
+            let text = completion_row_text(item);
+            let desc = if text.description.is_empty() {
+                0
+            } else {
+                text.description.width() + 2
+            };
+            3 + item.label.width() + text.label_suffix.width() + desc + 1
+        })
         .max()
         .unwrap_or(20);
-    let menu_width = (max_label_len + 4).min(60) as u16; // +4 for padding and borders
+    let max_inner = (buffer_area.width as usize).saturating_sub(2).min(64);
+    let inner_width = content_width.clamp(24, max_inner.max(24)).min(max_inner);
+    let menu_width = (inner_width + 2) as u16;
 
     // Adjust position if menu would go off screen
-    let menu_x = menu_x.min(buffer_area.width.saturating_sub(menu_width));
+    let menu_x = menu_x
+        .min(buffer_area.right().saturating_sub(menu_width))
+        .max(buffer_area.x);
     let menu_y = if menu_y + menu_height > buffer_area.y + buffer_area.height {
         // Show above cursor if not enough space below
         (buffer_area.y + screen_line as u16)
@@ -311,36 +458,105 @@ pub fn render_completion_menu(frame: &mut Frame, editor: &Editor, ctx: &OverlayC
 
     // Build menu lines
     let selected_index = completion_menu.selected_index();
-    let mut lines = Vec::new();
+    let lines: Vec<Line<'static>> = window
+        .clone()
+        .filter_map(|i| {
+            let item = completion_menu.get(i)?;
+            let selected = i == selected_index;
+            let row_bg = if selected {
+                Color::Rgb(56, 78, 128)
+            } else {
+                Color::Rgb(40, 44, 52)
+            };
+            Some(completion_row_line(
+                item,
+                completion_menu.matched_positions(i),
+                selected,
+                inner_width,
+                row_bg,
+            ))
+        })
+        .collect();
 
-    for (idx, item) in items.iter().take(max_items_to_show).enumerate() {
-        let is_selected = idx == selected_index;
-        let style = if is_selected {
-            Style::default()
-                .bg(Color::Blue)
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().bg(Color::Rgb(40, 44, 52)).fg(Color::White)
-        };
-
-        // Format: "label"  or "  label" with selection indicator
-        let prefix = if is_selected { "> " } else { "  " };
-        let text = format!("{}{}", prefix, item.label);
-
-        lines.push(Line::from(Span::styled(text, style)));
-    }
-
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan))
         .style(Style::default().bg(Color::Rgb(40, 44, 52)));
+    if completion_menu.len() > num_items {
+        block = block.title_bottom(Line::from(format!(
+            " {}/{} ",
+            selected_index + 1,
+            completion_menu.len()
+        )));
+    }
 
     let paragraph = Paragraph::new(lines).block(block);
 
     // Clear background and render menu
     frame.render_widget(ratatui::widgets::Clear, menu_area);
     frame.render_widget(paragraph, menu_area);
+
+    render_completion_documentation(frame, editor, buffer_area, menu_area, theme);
+}
+
+/// Documentation of the selected completion item, in a popup right of the menu
+/// (left when there is no room on the right).
+fn render_completion_documentation(
+    frame: &mut Frame,
+    editor: &Editor,
+    buffer_area: Rect,
+    menu_area: Rect,
+    theme: &Theme,
+) {
+    use super::markdown::colors;
+    use ovim_core::editor::completion_documentation_markdown;
+
+    let Some(item) = editor.completion_menu().selected_item() else {
+        return;
+    };
+    let Some(markdown) = completion_documentation_markdown(item) else {
+        return;
+    };
+
+    const MIN_WIDTH: u16 = 24;
+    const MAX_WIDTH: u16 = 56;
+    let room_right = buffer_area.right().saturating_sub(menu_area.right());
+    let room_left = menu_area.x.saturating_sub(buffer_area.x);
+    let (side_right, room) = if room_right >= MIN_WIDTH || room_right >= room_left {
+        (true, room_right)
+    } else {
+        (false, room_left)
+    };
+    if room < MIN_WIDTH {
+        return;
+    }
+    let width = room.min(MAX_WIDTH);
+    let lines = render_hover_preview_lines(&markdown, width as usize, theme);
+    if lines.is_empty() {
+        return;
+    }
+    let max_height = buffer_area
+        .height
+        .saturating_sub(menu_area.y.saturating_sub(buffer_area.y))
+        .min(14);
+    let height = (lines.len() as u16 + 2).min(max_height).max(3);
+    let x = if side_right {
+        menu_area.right()
+    } else {
+        menu_area.x - width
+    };
+    let area = Rect::new(x, menu_area.y, width, height);
+    let visible: Vec<Line<'static>> = lines.into_iter().take(height as usize - 2).collect();
+    let paragraph = Paragraph::new(visible)
+        .style(Style::default().bg(colors::BG))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(colors::BORDER)),
+        );
+    frame.render_widget(Clear, area);
+    frame.render_widget(paragraph, area);
 }
 
 /// Parameter-hints popup for the call being typed: the signature on one line

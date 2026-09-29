@@ -103,6 +103,12 @@ const BOOL_OPTIONS: &[BoolOption] = &[
         set: |e, v| e.options.wrap = v,
     },
     BoolOption {
+        name: "autocomplete",
+        alias: "ac",
+        get: |e| e.options.autocomplete,
+        set: |e, v| e.options.autocomplete = v,
+    },
+    BoolOption {
         name: "filetreereveal",
         alias: "",
         get: |e| e.options.file_tree_reveal,
@@ -169,6 +175,12 @@ fn query_option(name: &str, editor: &Editor) -> Option<CommandResult> {
                 .unwrap_or_else(|| "auto".to_string()),
         ),
         "scrolloff" => format!("  scrolloff={}", opts.scrolloff),
+        "autocompletemin" | "acm" => {
+            format!("  autocompletemin={}", opts.autocomplete_min_chars)
+        }
+        "autocompletedelay" | "acl" => {
+            format!("  autocompletedelay={}", opts.autocomplete_delay_ms)
+        }
         "textwidth" | "tw" => format!(
             "  textwidth={}",
             opts.textwidth
@@ -334,6 +346,21 @@ fn handle_value_option(name: &str, value: &str, editor: &mut Editor) -> Option<C
                 ok(Some(format!("  scroll={}", n)))
             }
             Ok(_) => err("scroll must be greater than 0"),
+            Err(_) => err(format!("Invalid number: {}", value)),
+        },
+        "autocompletemin" | "acm" => match value.parse::<usize>() {
+            Ok(n) if n >= 1 => {
+                editor.options.autocomplete_min_chars = n;
+                ok(Some(format!("  autocompletemin={}", n)))
+            }
+            Ok(_) => err("autocompletemin must be at least 1"),
+            Err(_) => err(format!("Invalid number: {}", value)),
+        },
+        "autocompletedelay" | "acl" => match value.parse::<u64>() {
+            Ok(n) => {
+                editor.options.autocomplete_delay_ms = n;
+                ok(Some(format!("  autocompletedelay={}", n)))
+            }
             Err(_) => err(format!("Invalid number: {}", value)),
         },
         "scrolloff" => match value.parse::<usize>() {

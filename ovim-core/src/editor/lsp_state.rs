@@ -343,7 +343,10 @@ pub struct LspIntents {
     pub hover: bool,
     pub folding_ranges: bool,
     pub signature_help: bool,
-    pub completion: bool,
+    /// Pending completion request and why it is being made.
+    pub completion: Option<CompletionIntent>,
+    /// Identifier typing waits for the typist to pause before asking.
+    pub completion_due: Option<(std::time::Instant, CompletionIntent)>,
     pub format_document: bool,
     pub code_actions: bool,
     pub call_hierarchy_incoming: bool,
@@ -356,6 +359,20 @@ pub struct LspIntents {
     pub organize_imports: bool,
     pub rename: Option<String>,
     pub semantic_tokens: bool,
+}
+
+/// Why a completion request is pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionIntent {
+    /// Explicit request (Ctrl-Space).
+    Invoked,
+    /// Identifier characters were typed (auto popup).
+    Identifier,
+    /// A non-identifier character was typed; it only triggers when a server
+    /// advertises it as a trigger character.
+    Typed(char),
+    /// The list on screen is `isIncomplete` and the user kept typing.
+    Incomplete,
 }
 
 impl LspIntents {
@@ -459,6 +476,8 @@ pub struct LspState {
     pub available_code_actions: Vec<AvailableCodeAction>,
     /// Available completion items at current cursor position
     pub available_completions: Vec<lsp_types::CompletionItem>,
+    /// `CompletionItem.command`s of accepted items, run on the next tick.
+    pub pending_completion_commands: Vec<lsp_types::Command>,
     /// Available LSP references at current cursor position
     pub available_references: Vec<lsp_types::Location>,
     /// Available document symbols for current file
@@ -532,6 +551,7 @@ impl LspState {
             workspace_watcher: Default::default(),
             available_code_actions: Vec::new(),
             available_completions: Vec::new(),
+            pending_completion_commands: Vec::new(),
             available_references: Vec::new(),
             available_document_symbols: Vec::new(),
             available_workspace_symbols: Vec::new(),
