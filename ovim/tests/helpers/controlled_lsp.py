@@ -28,12 +28,29 @@ while True:
     with (root / "events.jsonl").open("a") as log:
         log.write(json.dumps({**request, "peerPid": os.getpid()}) + "\n")
     method = request.get("method")
+    if method is None:
+        continue  # a response to one of our own requests; already logged
     if method == "initialize":
         while not (root / "initialize-response.json").exists():
             if not root.exists():
                 sys.exit(0)
             time.sleep(0.01)
         respond(request, json.loads((root / "initialize-response.json").read_text()))
+    elif method == "initialized":
+        # Tests can have the server register watchers / other capabilities:
+        # register-capability.json holds the `registrations` array.
+        registration = root / "register-capability.json"
+        if registration.exists():
+            body = json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9001,
+                    "method": "client/registerCapability",
+                    "params": {"registrations": json.loads(registration.read_text())},
+                }
+            ).encode()
+            sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+            sys.stdout.buffer.flush()
     elif method == "exit":
         break
     elif "id" in request:

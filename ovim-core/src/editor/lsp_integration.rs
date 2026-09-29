@@ -1488,6 +1488,7 @@ impl Editor {
         // Before streaming edits: a document a (re)started server has never
         // seen must be opened first, never sent a bare didChange.
         self.sync_open_documents().await;
+        self.process_workspace_file_events().await;
         self.send_lsp_changes_if_modified().await;
         self.send_lsp_save_if_needed().await;
 
@@ -1800,6 +1801,35 @@ impl Editor {
                     }
                 }
             }
+        }
+    }
+
+    /// Forwards on-disk changes made outside the editor to the servers that
+    /// registered `workspace/didChangeWatchedFiles`, and keeps the watcher's
+    /// roots in step with the registrations.
+    pub async fn process_workspace_file_events(&mut self) {
+        let Some(lsp) = self.lsp.state.lsp_manager.clone() else {
+            return;
+        };
+        let wanted = lsp.watched_file_roots();
+        let watcher = &mut self.lsp.state.workspace_watcher;
+        if let Some(error) = watcher.sync_roots(&wanted) {
+            self.set_lsp_status(format!("LSP: {error}"));
+        }
+        let Some(events) = self
+            .lsp
+            .state
+            .workspace_watcher
+            .poll(std::time::Instant::now())
+        else {
+            return;
+        };
+        let sent = lsp.send_watched_file_changes(&events).await;
+        if sent > 0 {
+            // The server may publish new diagnostics for open documents in
+            // response; make sure we re-pull rather than trust stale ones.
+            self.lsp.slots.diagnostics.invalidate();
+            self.lsp.slots.inlay_hints.invalidate();
         }
     }
 

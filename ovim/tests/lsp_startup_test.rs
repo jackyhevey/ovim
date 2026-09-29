@@ -435,3 +435,74 @@ async fn failed_request_shows_the_servers_own_error_message() {
     );
     session.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn registered_file_watchers_receive_changes_to_unopened_files() {
+    let mut session = StartupSession::new();
+    let root = session.dir.path().canonicalize().unwrap();
+    std::fs::write(
+        root.join("register-capability.json"),
+        json!([{
+            "id": "watch-1",
+            "method": "workspace/didChangeWatchedFiles",
+            "registerOptions": {"watchers": [{"globPattern": "**/*.controlled"}]}
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    session.ready();
+    session.wait_for_event("textDocument/didOpen").await;
+    // The client acknowledged the registration (the fake logs the response).
+    session
+        .wait_until("registration ack", |s| {
+            std::fs::read_to_string(s.dir.path().join("events.jsonl"))
+                .unwrap_or_default()
+                .contains("\"id\": 9001")
+        })
+        .await;
+    // Let the watcher attach before touching files.
+    for _ in 0..20 {
+        session.tick().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let unopened = root.join("unopened.controlled");
+    let uri = ovim::lsp::uri_from_file_path(&unopened).unwrap();
+    let change_types = |s: &StartupSession| -> Vec<i64> {
+        s.events("workspace/didChangeWatchedFiles")
+            .iter()
+            .flat_map(|event| event["params"]["changes"].as_array().unwrap().clone())
+            .filter(|change| change["uri"] == uri.as_str())
+            .map(|change| change["type"].as_i64().unwrap())
+            .collect()
+    };
+
+    std::fs::write(&unopened, "one\n").unwrap();
+    std::fs::write(root.join("notes.txt"), "ignored\n").unwrap();
+    session
+        .wait_until("created event", |s| change_types(s).contains(&1))
+        .await;
+
+    // Distinct mtime/batch so the change is not merged with the create.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    std::fs::write(&unopened, "two\n").unwrap();
+    session
+        .wait_until("changed event", |s| change_types(s).contains(&2))
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    std::fs::remove_file(&unopened).unwrap();
+    session
+        .wait_until("deleted event", |s| change_types(s).contains(&3))
+        .await;
+
+    let notes_uri = ovim::lsp::uri_from_file_path(&root.join("notes.txt")).unwrap();
+    assert!(
+        !session
+            .events("workspace/didChangeWatchedFiles")
+            .iter()
+            .any(|event| event.to_string().contains(notes_uri.as_str())),
+        "files that match no registered glob must not be forwarded"
+    );
+    session.stop().await;
+}

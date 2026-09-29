@@ -554,6 +554,55 @@ impl Editor {
         all_applied
     }
 
+    /// Autoread for buffers that are not the current one (splits, other tabs,
+    /// hidden buffers): a clean buffer whose file changed on disk is reloaded,
+    /// a modified one is left alone. Mirrors what the frontends already do
+    /// for the current buffer (`checktime` semantics) and tells the language
+    /// server about the new text. Returns the reloaded file names.
+    pub fn reload_background_buffers_changed_on_disk(&mut self) -> Vec<String> {
+        let mut reloaded = Vec::new();
+        for index in 0..self.buffers.len() {
+            if index == self.current_buffer_index {
+                continue;
+            }
+            let buffer = &self.buffers[index];
+            if is_scratch_buffer(buffer) || buffer.file_mtime().is_none() {
+                continue;
+            }
+            let Some(path) = buffer.file_path().map(str::to_string) else {
+                continue;
+            };
+            if self.buffer_index_is_modified(index)
+                || !std::path::Path::new(&path).exists()
+                || !matches!(self.buffers[index].check_external_modification(), Ok(true))
+            {
+                continue;
+            }
+            let buffer = &mut self.buffers[index];
+            if buffer.reload_from_disk().is_err() {
+                continue;
+            }
+            buffer.change_manager_mut().mark_saved();
+            buffer.mark_clean();
+            let state = self
+                .lsp
+                .state
+                .document_sync
+                .entry(path.clone())
+                .or_default();
+            state.mark_modified();
+            state.last_flushed_content = None;
+            state.force_full_resend = true;
+            state.mark_saved();
+            reloaded.push(path);
+        }
+        if !reloaded.is_empty() {
+            self.lsp.slots.diagnostics.invalidate();
+            self.lsp.slots.inlay_hints.invalidate();
+        }
+        reloaded
+    }
+
     /// Per-buffer variant of [`Editor::is_modified`]: unsaved-changes check
     /// for any buffer, not just the current one.
     pub(crate) fn buffer_index_is_modified(&self, index: usize) -> bool {
@@ -1187,5 +1236,52 @@ mod tests {
         // prev_buffer back to scratch — % should remain the real file
         editor.prev_buffer();
         assert_eq!(editor.registers().get(Some('%')), expected_path);
+    }
+
+    /// Autoread: a clean buffer in another window follows an external write;
+    /// a modified one keeps the user's text.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn background_buffers_follow_external_writes_unless_modified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let clean = dir.path().join("clean.txt");
+        let dirty = dir.path().join("dirty.txt");
+        let current = dir.path().join("current.txt");
+        fs::write(&clean, "clean v1\n").unwrap();
+        fs::write(&dirty, "dirty v1\n").unwrap();
+        fs::write(&current, "current\n").unwrap();
+
+        let mut editor = Editor::default();
+        editor.open_file(&clean).unwrap();
+        editor.open_file(&dirty).unwrap();
+        editor
+            .buffer_mut()
+            .insert_text_at(0, crate::unicode::CharCol(0), "mine ");
+        editor.open_file(&current).unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        for path in [&clean, &dirty] {
+            fs::write(path, "changed on disk\n").unwrap();
+            let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(newer)
+                .unwrap();
+        }
+
+        let reloaded = editor.reload_background_buffers_changed_on_disk();
+        assert_eq!(reloaded.len(), 1, "{reloaded:?}");
+        let content = |name: &str| {
+            editor
+                .buffers
+                .iter()
+                .find(|b| b.file_path().is_some_and(|p| p.ends_with(name)))
+                .unwrap()
+                .rope()
+                .to_string()
+        };
+        assert_eq!(content("clean.txt"), "changed on disk\n");
+        assert_eq!(content("dirty.txt"), "mine dirty v1\n");
     }
 }

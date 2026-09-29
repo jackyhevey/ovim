@@ -1004,6 +1004,14 @@ impl LanguageServer {
                     normalizes_line_endings: Some(true),
                     ..Default::default()
                 }),
+                // The editor watches the workspace for changes made outside
+                // it and forwards them to servers that register watchers.
+                did_change_watched_files: Some(
+                    lsp_types::DidChangeWatchedFilesClientCapabilities {
+                        dynamic_registration: Some(true),
+                        relative_pattern_support: Some(true),
+                    },
+                ),
                 ..Default::default()
             }),
 

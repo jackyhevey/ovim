@@ -315,6 +315,7 @@ impl LspManager {
             .lock()
             .await
             .retain(|(_, sid), _| sid != server_id);
+        self.file_watch_registrations.remove(server_id);
         self.diagnostics_changed.store(true, Ordering::SeqCst);
     }
 

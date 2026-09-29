@@ -27,6 +27,7 @@ mod supervisor;
 mod trigger_chars;
 mod types;
 mod utils;
+mod watchers;
 
 pub use logger::{get_log_path, init_lsp_logging};
 pub use position::{char_col_to_utf16, utf16_to_char_col};
@@ -42,6 +43,7 @@ pub use types::{
     LspPosition, LspRange,
 };
 pub use utils::compute_simple_diff;
+pub use watchers::{WatchedChange, WatchedFileEvent};
 
 use anyhow::Result;
 use dashmap::DashMap;
@@ -257,6 +259,9 @@ pub struct LspManager {
     /// How each live server was launched, for crash recovery.
     server_specs: DashMap<String, recovery::ServerSpec>,
 
+    /// Dynamically registered `workspace/didChangeWatchedFiles` watchers.
+    file_watch_registrations: DashMap<String, Vec<watchers::WatcherRegistration>>,
+
     /// Restart bookkeeping per server id (see `recovery`).
     restart_states: DashMap<String, recovery::RestartState>,
 
@@ -316,6 +321,7 @@ impl LspManager {
             server_roots: DashMap::new(),
             server_specs: DashMap::new(),
             restart_states: DashMap::new(),
+            file_watch_registrations: DashMap::new(),
             lifecycle_events: std::sync::Mutex::new(Vec::new()),
             restart_base_backoff_ms: AtomicU64::new(500),
         }

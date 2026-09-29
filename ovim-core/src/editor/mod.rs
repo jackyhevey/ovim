@@ -102,6 +102,7 @@ mod visual_context;
 mod visual_mode;
 mod window;
 mod window_viewport;
+mod workspace_watch;
 mod wrap_map;
 mod yank_flash;
 

@@ -1025,6 +1025,16 @@ impl LspManager {
                                         reg.id
                                     );
                                     server.set_capability_by_method(&reg.method, true);
+                                    if reg.method == "workspace/didChangeWatchedFiles" {
+                                        if let Some(registration) =
+                                            super::watchers::parse_registration(
+                                                &reg.id,
+                                                reg.register_options.as_ref(),
+                                            )
+                                        {
+                                            self.register_file_watchers(server_id, registration);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1074,6 +1084,9 @@ impl LspManager {
                                         unreg.id
                                     );
                                     server.set_capability_by_method(&unreg.method, false);
+                                    if unreg.method == "workspace/didChangeWatchedFiles" {
+                                        self.unregister_file_watchers(server_id, &unreg.id);
+                                    }
                                 }
                             }
                         }
