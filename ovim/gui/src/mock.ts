@@ -192,9 +192,7 @@ export const mockSnapshot: GuiSnapshot = {
     },
     aiChat: {
         profile: "codex_sol",
-        profiles: [
-            { id: "codex_sol", provider: "codex", model: "gpt-6-sol" },
-        ],
+        profiles: [{ id: "codex_sol", provider: "codex", model: "gpt-6-sol" }],
         reasoningEffort: "medium",
         reasoningEffortSelection: "default",
         reasoningEfforts: ["default", "low", "medium", "high"],
@@ -235,6 +233,7 @@ export const mockSnapshot: GuiSnapshot = {
     problems: undefined,
     lspManager: undefined,
     debug: undefined,
+    runConsole: undefined,
     theme,
     shouldQuit: false,
 };

@@ -4,7 +4,7 @@ import { EXPLORER_MIN_WIDTH, EXPLORER_MAX_WIDTH } from "./explorerLayout";
 export type WorkbenchLayoutPreference = {
     explorerWidth?: number;
     activeDock: "explorer" | "context";
-    activeContextPanel: "ai" | "tests" | "debug" | "terminal";
+    activeContextPanel: "ai" | "tests" | "debug" | "run" | "terminal";
 };
 
 export const workspaceLayoutIdentity = (
@@ -54,7 +54,7 @@ export const readWorkbenchLayout = (
         if (
             !parsed ||
             !["explorer", "context"].includes(parsed.activeDock ?? "") ||
-            !["ai", "tests", "debug", "terminal"].includes(
+            !["ai", "tests", "debug", "run", "terminal"].includes(
                 parsed.activeContextPanel ?? "",
             )
         )

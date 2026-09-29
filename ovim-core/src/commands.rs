@@ -661,6 +661,24 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
             editor.focus_run_console();
             crate::command_result::ok_silent()
         }
+        "RunPrev" => {
+            editor.run_console_mut().view_previous();
+            crate::command_result::ok_silent()
+        }
+        "RunNext" => {
+            editor.run_console_mut().view_next();
+            crate::command_result::ok_silent()
+        }
+        cmd if cmd.starts_with("RunJump ") => {
+            // :RunJump N — open the source location on console line N (0-based).
+            match cmd["RunJump ".len()..].trim().parse::<usize>() {
+                Ok(index) => {
+                    editor.run_console_jump(index);
+                    crate::command_result::ok_silent()
+                }
+                Err(_) => err("Usage: RunJump <line index>"),
+            }
+        }
         "RunClear" => {
             editor.clear_run_console();
             crate::command_result::ok_silent()

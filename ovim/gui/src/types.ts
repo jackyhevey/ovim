@@ -333,6 +333,29 @@ export interface GuiDebugPanel {
     output: string[];
 }
 
+export type GuiRunLineKind =
+    "stdout" | "stderr" | "build" | "system" | "debugger";
+
+export interface GuiRunConsole {
+    title: string;
+    mode: "run" | "debug";
+    status: "running" | "succeeded" | "failed" | "stopped" | "error";
+    statusText: string;
+    active: boolean;
+    command: string;
+    exitCode?: number;
+    elapsedMs: number;
+    runIndex: number;
+    runCount: number;
+    truncated: number;
+    firstIndex: number;
+    lines: Array<{
+        kind: GuiRunLineKind;
+        text: string;
+        jumpable: boolean;
+    }>;
+}
+
 export interface GuiTheme {
     name: string;
     background: string;
@@ -439,6 +462,7 @@ export interface GuiSnapshot {
     problems?: GuiProblemList;
     lspManager?: GuiLspManager;
     debug?: GuiDebugPanel;
+    runConsole?: GuiRunConsole;
     theme: GuiTheme;
     shouldQuit: boolean;
 }

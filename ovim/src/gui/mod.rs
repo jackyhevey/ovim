@@ -393,6 +393,7 @@ pub struct GuiSnapshot {
     pub problems: Option<GuiProblemList>,
     pub lsp_manager: Option<GuiLspManager>,
     pub debug: Option<GuiDebugPanel>,
+    pub run_console: Option<GuiRunConsole>,
     pub theme: GuiTheme,
     pub should_quit: bool,
 }
@@ -803,6 +804,41 @@ pub struct GuiDebugPanel {
     pub execution_line: Option<u64>,
     pub stack: Vec<GuiDebugFrame>,
     pub output: Vec<String>,
+}
+
+/// The run console: output of builds, runs and debug sessions, kept after
+/// the process exits.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiRunConsole {
+    pub title: String,
+    /// `run` or `debug`.
+    pub mode: String,
+    /// `running`, `succeeded`, `failed`, `stopped`, or `error`.
+    pub status: String,
+    pub status_text: String,
+    pub active: bool,
+    pub command: String,
+    pub exit_code: Option<i32>,
+    pub elapsed_ms: u64,
+    /// 1-based position of the viewed run in the history.
+    pub run_index: usize,
+    pub run_count: usize,
+    /// Lines dropped from the front (retention cap plus snapshot window).
+    pub truncated: usize,
+    /// Index of `lines[0]` within the run, for `:RunJump`.
+    pub first_index: usize,
+    pub lines: Vec<GuiRunLine>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiRunLine {
+    /// `stdout`, `stderr`, `build`, `system`, or `debugger`.
+    pub kind: String,
+    pub text: String,
+    /// Points at a source location (stack frame, compiler error).
+    pub jumpable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2296,6 +2332,7 @@ fn snapshot_with_cache(
         problems: problem_list(editor),
         lsp_manager: lsp_manager(editor),
         debug: debug_panel(editor),
+        run_console: run_console(editor),
         theme: theme(editor),
         should_quit: editor.should_quit(),
     };
@@ -3674,6 +3711,60 @@ fn debug_panel(editor: &Editor) -> Option<GuiDebugPanel> {
             .take(300)
             .rev()
             .map(|line| truncate_panel_text(line, 2_000))
+            .collect(),
+    })
+}
+
+fn run_console(editor: &Editor) -> Option<GuiRunConsole> {
+    use ovim_core::launch::{LineKind, RunOutcome, RunStatus};
+    let console = editor.run_console();
+    if !console.open {
+        return None;
+    }
+    let run = console.viewed()?;
+    let (status, active) = match &run.status {
+        RunStatus::Active(_) => ("running", true),
+        RunStatus::Done(RunOutcome::Succeeded) => ("succeeded", false),
+        RunStatus::Done(RunOutcome::Stopped) | RunStatus::Done(RunOutcome::Ended) => {
+            ("stopped", false)
+        }
+        RunStatus::Done(RunOutcome::Failed) | RunStatus::Done(RunOutcome::BuildFailed) => {
+            ("failed", false)
+        }
+        RunStatus::Done(RunOutcome::Error(_)) => ("error", false),
+    };
+    let start = run.lines.len().saturating_sub(500);
+    Some(GuiRunConsole {
+        title: run.title.clone(),
+        mode: match run.mode {
+            ovim_core::launch::LaunchMode::Run => "run",
+            ovim_core::launch::LaunchMode::Debug => "debug",
+        }
+        .to_string(),
+        status: status.to_string(),
+        status_text: run.status_text(),
+        active,
+        command: run.command.clone(),
+        exit_code: run.exit_code,
+        elapsed_ms: ((run.elapsed().as_millis().min(u64::MAX as u128) as u64) / 100) * 100,
+        run_index: console.viewed_index().map(|i| i + 1).unwrap_or(1),
+        run_count: console.runs.len(),
+        truncated: run.truncated + start,
+        first_index: start,
+        lines: run.lines[start..]
+            .iter()
+            .map(|line| GuiRunLine {
+                kind: match line.kind {
+                    LineKind::Stdout => "stdout",
+                    LineKind::Stderr => "stderr",
+                    LineKind::Build => "build",
+                    LineKind::System => "system",
+                    LineKind::Debugger => "debugger",
+                }
+                .to_string(),
+                text: truncate_panel_text(&line.text, 2_000),
+                jumpable: line.location.is_some(),
+            })
             .collect(),
     })
 }
