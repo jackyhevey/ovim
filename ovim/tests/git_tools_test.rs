@@ -297,3 +297,36 @@ async fn git_commands_report_problems_instead_of_failing_silently() {
         test.editor.status_message()
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn status_list_keys_stage_unstage_and_edit_and_wq_commits() {
+    let fixture = Fixture::new();
+    let a = fixture.write("a.txt", "one\n");
+    fixture.write("b.txt", "b\n");
+    fixture.commit_all("init");
+    fixture.write("a.txt", "two\n");
+    let mut test = EditorTest::new("");
+    test.load_file(&a);
+
+    test.command("GitStatus");
+    test.assert_mode(Mode::Picker);
+    test.keys("<C-t>");
+    assert_eq!(
+        fixture.staged("a.txt"),
+        "two\n",
+        "Ctrl-T stages the selected file"
+    );
+    test.keys("<C-t>");
+    assert_eq!(fixture.staged("a.txt"), "one\n", "and unstages it again");
+    test.keys("<C-e>");
+    test.assert_mode(Mode::Normal);
+    assert!(test.editor.buffer().file_path().unwrap().ends_with("a.txt"));
+
+    // :wq also commits from the message buffer.
+    test.command("GitStage");
+    test.command("GitCommit");
+    test.type_text("Via wq");
+    test.press_esc();
+    test.command("wq");
+    assert_eq!(fixture.head_message(), "Via wq");
+}

@@ -280,3 +280,12 @@ async fn substitute_chains_with_a_following_command_and_reports_e486() {
     test.command("s/nomatch/x/e");
     assert!(!status(&test).starts_with("E486"), "{}", status(&test));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn crlf_files_keep_their_line_endings() {
+    let project = Project::new(&[("win.txt", "foo\r\nbar foo\r\n")]);
+    let mut test = editor_in(&project, "win.txt");
+    test.command("SearchReplace /foo/x/");
+    apply(&mut test);
+    assert_eq!(project.read("win.txt"), "x\r\nbar x\r\n");
+}

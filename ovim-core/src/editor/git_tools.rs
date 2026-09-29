@@ -546,7 +546,8 @@ impl Editor {
                 .enable_syntax_highlighting_for_path("commit.diff");
             return Ok(());
         }
-        self.open_diff_review(Some(&format!("{oid}^..{oid}")))?;
+        let short = &oid[..oid.len().min(10)];
+        self.open_diff_review(Some(&format!("{short}^..{short}")))?;
         if let Some(path) = path.filter(|path| !path.is_empty()) {
             self.diff_review_jump_to_path(path);
         }

@@ -145,6 +145,8 @@ pub fn search_project(
     cancel: &AtomicBool,
 ) -> Result<SearchOutcome, String> {
     let regex = options.build_regex()?;
+    // Open-buffer overlays are keyed by canonical path; walk canonical paths.
+    let root = &root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let overrides = build_overrides(root, &options.globs)?;
 
     let mut walker = WalkBuilder::new(root);

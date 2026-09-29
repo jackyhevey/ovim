@@ -17,6 +17,9 @@ pub struct RecentTracker {
     pub store: Option<RecentFiles>,
     /// The file that was current on the previous tick.
     last: Option<PathBuf>,
+    /// `file_path()` string that `last` was resolved from (avoids a
+    /// canonicalize per tick while nothing changed).
+    last_raw: Option<String>,
     /// Files visited this session, most recent first.
     pub visits: Vec<PathBuf>,
     /// Cursor of the current file as of the last store write, and when.
@@ -66,9 +69,17 @@ impl Editor {
     /// Notes when the current file changed since the last call. Cheap enough
     /// for every tick: one path comparison when nothing changed.
     pub fn track_recent_file(&mut self) {
+        let raw = self.buffer().file_path().map(str::to_string);
+        if raw.is_some() && raw == self.ui_panels.recent.last_raw {
+            if let Some(current) = self.ui_panels.recent.last.clone() {
+                self.flush_recent_cursor(&current);
+                return;
+            }
+        }
         let Some(current) = self.current_file_absolute() else {
             return;
         };
+        self.ui_panels.recent.last_raw = raw;
         if self.ui_panels.recent.last.as_ref() == Some(&current) {
             self.flush_recent_cursor(&current);
             return;
