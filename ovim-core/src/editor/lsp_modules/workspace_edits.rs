@@ -655,7 +655,7 @@ mod tests {
     // ---- OV-00450: path identity ---------------------------------------
 
     /// Every spelling of one file's path: absolute, `dir/./f`, `dir/sub/../f`,
-    /// and through a symlinked directory.
+    /// through a symlinked directory, and through a symlink to the file.
     fn path_spellings(dir: &std::path::Path, file_name: &str) -> Vec<PathBuf> {
         let real = dir.canonicalize().unwrap();
         let mut spellings = vec![
@@ -669,6 +669,10 @@ mod tests {
             let _ = std::os::unix::fs::symlink(&real, &link);
             spellings.push(link.join(file_name));
             spellings.push(link.join(".").join("linkdir").join(file_name));
+            // A symlink to the file itself.
+            let file_link = real.join(format!("{file_name}.lnk"));
+            let _ = std::os::unix::fs::symlink(real.join(file_name), &file_link);
+            spellings.push(file_link);
         }
         spellings
     }
