@@ -39,6 +39,94 @@ pub fn try_handle(editor: &mut Editor, command: &str) -> Option<CommandResult> {
             }
             Some(crate::command_result::ok_silent())
         }
+        "GitStatus" | "Gstatus" => {
+            editor.open_git_status_picker();
+            Some(crate::command_result::ok_silent())
+        }
+        "GitStage" | "GitStageFile" => {
+            editor.git_stage_file();
+            Some(crate::command_result::ok_silent())
+        }
+        "GitUnstage" | "GitUnstageFile" => {
+            editor.git_unstage_file();
+            Some(crate::command_result::ok_silent())
+        }
+        "GitStageHunk" => {
+            editor.git_stage_hunk();
+            Some(crate::command_result::ok_silent())
+        }
+        "GitUnstageHunk" => {
+            editor.git_unstage_hunk();
+            Some(crate::command_result::ok_silent())
+        }
+        "GitStageAll" => {
+            editor.git_stage_all();
+            Some(crate::command_result::ok_silent())
+        }
+        "GitCommit" | "Gcommit" => {
+            editor.open_commit_message(false);
+            Some(crate::command_result::ok_silent())
+        }
+        "GitAmend" => {
+            editor.open_commit_message(true);
+            Some(crate::command_result::ok_silent())
+        }
+        "GitLog" | "GitFileLog" => {
+            editor.open_file_history_picker();
+            Some(crate::command_result::ok_silent())
+        }
+        "GitLogAll" => {
+            editor.open_repo_history_picker();
+            Some(crate::command_result::ok_silent())
+        }
+        "GitLineLog" | "GitLineHistory" => {
+            editor.open_line_history_picker();
+            Some(crate::command_result::ok_silent())
+        }
+        "GitDiffFile" if !args.is_empty() => Some(
+            match editor.git_show_file_diff(std::path::Path::new(args)) {
+                Ok(()) => crate::command_result::ok_silent(),
+                Err(error) => err(format!("GitDiffFile: {error:#}")),
+            },
+        ),
+        "GitEdit" if !args.is_empty() => Some(match editor.load_file(args) {
+            Ok(()) => crate::command_result::ok_silent(),
+            Err(error) => err(format!("Failed to open {args}: {error}")),
+        }),
+        "GitShow" if !args.is_empty() => {
+            let (oid, path) = match args.split_once(' ') {
+                Some((oid, path)) => (oid, Some(path.trim())),
+                None => (args, None),
+            };
+            Some(match editor.git_show_commit(oid, path) {
+                Ok(()) => crate::command_result::ok_silent(),
+                Err(error) => err(format!("GitShow: {error:#}")),
+            })
+        }
+        "ConflictNext" => {
+            editor.goto_conflict(true);
+            Some(crate::command_result::ok_silent())
+        }
+        "ConflictPrev" => {
+            editor.goto_conflict(false);
+            Some(crate::command_result::ok_silent())
+        }
+        "ConflictOurs" => {
+            editor.resolve_conflict(crate::git::conflict::Resolution::Ours);
+            Some(crate::command_result::ok_silent())
+        }
+        "ConflictTheirs" => {
+            editor.resolve_conflict(crate::git::conflict::Resolution::Theirs);
+            Some(crate::command_result::ok_silent())
+        }
+        "ConflictBoth" => {
+            editor.resolve_conflict(crate::git::conflict::Resolution::Both);
+            Some(crate::command_result::ok_silent())
+        }
+        "ConflictNone" => {
+            editor.resolve_conflict(crate::git::conflict::Resolution::Neither);
+            Some(crate::command_result::ok_silent())
+        }
         "update" | "up" => Some(update(editor)),
         "grep" | "gr" | "vimgrep" | "vim" => Some(grep(editor, args)),
         _ => None,

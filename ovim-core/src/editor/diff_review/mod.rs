@@ -1435,6 +1435,25 @@ impl Editor {
         }
     }
 
+    /// Moves the open review's cursor to the section of `path` (relative to the
+    /// worktree). Returns false when the review has no such file.
+    pub fn diff_review_jump_to_path(&mut self, path: &str) -> bool {
+        let Some(state) = self.ui_panels.diff_review.as_ref() else {
+            return false;
+        };
+        let Some(line) = state
+            .patch
+            .files
+            .iter()
+            .position(|file| file.path == path)
+            .and_then(|index| state.file_lines.get(index).copied())
+        else {
+            return false;
+        };
+        self.jump_to_review_line(line);
+        true
+    }
+
     pub fn diff_review_goto_file(&mut self, forward: bool) {
         let Some(state) = self.ui_panels.diff_review.as_ref() else {
             return;

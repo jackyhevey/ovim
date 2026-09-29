@@ -9,7 +9,7 @@ mod text_editing;
 
 use backend::PickerBackend;
 use fuzzy_backend::FuzzyListKind;
-pub use result::{PickerAction, PickerField, PickerMode, PickerResult};
+pub use result::{PickerAction, PickerField, PickerMode, PickerResult, PickerRole};
 
 use super::{fuzzy, SingleLineInput};
 use std::path::{Path, PathBuf};
@@ -39,6 +39,8 @@ pub struct Picker {
     pub(super) title: Option<String>,
     /// Workspace-symbol pickers re-query the server when the query changes
     pub(super) symbol_query_pending: bool,
+    /// What the picker is for, when it has extra keys (`Ctrl-T` in git status)
+    pub(super) role: Option<PickerRole>,
 }
 
 impl Picker {
@@ -46,6 +48,25 @@ impl Picker {
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
         self
+    }
+
+    /// Marks the picker as serving `role` (extra key bindings, refresh).
+    pub fn with_role(mut self, role: PickerRole) -> Self {
+        self.role = Some(role);
+        self
+    }
+
+    pub fn role(&self) -> Option<PickerRole> {
+        self.role
+    }
+
+    /// Replaces the results but keeps the selection near where it was
+    /// (after staging a file the list is rebuilt under the cursor).
+    pub fn replace_results_keeping_selection(&mut self, results: Vec<PickerResult>) {
+        let selected = self.selected_index;
+        self.all_results = results.clone();
+        self.filtered_results = results;
+        self.selected_index = selected.min(self.filtered_results.len().saturating_sub(1));
     }
 
     /// Custom heading, if the opener gave one.
@@ -386,6 +407,9 @@ impl Picker {
                 line: result.line,
                 col: result.col,
             }),
+            PickerBackend::FuzzyList(FuzzyListKind::Command) => Some(PickerAction::RunCommand {
+                command: result.location.clone(),
+            }),
             PickerBackend::FuzzyList(FuzzyListKind::DebugConfig) => {
                 Some(PickerAction::SelectDebugConfig { index: result.line })
             }
@@ -427,6 +451,7 @@ impl Picker {
             PickerBackend::Grep(_) => &PickerMode::LiveGrep,
             PickerBackend::FuzzyList(kind) => match kind {
                 FuzzyListKind::Custom
+                | FuzzyListKind::Command
                 | FuzzyListKind::DebugConfig
                 | FuzzyListKind::MessageAction => &PickerMode::Custom,
                 FuzzyListKind::Completion => &PickerMode::Completion,

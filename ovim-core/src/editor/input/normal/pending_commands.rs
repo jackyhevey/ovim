@@ -461,7 +461,9 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // 'Z' - Save/quit commands
         // =====================================================================
         ('Z', KeyCode::Char('Z')) => {
-            if editor.is_chat_scratch_buffer() {
+            if editor.is_commit_message_buffer() {
+                editor.finish_commit_message(true);
+            } else if editor.is_chat_scratch_buffer() {
                 if let Err(error) = editor.finish_chat_scratch(true) {
                     editor.set_status_message(format!("Could not finish chat scratch: {error}"));
                 }
@@ -479,7 +481,11 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             }
         }
         ('Z', KeyCode::Char('Q')) => {
-            editor.quit();
+            if editor.is_commit_message_buffer() {
+                editor.finish_commit_message(false);
+            } else {
+                editor.quit();
+            }
         }
 
         // =====================================================================
@@ -565,6 +571,11 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             editor.goto_change(false);
             editor.clear_count();
         }
+        ('[', KeyCode::Char('n')) => {
+            // [n - previous merge conflict marker block
+            editor.goto_conflict(false);
+            editor.clear_count();
+        }
         ('[', KeyCode::Char('f')) => {
             // [f - previous file in the diff review
             editor.diff_review_goto_file(false);
@@ -615,6 +626,11 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         (']', KeyCode::Char('c')) => {
             // ]c - next change (git hunk, or hunk in the diff review)
             editor.goto_change(true);
+            editor.clear_count();
+        }
+        (']', KeyCode::Char('n')) => {
+            // ]n - next merge conflict marker block
+            editor.goto_conflict(true);
             editor.clear_count();
         }
         (']', KeyCode::Char('f')) => {

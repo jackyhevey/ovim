@@ -143,6 +143,23 @@ fn update_path_completion(editor: &mut Editor) {
 
 /// Known command names for Tab completion.
 const COMMAND_NAMES: &[&str] = &[
+    "GitStatus",
+    "GitStage",
+    "GitUnstage",
+    "GitStageHunk",
+    "GitUnstageHunk",
+    "GitStageAll",
+    "GitCommit",
+    "GitAmend",
+    "GitLog",
+    "GitLogAll",
+    "GitLineLog",
+    "ConflictNext",
+    "ConflictPrev",
+    "ConflictOurs",
+    "ConflictTheirs",
+    "ConflictBoth",
+    "ConflictNone",
     "Outline",
     "Recent",
     "Buffers",

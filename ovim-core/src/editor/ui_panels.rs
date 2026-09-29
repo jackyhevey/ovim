@@ -59,6 +59,8 @@ pub struct UiPanels {
     pub diff_review_layout: super::diff_review::DiffLayout,
     /// "Replace in files" review panel (`<Space>sr`), kept while hidden.
     pub search_replace: Option<Box<super::search_replace::SearchReplacePanel>>,
+    /// Open commit message buffer (`:GitCommit`), if any.
+    pub commit: Option<Box<super::git_tools::CommitSession>>,
     /// Cached symbol tree of the current file (breadcrumbs, outline).
     pub outline: Box<super::outline::OutlineState>,
     /// Recently opened files (session order and optional persistence).

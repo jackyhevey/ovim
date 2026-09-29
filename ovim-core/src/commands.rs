@@ -290,6 +290,28 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
         return result;
     }
 
+    // The commit message buffer is written with :w / :x and aborted with :q!
+    if editor.is_commit_message_buffer() {
+        match command {
+            "w" | "write" | "wq" | "x" | "xit" | "exit" | "wq!" | "x!" => {
+                editor.finish_commit_message(true);
+                return ok_silent();
+            }
+            "q!" | "quit!" | "bd!" | "bdelete!" | "close" | "close!" => {
+                editor.finish_commit_message(false);
+                return ok_silent();
+            }
+            "q" | "quit" | "bd" | "bdelete" => {
+                if editor.is_modified() {
+                    return err("E37: No write since last change (:w commits, :q! aborts)");
+                }
+                editor.finish_commit_message(false);
+                return ok_silent();
+            }
+            _ => {}
+        }
+    }
+
     match command {
         "u" | "undo" => {
             editor.undo();

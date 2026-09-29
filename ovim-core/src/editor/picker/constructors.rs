@@ -23,6 +23,7 @@ impl Picker {
             backend: PickerBackend::Nucleo(Box::new(NucleoState::new())),
             title: None,
             symbol_query_pending: false,
+            role: None,
         }
     }
 
@@ -41,6 +42,7 @@ impl Picker {
             backend: PickerBackend::Grep(GrepState::new()),
             title: None,
             symbol_query_pending: false,
+            role: None,
         }
     }
 
@@ -63,6 +65,7 @@ impl Picker {
             backend: PickerBackend::FuzzyList(kind),
             title: None,
             symbol_query_pending: false,
+            role: None,
         }
     }
 
@@ -123,6 +126,14 @@ impl Picker {
             results,
             FuzzyListKind::LspLocations,
         )
+    }
+
+    /// Creates a picker whose entries each run an ex command (the entry's
+    /// `location`) when selected.
+    pub fn new_commands(base_dir: PathBuf, results: Vec<PickerResult>, title: &str) -> Self {
+        let preferred_dir = base_dir.clone();
+        Self::new_fuzzy_list(base_dir, preferred_dir, results, FuzzyListKind::Command)
+            .with_title(title)
     }
 
     /// Creates the live workspace-symbol picker; results arrive from the server.
