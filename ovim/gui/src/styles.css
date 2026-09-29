@@ -2319,6 +2319,13 @@ button:focus-visible {
 .debug-row.disabled {
     opacity: 0.55;
 }
+.debug-row.thread .debug-row-marker {
+    color: var(--accent);
+}
+.debug-row.thread.selected {
+    background: var(--surface-selected);
+    font-weight: 650;
+}
 .debug-row-marker {
     width: 12px;
     flex: 0 0 auto;

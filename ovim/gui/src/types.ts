@@ -376,7 +376,14 @@ export interface GuiDebugPanel {
 
 export interface GuiDebugRow {
     index: number;
-    kind: "header" | "note" | "variable" | "watch" | "breakpoint" | "exception";
+    kind:
+        | "header"
+        | "note"
+        | "variable"
+        | "watch"
+        | "breakpoint"
+        | "exception"
+        | "thread";
     depth: number;
     label: string;
     value?: string;
@@ -385,6 +392,8 @@ export interface GuiDebugRow {
     expanded: boolean;
     enabled?: boolean;
     conditional: boolean;
+    /** Thread rows: the thread whose stack and variables are shown. */
+    selected?: boolean;
 }
 
 export type GuiRunLineKind =

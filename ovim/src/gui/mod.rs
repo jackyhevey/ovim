@@ -915,6 +915,8 @@ pub struct GuiDebugRow {
     /// Breakpoints and exception filters: switched on.
     pub enabled: Option<bool>,
     pub conditional: bool,
+    /// Thread rows: the thread whose stack and variables are shown.
+    pub selected: bool,
 }
 
 /// The run console: output of builds, runs and debug sessions, kept after
@@ -4180,6 +4182,7 @@ fn gui_debug_rows(editor: &Editor) -> Vec<GuiDebugRow> {
             if in_stack {
                 return None;
             }
+            let mut selected = false;
             let (kind, expandable, expanded, enabled, conditional) = match &row.kind {
                 RowKind::Header => ("header", false, false, None, false),
                 RowKind::Note => ("note", false, false, None, false),
@@ -4198,8 +4201,14 @@ fn gui_debug_rows(editor: &Editor) -> Vec<GuiDebugRow> {
                 RowKind::Exception { enabled, .. } => {
                     ("exception", false, false, Some(*enabled), false)
                 }
-                // Listed as plain rows; switching threads is a TUI action.
-                RowKind::Thread { .. } => ("note", false, false, None, false),
+                // Clicking a thread inspects it, like Enter in the TUI panel.
+                RowKind::Thread {
+                    selected: is_selected,
+                    ..
+                } => {
+                    selected = *is_selected;
+                    ("thread", false, false, None, false)
+                }
             };
             Some(GuiDebugRow {
                 index,
@@ -4212,6 +4221,7 @@ fn gui_debug_rows(editor: &Editor) -> Vec<GuiDebugRow> {
                 expanded,
                 enabled,
                 conditional,
+                selected,
             })
         })
         .take(400)
@@ -4568,6 +4578,50 @@ mod tests {
             .unwrap();
         }
         assert_eq!(selected(&editor), "");
+    }
+
+    /// OV-00477: thread rows are clickable in the GUI debug panel (they were
+    /// plain notes): the row says which thread is shown and activating
+    /// another one switches the panel to its stack, like Enter in the TUI.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn gui_debug_panel_lists_threads_and_switches_between_them() {
+        use ovim_core::dap::types::DapThread;
+        let mut editor = Editor::default();
+        {
+            let state = &mut editor.dap_manager_mut().state;
+            state.panels_visible = true;
+            state.is_running = false;
+            state.stopped_thread = Some(1);
+            state.event_thread = Some(1);
+            state.threads = vec![
+                DapThread {
+                    id: 1,
+                    name: "main".into(),
+                },
+                DapThread {
+                    id: 7,
+                    name: "worker".into(),
+                },
+            ];
+        }
+        let threads = |editor: &Editor| -> Vec<(usize, String, bool)> {
+            gui_debug_rows(editor)
+                .into_iter()
+                .filter(|row| row.kind == "thread")
+                .map(|row| (row.index, row.label, row.selected))
+                .collect()
+        };
+        let rows = threads(&editor);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].1, "main (1)");
+        assert!(rows[0].2 && !rows[1].2, "main is the shown thread");
+
+        // The same request the click sends.
+        editor.dap_manager_mut().state.panel.cursor = rows[1].0;
+        editor.debug_panel_activate();
+        let rows = threads(&editor);
+        assert!(!rows[0].2 && rows[1].2, "the worker is shown now: {rows:?}");
+        assert_eq!(editor.debug_state().stopped_thread, Some(7));
     }
 
     #[test]

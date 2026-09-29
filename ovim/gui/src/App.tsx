@@ -3399,8 +3399,20 @@ function App() {
                                         class={`debug-row ${row.kind}`}
                                         classList={{
                                             disabled: row.enabled === false,
+                                            selected: Boolean(row.selected),
                                         }}
                                         role="treeitem"
+                                        aria-selected={
+                                            row.kind === "thread"
+                                                ? Boolean(row.selected)
+                                                : undefined
+                                        }
+                                        title={
+                                            row.kind === "thread" &&
+                                            !row.selected
+                                                ? "Show this thread's stack"
+                                                : undefined
+                                        }
                                         aria-expanded={
                                             row.expandable
                                                 ? row.expanded
@@ -3427,11 +3439,15 @@ function App() {
                                                   ? row.enabled
                                                       ? "☑"
                                                       : "☐"
-                                                  : row.expandable
-                                                    ? row.expanded
-                                                        ? "▾"
-                                                        : "▸"
-                                                    : ""}
+                                                  : row.kind === "thread"
+                                                    ? row.selected
+                                                        ? "▶"
+                                                        : ""
+                                                    : row.expandable
+                                                      ? row.expanded
+                                                          ? "▾"
+                                                          : "▸"
+                                                      : ""}
                                         </span>
                                         <b>{row.label}</b>
                                         <Show when={row.value}>
