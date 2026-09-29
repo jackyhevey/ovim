@@ -1033,11 +1033,11 @@ async fn console_focus_scrolls_and_enter_jumps_to_a_stack_frame_in_the_project()
         .unwrap();
     s.test.editor.run_console_mut().set_cursor(jdk_line);
     s.test.press_enter();
-    assert!(
-        s.test.editor.status_message().contains("Source not found"),
-        "{}",
-        s.test.editor.status_message()
-    );
+    // The language server is asked (workspace/symbol) before giving up.
+    s.until("the lookup to give up", |s| {
+        s.test.editor.status_message().contains("Source not found")
+    })
+    .await;
 
     // `x` clears finished runs, `q` leaves focus.
     s.test.keys("x");

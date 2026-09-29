@@ -137,7 +137,9 @@ pub async fn lookup_frame_source(
     let symbols = manager
         .workspace_symbols(language_id, outer.clone())
         .await
-        .map_err(|e| format!("workspace/symbol failed: {e}"))?;
+        // No server for the language, or the request failed: the source is
+        // simply not findable.
+        .map_err(|_| format!("Source not found for {class} ({file})"))?;
     pick_frame_source(&symbols, &outer, &package, class, file)
         .ok_or_else(|| format!("Source not found for {class} ({file})"))
 }
