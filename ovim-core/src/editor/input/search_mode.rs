@@ -9,6 +9,34 @@ use anyhow::Result;
 
 /// Handles input in Search mode
 pub fn handle_search_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()> {
+    if let Some(control) = super::helpers::prompt_control(&key_event) {
+        use super::helpers::PromptControl;
+        match control {
+            PromptControl::Cancel => {
+                return handle_search_mode(editor, KeyEvent::new(KeyCode::Esc, crate::Modifiers::NONE));
+            }
+            PromptControl::Backspace => {
+                return handle_search_mode(
+                    editor,
+                    KeyEvent::new(KeyCode::Backspace, crate::Modifiers::NONE),
+                );
+            }
+            PromptControl::DeleteToStart => {
+                if editor.delete_search_to_start() {
+                    editor.execute_search();
+                }
+            }
+            PromptControl::DeleteWord => {
+                if editor.delete_search_word() {
+                    editor.execute_search();
+                }
+            }
+            PromptControl::Home => editor.move_search_cursor_home(),
+            PromptControl::End => editor.move_search_cursor_end(),
+            PromptControl::Ignore => {}
+        }
+        return Ok(());
+    }
     match key_event.code {
         KeyCode::Char(ch) => {
             if editor.insert_search_char(ch) {

@@ -1862,3 +1862,44 @@ pub fn insert_tab(editor: &mut Editor) -> Result<()> {
     });
     Ok(())
 }
+
+/// What a Ctrl-chord means in a single-line prompt (rename, `:` command line,
+/// `/` search), following Vim's cmdline editing keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromptControl {
+    /// `CTRL-C` / `CTRL-[`: abandon the prompt (same as Esc).
+    Cancel,
+    /// `CTRL-H`: backspace.
+    Backspace,
+    /// `CTRL-U`: delete everything before the cursor.
+    DeleteToStart,
+    /// `CTRL-W`: delete the word before the cursor.
+    DeleteWord,
+    /// `CTRL-B`: cursor to the start.
+    Home,
+    /// `CTRL-E`: cursor to the end.
+    End,
+    /// Any other Ctrl chord: never inserted as a literal letter.
+    Ignore,
+}
+
+/// Classifies `key` when it is a Ctrl+character chord; `None` for every other
+/// key so the caller falls through to its normal handling.
+pub fn prompt_control(key: &crate::KeyEvent) -> Option<PromptControl> {
+    use crate::{KeyCode, Modifiers};
+    if !key.modifiers.contains(Modifiers::CONTROL) {
+        return None;
+    }
+    let KeyCode::Char(character) = key.code else {
+        return None;
+    };
+    Some(match character.to_ascii_lowercase() {
+        'c' | '[' => PromptControl::Cancel,
+        'h' => PromptControl::Backspace,
+        'u' => PromptControl::DeleteToStart,
+        'w' => PromptControl::DeleteWord,
+        'b' => PromptControl::Home,
+        'e' => PromptControl::End,
+        _ => PromptControl::Ignore,
+    })
+}
