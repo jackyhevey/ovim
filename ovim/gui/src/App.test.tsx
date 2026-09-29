@@ -1383,6 +1383,29 @@ describe("Ovim Solid workbench", () => {
         }
     });
 
+    it("appends the enclosing symbols of the cursor to the breadcrumbs", () => {
+        mockSnapshot.symbolBreadcrumbs = [
+            { name: "Circle", kind: "class" },
+            { name: "area()", kind: "method" },
+        ];
+
+        try {
+            const result = render(() => <App />);
+            const crumbs = result.container.querySelector(".breadcrumbs")!;
+            const symbols = [...crumbs.querySelectorAll(".symbol-crumb")].map(
+                (element) => element.textContent,
+            );
+            expect(symbols).toEqual(["Circle", "area()"]);
+            expect(
+                crumbs
+                    .querySelector(".symbol-crumb")!
+                    .getAttribute("data-kind"),
+            ).toBe("class");
+        } finally {
+            mockSnapshot.symbolBreadcrumbs = [];
+        }
+    });
+
     it("renders the replace-in-files review projected by the core", () => {
         mockSnapshot.searchReplace = {
             find: "Circle",

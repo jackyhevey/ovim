@@ -4257,6 +4257,23 @@ function App() {
                                             </>
                                         )}
                                     </For>
+                                    <For each={view().symbolBreadcrumbs}>
+                                        {(symbol) => (
+                                            <>
+                                                <Icon
+                                                    name="chevron-right"
+                                                    size={16}
+                                                    tone="muted"
+                                                />
+                                                <span
+                                                    class="symbol-crumb"
+                                                    data-kind={symbol.kind}
+                                                >
+                                                    {symbol.name}
+                                                </span>
+                                            </>
+                                        )}
+                                    </For>
                                     <Show when={view().readOnly}>
                                         <span class="readonly">read only</span>
                                     </Show>

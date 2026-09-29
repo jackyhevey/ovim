@@ -50,8 +50,8 @@ fn handle_first_leader_key(editor: &mut Editor, key: char) -> Result<()> {
             editor.reset_input_state();
         }
         'o' => {
-            // <Space>o - Document outline (symbols)
-            editor.request_document_symbols();
+            // <Space>o - Document outline (symbol tree)
+            editor.open_outline_picker();
             editor.reset_input_state();
         }
         'S' => {

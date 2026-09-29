@@ -460,6 +460,7 @@ export interface GuiSnapshot {
         modified: boolean;
     }>;
     gitBranch?: string;
+    symbolBreadcrumbs: Array<{ name: string; kind: string }>;
     gitChanges: { added: number; modified: number; removed: number };
     diagnostics: {
         errors: number;

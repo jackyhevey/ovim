@@ -249,6 +249,9 @@ pub struct ViewSnapshot {
     pub search_forward: bool,
     pub status: String,
     pub active_session: Option<String>,
+    /// Enclosing symbols of the cursor, `Class › method()` (empty when unknown).
+    #[serde(default)]
+    pub breadcrumbs: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -175,7 +175,7 @@ impl Editor {
 
     /// Treesitter-based outline fallback.
     /// Walks the syntax tree for known node kinds per language.
-    fn treesitter_outline(&self) -> Vec<OutlineSymbol> {
+    pub(crate) fn treesitter_outline(&self) -> Vec<OutlineSymbol> {
         let buffer = self.buffer();
         let tree = match buffer.syntax_tree() {
             Some(t) => t,
@@ -192,6 +192,8 @@ impl Editor {
                 TS_NODE_TABLE
             }
             Some("python") => PYTHON_NODE_TABLE,
+            Some("java") => JAVA_NODE_TABLE,
+            Some("kotlin") => KOTLIN_NODE_TABLE,
             _ => return vec![],
         };
 
@@ -303,9 +305,99 @@ static PYTHON_NODE_TABLE: &[NodeKindMapping] = &[
     },
 ];
 
+/// Java: the grammar names the declaration's identifier `name`.
+static JAVA_NODE_TABLE: &[NodeKindMapping] = &[
+    NodeKindMapping {
+        node_kind: "class_declaration",
+        symbol_kind: "class",
+        name_field: "name",
+    },
+    NodeKindMapping {
+        node_kind: "interface_declaration",
+        symbol_kind: "interface",
+        name_field: "name",
+    },
+    NodeKindMapping {
+        node_kind: "enum_declaration",
+        symbol_kind: "enum",
+        name_field: "name",
+    },
+    NodeKindMapping {
+        node_kind: "record_declaration",
+        symbol_kind: "class",
+        name_field: "name",
+    },
+    NodeKindMapping {
+        node_kind: "annotation_type_declaration",
+        symbol_kind: "interface",
+        name_field: "name",
+    },
+    NodeKindMapping {
+        node_kind: "method_declaration",
+        symbol_kind: "method",
+        name_field: "name",
+    },
+    NodeKindMapping {
+        node_kind: "constructor_declaration",
+        symbol_kind: "constructor",
+        name_field: "name",
+    },
+];
+
+/// Kotlin (fwcd grammar): declarations have no name field, the identifier is
+/// a child of the given kind (`kind:` prefix).
+static KOTLIN_NODE_TABLE: &[NodeKindMapping] = &[
+    NodeKindMapping {
+        node_kind: "class_declaration",
+        symbol_kind: "class",
+        name_field: "kind:type_identifier",
+    },
+    NodeKindMapping {
+        node_kind: "object_declaration",
+        symbol_kind: "class",
+        name_field: "kind:type_identifier",
+    },
+    NodeKindMapping {
+        node_kind: "function_declaration",
+        symbol_kind: "function",
+        name_field: "kind:simple_identifier",
+    },
+    NodeKindMapping {
+        node_kind: "secondary_constructor",
+        symbol_kind: "constructor",
+        name_field: "kind:constructor",
+    },
+];
+
 // --- Helpers ---
 
-fn convert_document_symbol(sym: &lsp_types::DocumentSymbol) -> OutlineSymbol {
+/// The identifier node of a declaration per its table entry.
+fn name_node<'a>(
+    node: &tree_sitter::Node<'a>,
+    mapping: &NodeKindMapping,
+) -> Option<tree_sitter::Node<'a>> {
+    match mapping.name_field.strip_prefix("kind:") {
+        Some(kind) => {
+            let mut cursor = node.walk();
+            node.children(&mut cursor)
+                .find(|child| child.kind() == kind)
+        }
+        None => node.child_by_field_name(mapping.name_field),
+    }
+}
+
+/// 0-based (line, char column) of `node`'s start; tree-sitter columns are bytes.
+fn char_position(node: &tree_sitter::Node, source: &[u8]) -> (usize, usize) {
+    let position = node.start_position();
+    let line_start = node.start_byte().saturating_sub(position.column);
+    let prefix = source.get(line_start..node.start_byte()).unwrap_or(&[]);
+    (
+        position.row,
+        String::from_utf8_lossy(prefix).chars().count(),
+    )
+}
+
+pub(crate) fn convert_document_symbol(sym: &lsp_types::DocumentSymbol) -> OutlineSymbol {
     let children = sym
         .children
         .as_ref()
@@ -318,6 +410,10 @@ fn convert_document_symbol(sym: &lsp_types::DocumentSymbol) -> OutlineSymbol {
         start_line: sym.range.start.line as usize + 1,
         end_line: sym.range.end.line as usize + 1,
         children,
+        selection: Some((
+            sym.selection_range.start.line as usize,
+            sym.selection_range.start.character as usize,
+        )),
     }
 }
 
@@ -369,8 +465,9 @@ fn collect_symbols(
 
     for child in node.children(&mut cursor) {
         if let Some(mapping) = table.iter().find(|m| m.node_kind == child.kind()) {
-            let name = child
-                .child_by_field_name(mapping.name_field)
+            let name_node = name_node(&child, mapping);
+            let selection = name_node.as_ref().map(|n| char_position(n, source));
+            let name = name_node
                 .map(|n| n.utf8_text(source).unwrap_or("<unknown>").to_string())
                 .unwrap_or_else(|| {
                     // For impl_item, try to build "impl Type" name
@@ -396,6 +493,7 @@ fn collect_symbols(
                 start_line: child.start_position().row + 1,
                 end_line: child.end_position().row + 1,
                 children,
+                selection: selection.or(Some((child.start_position().row, 0))),
             });
         } else {
             // Recurse into non-matching nodes to find nested symbols

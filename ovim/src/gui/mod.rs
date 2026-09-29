@@ -379,6 +379,8 @@ pub struct GuiSnapshot {
     pub panes: Vec<GuiPane>,
     pub tabs: Vec<GuiTab>,
     pub git_branch: Option<String>,
+    /// Enclosing symbols of the cursor (class, method), outermost first.
+    pub symbol_breadcrumbs: Vec<GuiBreadcrumb>,
     pub git_changes: GuiGitChanges,
     pub diagnostics: GuiDiagnostics,
     pub lsp_status: String,
@@ -775,6 +777,12 @@ pub struct GuiProblem {
     pub line: usize,
     pub column: usize,
     pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GuiBreadcrumb {
+    pub name: String,
+    pub kind: String,
 }
 
 /// The "Replace in files" review panel.
@@ -2518,6 +2526,14 @@ fn snapshot_with_cache(
             })
             .collect(),
         git_branch: editor.git_branch().map(str::to_string),
+        symbol_breadcrumbs: editor
+            .breadcrumbs()
+            .into_iter()
+            .map(|item| GuiBreadcrumb {
+                name: item.name,
+                kind: item.kind,
+            })
+            .collect(),
         git_changes: GuiGitChanges {
             added,
             modified,

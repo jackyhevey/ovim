@@ -3850,3 +3850,6 @@ kbd {
 .sr-apply {
     font-weight: 600;
 }
+.breadcrumbs .symbol-crumb {
+    color: color-mix(in srgb, var(--accent) 70%, var(--text-primary));
+}

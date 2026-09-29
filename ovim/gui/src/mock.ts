@@ -164,6 +164,7 @@ export const mockSnapshot: GuiSnapshot = {
         },
     ],
     gitBranch: "gui/tauri-entry",
+    symbolBreadcrumbs: [],
     gitChanges: { added: 86, modified: 12, removed: 3 },
     diagnostics: { errors: 0, warnings: 1, information: 0, hints: 2 },
     lspStatus: "rust-analyzer: Ready",

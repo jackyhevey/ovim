@@ -913,6 +913,7 @@ fn create_view_snapshot(editor: &Editor, dimensions: Option<(u16, u16)>) -> View
         search_forward: editor.search_forward(),
         status: editor.status_message().to_string(),
         active_session: editor.active_session().map(str::to_string),
+        breadcrumbs: editor.breadcrumb_text(),
     }
 }
 

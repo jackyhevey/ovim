@@ -76,6 +76,7 @@ pub(crate) mod motions;
 mod navigation_state;
 pub mod nucleo_matcher;
 mod operators;
+pub mod outline;
 pub mod path_completion;
 mod performance;
 pub mod picker;

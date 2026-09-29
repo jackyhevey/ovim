@@ -25,6 +25,10 @@ pub fn try_handle(editor: &mut Editor, command: &str) -> Option<CommandResult> {
             editor.open_buffer_picker();
             Some(crate::command_result::ok_silent())
         }
+        "Outline" | "DocumentSymbols" => {
+            editor.open_outline_picker();
+            Some(crate::command_result::ok_silent())
+        }
         "Symbols" | "WorkspaceSymbols" => {
             editor.open_workspace_symbol_picker();
             if !args.is_empty() {

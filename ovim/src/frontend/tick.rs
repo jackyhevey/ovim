@@ -470,6 +470,10 @@ async fn poll_background_tasks(editor: &mut Editor) {
         editor.mark_dirty();
     }
     editor.track_recent_file();
+    editor.request_outline_if_needed().await;
+    if editor.poll_outline() {
+        editor.mark_dirty();
+    }
     if editor.poll_git_refresh() {
         editor.mark_dirty();
     }
