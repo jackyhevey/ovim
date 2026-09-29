@@ -38,6 +38,8 @@ pub enum Mode {
     AiChat,
     /// RunConsole mode - focused, scrollable run/debug output
     RunConsole,
+    /// DebugPanel mode - focused debug panel (stack, variables, watches, breakpoints)
+    DebugPanel,
 }
 
 impl Mode {
@@ -62,6 +64,7 @@ impl Mode {
             Mode::RenameInput => "RENAME",
             Mode::AiChat => "AI CHAT",
             Mode::RunConsole => "CONSOLE",
+            Mode::DebugPanel => "DEBUG",
         }
     }
 

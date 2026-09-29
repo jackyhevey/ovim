@@ -566,7 +566,10 @@ impl Editor {
             self.set_status_message(format!("Failed to open {}: {e}", path.display()));
             return;
         }
-        if self.mode == crate::mode::Mode::RunConsole {
+        if matches!(
+            self.mode,
+            crate::mode::Mode::RunConsole | crate::mode::Mode::DebugPanel
+        ) {
             self.mode = crate::mode::Mode::Normal;
         }
         let line0 = line.saturating_sub(1);
@@ -1847,7 +1850,9 @@ impl Editor {
                 _ => self.set_status_message(status),
             }
         }
-        self.dap_manager.state.panels_visible = false;
+        if !self.dap_manager.state.panel_pinned {
+            self.dap_manager.state.panels_visible = false;
+        }
         self.mark_dirty();
     }
 

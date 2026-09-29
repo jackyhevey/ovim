@@ -41,15 +41,14 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // K - debug evaluate (when stopped) or LSP hover
         KeyCode::Char('K') => {
             if editor.is_debug_stopped() {
-                // Evaluate word under cursor via DAP.
-                let word = editor
-                    .buffer()
-                    .word_under_cursor()
-                    .map(|(w, _, _)| w)
-                    .unwrap_or_default();
-                if !word.is_empty() {
-                    editor.dap_manager_mut().pending_action =
-                        Some(crate::dap::PendingDebugAction::Evaluate { expression: word });
+                // Evaluate the expression under the cursor via DAP (`user.name`
+                // when on `name`) and show it, with its children, in the hover popup.
+                match editor.debug_expression_at_cursor() {
+                    Some(expression) => {
+                        editor.dap_manager_mut().pending_action =
+                            Some(crate::dap::PendingDebugAction::EvaluateHover { expression });
+                    }
+                    None => editor.set_status_message("No expression under the cursor"),
                 }
             } else {
                 editor.request_hover();

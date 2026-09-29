@@ -9,6 +9,14 @@ use crate::dap::DapManager;
 use crate::language_config::DapConfig;
 use std::path::Path;
 
+/// How a breakpoint is drawn in the gutter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakpointMarker {
+    Enabled,
+    Conditional,
+    Disabled,
+}
+
 impl Editor {
     /// Returns a reference to the DAP manager.
     pub fn dap_manager(&self) -> &DapManager {
@@ -63,6 +71,27 @@ impl Editor {
         };
         let path = std::path::PathBuf::from(file_path);
         self.dap_manager.state.has_breakpoint(&path, line_1based)
+    }
+
+    /// How the breakpoint on a line (1-based) of the current file should be
+    /// drawn: `None` when there is none.
+    pub fn breakpoint_marker_at(&self, line_1based: u64) -> Option<BreakpointMarker> {
+        let file_path = self.buffer().file_path()?;
+        let path = std::path::PathBuf::from(file_path);
+        let bp = self
+            .dap_manager
+            .state
+            .breakpoints
+            .get(&path)?
+            .iter()
+            .find(|bp| bp.line == line_1based)?;
+        Some(if !bp.enabled {
+            BreakpointMarker::Disabled
+        } else if bp.condition.is_some() {
+            BreakpointMarker::Conditional
+        } else {
+            BreakpointMarker::Enabled
+        })
     }
 
     /// Process DAP events. Returns the number of events processed.
@@ -173,16 +202,409 @@ impl Editor {
 
     /// Send breakpoints for a file to the debug adapter.
     pub async fn debug_sync_breakpoints(&mut self, path: &Path) -> anyhow::Result<()> {
-        let lines = self.dap_manager.state.breakpoint_lines(path);
+        let lines = self.dap_manager.state.enabled_breakpoint_lines(path);
         self.dap_manager.set_breakpoints(path, &lines).await?;
         self.mark_dirty();
         Ok(())
     }
 
-    /// Toggle debug panels visibility.
+    /// Toggle debug panels visibility. An explicit toggle pins the panel: it
+    /// then stays across sessions (breakpoints, watches) until toggled again.
     pub fn toggle_debug_panels(&mut self) {
-        self.dap_manager.state.panels_visible = !self.dap_manager.state.panels_visible;
+        let state = &mut self.dap_manager.state;
+        state.panels_visible = !state.panels_visible;
+        state.panel_pinned = state.panels_visible;
+        if !state.panels_visible && self.mode == crate::mode::Mode::DebugPanel {
+            self.mode = crate::mode::Mode::Normal;
+        }
         self.mark_dirty();
+    }
+
+    // ------------------------------------------------------------------
+    // The focusable debug panel (`<Space>df`)
+    // ------------------------------------------------------------------
+
+    /// Called by the renderer: how many rows are visible and where the view starts.
+    pub fn debug_panel_view(&self, height: usize, scroll: usize) {
+        let panel = &self.dap_manager.state.panel;
+        panel.view_height.set(height);
+        panel.scroll.set(scroll);
+    }
+
+    /// The panel's rows, top to bottom.
+    pub fn debug_panel_rows(&self) -> Vec<crate::dap::panel::PanelRow> {
+        crate::dap::panel::rows(&self.dap_manager.state)
+    }
+
+    /// Show the panel and give it keyboard focus (`<Space>df`).
+    pub fn focus_debug_panel(&mut self) {
+        let state = &mut self.dap_manager.state;
+        state.panels_visible = true;
+        state.panel_pinned = true;
+        let rows = crate::dap::panel::rows(state);
+        // Start on the selected frame, else the first actionable row.
+        state.panel.cursor = rows
+            .iter()
+            .position(|r| {
+                matches!(
+                    r.kind,
+                    crate::dap::panel::RowKind::Frame { selected: true, .. }
+                )
+            })
+            .or_else(|| rows.iter().position(|r| r.is_actionable()))
+            .unwrap_or(0);
+        self.mode = crate::mode::Mode::DebugPanel;
+        self.mark_dirty();
+    }
+
+    /// Moves the panel cursor by `delta` actionable rows.
+    pub fn debug_panel_move(&mut self, delta: isize) {
+        let rows = self.debug_panel_rows();
+        let mut cursor = self
+            .dap_manager
+            .state
+            .panel
+            .cursor
+            .min(rows.len().saturating_sub(1));
+        let step = delta.signum();
+        let mut remaining = delta.unsigned_abs();
+        while remaining > 0 {
+            let mut next = cursor as isize + step;
+            // Skip headers and notes.
+            while next >= 0 && (next as usize) < rows.len() && !rows[next as usize].is_actionable()
+            {
+                next += step;
+            }
+            if next < 0 || next as usize >= rows.len() {
+                break;
+            }
+            cursor = next as usize;
+            remaining -= 1;
+        }
+        self.dap_manager.state.panel.cursor = cursor;
+        self.mark_dirty();
+    }
+
+    /// Jumps to the first / last actionable row.
+    pub fn debug_panel_edge(&mut self, last: bool) {
+        let rows = self.debug_panel_rows();
+        let found = if last {
+            rows.iter().rposition(|r| r.is_actionable())
+        } else {
+            rows.iter().position(|r| r.is_actionable())
+        };
+        if let Some(index) = found {
+            self.dap_manager.state.panel.cursor = index;
+        }
+        self.mark_dirty();
+    }
+
+    fn debug_panel_current(&self) -> Option<(usize, crate::dap::panel::PanelRow)> {
+        let rows = self.debug_panel_rows();
+        let index = self
+            .dap_manager
+            .state
+            .panel
+            .cursor
+            .min(rows.len().checked_sub(1)?);
+        rows.get(index).cloned().map(|row| (index, row))
+    }
+
+    /// Expands or collapses a variable / watch value; fetches children on demand.
+    pub fn toggle_variable_expansion(&mut self, var_ref: u64) {
+        if var_ref == 0 {
+            return;
+        }
+        let state = &mut self.dap_manager.state;
+        if !state.expanded_refs.remove(&var_ref) {
+            state.expanded_refs.insert(var_ref);
+            if !state.variables.contains_key(&var_ref) {
+                self.dap_manager.pending_action =
+                    Some(crate::dap::PendingDebugAction::FetchVariables { var_ref });
+            }
+        }
+        self.mark_dirty();
+    }
+
+    /// Enter / Space / `l` on the current row.
+    pub fn debug_panel_activate(&mut self) {
+        use crate::dap::panel::RowKind;
+        let Some((_, row)) = self.debug_panel_current() else {
+            return;
+        };
+        match row.kind {
+            RowKind::Frame { index, .. } => self.select_stack_frame(index),
+            RowKind::Variable { var_ref, .. } | RowKind::Watch { var_ref, .. } => {
+                self.toggle_variable_expansion(var_ref)
+            }
+            RowKind::Breakpoint { path, line, .. } => {
+                self.open_location(&path, line as usize, 1);
+            }
+            RowKind::Exception { index, .. } => {
+                self.toggle_exception_filter_at(index);
+            }
+            RowKind::Header | RowKind::Note => {}
+        }
+        self.mark_dirty();
+    }
+
+    /// `h` on the current row: collapse it, or move to its parent.
+    pub fn debug_panel_collapse(&mut self) {
+        use crate::dap::panel::RowKind;
+        let Some((_, row)) = self.debug_panel_current() else {
+            return;
+        };
+        match row.kind {
+            RowKind::Variable {
+                var_ref,
+                expanded: true,
+            }
+            | RowKind::Watch {
+                var_ref,
+                expanded: true,
+                ..
+            } => self.toggle_variable_expansion(var_ref),
+            _ => {
+                if let Some(parent) = row.parent {
+                    self.dap_manager.state.panel.cursor = parent;
+                }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    /// `d` / `x`: delete the breakpoint or watch under the cursor.
+    pub fn debug_panel_delete(&mut self) {
+        use crate::dap::panel::RowKind;
+        let Some((_, row)) = self.debug_panel_current() else {
+            return;
+        };
+        match row.kind {
+            RowKind::Breakpoint { path, line, .. } => {
+                self.dap_manager.state.remove_breakpoint(&path, line);
+                self.after_breakpoint_change();
+            }
+            RowKind::Watch { index, .. } => {
+                self.remove_watch(index);
+            }
+            _ => self.set_status_message("Nothing to delete here (breakpoints and watches only)"),
+        }
+        self.mark_dirty();
+    }
+
+    /// `e` / `t`: enable or disable the breakpoint (or exception filter) under the cursor.
+    pub fn debug_panel_toggle_enabled(&mut self) {
+        use crate::dap::panel::RowKind;
+        let Some((_, row)) = self.debug_panel_current() else {
+            return;
+        };
+        match row.kind {
+            RowKind::Breakpoint { path, line, .. } => {
+                self.dap_manager
+                    .state
+                    .toggle_breakpoint_enabled(&path, line);
+                self.after_breakpoint_change();
+            }
+            RowKind::Exception { index, .. } => self.toggle_exception_filter_at(index),
+            _ => self.set_status_message("Only breakpoints and exception filters can be disabled"),
+        }
+        self.mark_dirty();
+    }
+
+    /// Widens (`delta > 0`) or narrows the debug panel.
+    pub fn debug_panel_resize(&mut self, delta: i16) {
+        let panel = &mut self.dap_manager.state.panel;
+        panel.width_delta = (panel.width_delta + delta).clamp(-20, 80);
+        self.mark_dirty();
+    }
+
+    /// Tells a live session about changed breakpoints.
+    fn after_breakpoint_change(&mut self) {
+        if self.dap_manager.is_active() {
+            self.dap_manager.pending_action =
+                Some(crate::dap::PendingDebugAction::UpdateBreakpoints);
+        }
+        self.mark_dirty();
+    }
+
+    // ---- Breakpoint list commands ----
+
+    /// Enables or disables every breakpoint (`:DebugBreakpoints on|off`).
+    pub fn set_all_breakpoints_enabled(&mut self, enabled: bool) {
+        for bps in self.dap_manager.state.breakpoints.values_mut() {
+            for bp in bps {
+                bp.enabled = enabled;
+            }
+        }
+        self.after_breakpoint_change();
+    }
+
+    /// Removes every breakpoint (`:DebugBreakpoints clear`).
+    pub fn clear_all_breakpoints(&mut self) {
+        for bps in self.dap_manager.state.breakpoints.values_mut() {
+            bps.clear();
+        }
+        self.after_breakpoint_change();
+    }
+
+    // ---- Watch expressions ----
+
+    /// Adds a watch expression (evaluated at the current stop, and at every
+    /// later one).
+    pub fn add_watch(&mut self, expression: String) {
+        let expression = expression.trim().to_string();
+        if expression.is_empty()
+            || self
+                .dap_manager
+                .state
+                .watches
+                .iter()
+                .any(|w| w.expression == expression)
+        {
+            return;
+        }
+        self.dap_manager
+            .state
+            .watches
+            .push(crate::dap::state::Watch {
+                expression,
+                result: None,
+                type_: None,
+                variables_reference: 0,
+            });
+        if self.is_debug_stopped() {
+            self.dap_manager.pending_action = Some(crate::dap::PendingDebugAction::RefreshWatches);
+        }
+        self.mark_dirty();
+    }
+
+    /// Removes the watch at `index`.
+    pub fn remove_watch(&mut self, index: usize) {
+        let watches = &mut self.dap_manager.state.watches;
+        if index < watches.len() {
+            watches.remove(index);
+        }
+        self.mark_dirty();
+    }
+
+    /// Re-evaluates every watch in the selected frame.
+    pub async fn debug_refresh_watches(&mut self) {
+        let frame_id = self.selected_frame_id();
+        let expressions: Vec<String> = self
+            .dap_manager
+            .state
+            .watches
+            .iter()
+            .map(|w| w.expression.clone())
+            .collect();
+        for (index, expression) in expressions.into_iter().enumerate() {
+            let result = self
+                .dap_manager
+                .evaluate(&expression, frame_id, Some("watch"))
+                .await;
+            if let Some(watch) = self.dap_manager.state.watches.get_mut(index) {
+                if watch.expression != expression {
+                    continue;
+                }
+                match result {
+                    Ok((value, type_, var_ref)) => {
+                        watch.result = Some(Ok(value));
+                        watch.type_ = type_;
+                        watch.variables_reference = var_ref;
+                    }
+                    Err(e) => {
+                        watch.result = Some(Err(e.to_string()));
+                        watch.type_ = None;
+                        watch.variables_reference = 0;
+                    }
+                }
+            }
+        }
+        self.mark_dirty();
+    }
+
+    // ---- Exception breakpoints ----
+
+    fn toggle_exception_filter_at(&mut self, index: usize) {
+        let Some(filter) = self.dap_manager.state.exception_filters.get_mut(index) else {
+            return;
+        };
+        filter.enabled = !filter.enabled;
+        let message = format!(
+            "Break on {}: {}",
+            filter.label,
+            if filter.enabled { "on" } else { "off" }
+        );
+        self.set_status_message(message);
+        self.after_breakpoint_change();
+    }
+
+    /// `:DebugException [name]` — toggles the exception filter whose id or
+    /// label contains `name` (no name: the first filter, e.g. "All exceptions").
+    pub fn toggle_exception_filter(&mut self, name: &str) -> Result<(), String> {
+        let filters = &self.dap_manager.state.exception_filters;
+        if filters.is_empty() {
+            return Err(
+                "No exception filters yet: the debug adapter offers them once a session has started"
+                    .to_string(),
+            );
+        }
+        let needle = name.trim().to_lowercase();
+        let index = if needle.is_empty() {
+            Some(0)
+        } else {
+            filters.iter().position(|f| {
+                f.id.to_lowercase().contains(&needle) || f.label.to_lowercase().contains(&needle)
+            })
+        };
+        match index {
+            Some(index) => {
+                self.toggle_exception_filter_at(index);
+                Ok(())
+            }
+            None => Err(format!(
+                "No exception filter matches '{name}' (have: {})",
+                filters
+                    .iter()
+                    .map(|f| f.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+
+    /// The expression under the cursor for hover-evaluate: the visual
+    /// selection, or the identifier with the member chain before it
+    /// (`user.address.city` when the cursor is on `city`).
+    pub fn debug_expression_at_cursor(&self) -> Option<String> {
+        let line = self.buffer().line_text(self.buffer().cursor().line())?;
+        let col = self.buffer().cursor().col().0;
+        let chars: Vec<char> = line.chars().collect();
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+        let mut at = col.min(chars.len().saturating_sub(1));
+        if chars.is_empty() || !is_ident(chars[at]) {
+            return None;
+        }
+        let mut end = at;
+        while end + 1 < chars.len() && is_ident(chars[end + 1]) {
+            end += 1;
+        }
+        while at > 0 && is_ident(chars[at - 1]) {
+            at -= 1;
+        }
+        // Extend left over `ident.` pairs (and `this.`).
+        let mut start = at;
+        while start > 0 && chars[start - 1] == '.' {
+            let mut s = start - 1;
+            if s == 0 || !is_ident(chars[s - 1]) {
+                break;
+            }
+            while s > 0 && is_ident(chars[s - 1]) {
+                s -= 1;
+            }
+            start = s;
+        }
+        Some(chars[start..=end].iter().collect())
     }
 
     /// Select a stack frame by index. Queues fetch of scopes/variables for the new frame

@@ -16,6 +16,7 @@
 //! - `types`: Client-side DAP type definitions
 
 pub mod client;
+pub mod panel;
 pub mod protocol;
 pub mod state;
 pub mod types;
@@ -93,6 +94,10 @@ pub enum PendingDebugAction {
     /// Re-send breakpoints for every file to a live session (no
     /// `configurationDone`).
     UpdateBreakpoints,
+    /// Re-evaluate the watch expressions in the selected frame.
+    RefreshWatches,
+    /// Evaluate an expression for the hover popup (`K`), with its children.
+    EvaluateHover { expression: String },
 }
 
 /// Central coordinator for debug sessions.
@@ -202,8 +207,47 @@ impl DapManager {
             .client
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
-        client.initialize().await?;
+        let caps = client.initialize().await?;
+        self.adopt_exception_filters(&caps.exception_breakpoint_filters);
         Ok(())
+    }
+
+    /// Remembers the adapter's exception filters, keeping the user's earlier
+    /// choice for filters it already knew.
+    fn adopt_exception_filters(&mut self, offered: &[DapExceptionFilter]) {
+        let previous = std::mem::take(&mut self.state.exception_filters);
+        self.state.exception_filters = offered
+            .iter()
+            .map(|f| state::ExceptionFilter {
+                enabled: previous
+                    .iter()
+                    .find(|p| p.id == f.filter)
+                    .map(|p| p.enabled)
+                    .unwrap_or(f.default.unwrap_or(false)),
+                id: f.filter.clone(),
+                label: f.label.clone(),
+            })
+            .collect();
+    }
+
+    /// Sends the enabled exception filters (`setExceptionBreakpoints`). A
+    /// no-op when the adapter offered none.
+    pub async fn sync_exception_breakpoints(&self) -> Result<()> {
+        if self.state.exception_filters.is_empty() {
+            return Ok(());
+        }
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
+        let enabled: Vec<String> = self
+            .state
+            .exception_filters
+            .iter()
+            .filter(|f| f.enabled)
+            .map(|f| f.id.clone())
+            .collect();
+        client.set_exception_breakpoints(&enabled).await
     }
 
     /// Launch a debuggee (send launch request).
@@ -417,6 +461,7 @@ impl DapManager {
                     self.state.stack_frames.clear();
                     self.state.scopes.clear();
                     self.state.variables.clear();
+                    self.state.clear_watch_values();
                 }
                 DapEvent::Thread {
                     reason: _,

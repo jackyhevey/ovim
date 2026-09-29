@@ -1369,3 +1369,195 @@ async fn user_lsp_settings_reach_the_server_as_initialization_options_and_worksp
     );
     s.stop_lsp().await;
 }
+
+// ---------------------------------------------------------------------------
+// Debug panel: variables tree, watches, breakpoint list, exception filters
+// ---------------------------------------------------------------------------
+
+fn stopped_scenario(root: &Path) -> Value {
+    json!({
+        "exception_filters": [
+            {"filter": "all", "label": "All exceptions", "default": false},
+            {"filter": "uncaught", "label": "Uncaught exceptions", "default": true}
+        ],
+        "on_configuration_done": [
+            {"event": "stopped", "body": {"reason": "breakpoint", "threadId": 1, "allThreadsStopped": true}}
+        ],
+        "frames": [{
+            "id": 1, "name": "main", "line": 1, "column": 1,
+            "source": {"name": "Main.controlled", "path": root.join("Main.controlled")}
+        }],
+        "scopes": [{"name": "Locals", "variablesReference": 10}],
+        "variables": {
+            "10": [
+                {"name": "user", "value": "User@1", "type": "User", "variablesReference": 11},
+                {"name": "n", "value": "3", "type": "int", "variablesReference": 0}
+            ],
+            "11": [{"name": "name", "value": "\"Ann\"", "variablesReference": 0}]
+        },
+        "evaluate": {
+            "n * 2": {"result": "6", "type": "int"},
+            "Main": {"result": "Main@2", "type": "Main", "variablesReference": 11}
+        }
+    })
+}
+
+fn panel_labels(s: &Session) -> Vec<String> {
+    s.test
+        .editor
+        .debug_panel_rows()
+        .into_iter()
+        .map(|r| r.label)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn debug_panel_expands_variables_and_manages_watches_breakpoints_and_exceptions() {
+    let mut d = DebugSession::new(&resolve_commands()).await;
+    let adapter = d.adapter(stopped_scenario(&d.inner.root));
+    d.inner.script_resolve(d.inner.main_plan(None));
+    d.inner
+        .test
+        .editor
+        .launch_at_cursor_with(ovim_core::launch::LaunchMode::Debug, Some(adapter));
+    d.inner
+        .until("the stop to be loaded", |s| {
+            s.test.editor.debug_state().variables.contains_key(&10)
+        })
+        .await;
+    assert!(panel_labels(&d.inner).contains(&"user".to_string()));
+
+    // Watches are evaluated at the stop, and again when added while stopped.
+    d.inner.test.command("DebugWatch n * 2");
+    d.inner
+        .until("the watch value", |s| {
+            s.test
+                .editor
+                .debug_state()
+                .watches
+                .first()
+                .is_some_and(|w| w.result == Some(Ok("6".to_string())))
+        })
+        .await;
+    d.inner.test.command("DebugWatch nosuch");
+    d.inner
+        .until("the failing watch", |s| {
+            s.test
+                .editor
+                .debug_state()
+                .watches
+                .get(1)
+                .is_some_and(|w| matches!(w.result, Some(Err(_))))
+        })
+        .await;
+
+    // Focus the panel; the cursor starts on the selected frame. Move to
+    // `user` and expand it with `l`.
+    d.inner.test.keys(" df");
+    assert_eq!(d.inner.test.editor.mode(), Mode::DebugPanel);
+    d.inner.test.keys("j");
+    let row = d.inner.test.editor.debug_panel_rows()
+        [d.inner.test.editor.debug_state().panel.cursor]
+        .clone();
+    assert_eq!(row.label, "user");
+    d.inner.test.keys("l");
+    d.inner
+        .until("the children to load", |s| {
+            panel_labels(s).contains(&"name".to_string())
+        })
+        .await;
+    assert_eq!(
+        d.requests("variables").len(),
+        2,
+        "children fetched once, on demand"
+    );
+    d.inner.test.keys("j");
+    d.inner.test.keys("h"); // on a child: go to the parent
+    assert_eq!(
+        d.inner.test.editor.debug_panel_rows()[d.inner.test.editor.debug_state().panel.cursor]
+            .label,
+        "user"
+    );
+    d.inner.test.keys("h"); // on the expanded parent: collapse
+    assert!(!panel_labels(&d.inner).contains(&"name".to_string()));
+
+    // Breakpoint list: toggle one in the buffer, disable it in the panel, delete it.
+    d.inner.test.keys("q");
+    d.inner.test.keys(" db");
+    d.inner
+        .until("setBreakpoints with the new line", |s| {
+            s.test
+                .editor
+                .debug_state()
+                .breakpoints
+                .values()
+                .any(|v| v.iter().any(|b| b.verified))
+        })
+        .await;
+    d.inner.test.keys(" df");
+    d.inner.test.keys("G"); // last row: the second exception filter
+    d.inner.test.keys("kk"); // over both filters, onto the breakpoint
+    let bp = d.inner.test.editor.debug_panel_rows()[d.inner.test.editor.debug_state().panel.cursor]
+        .clone();
+    assert_eq!(bp.label, "Main.controlled:1", "{bp:?}");
+    let sent = d.requests("setBreakpoints").len();
+    d.inner.test.keys("e");
+    d.inner
+        .until("the disabled breakpoint to be synced", |_| {
+            dap_requests(&d.dap_dir, "setBreakpoints").len() > sent
+        })
+        .await;
+    let last = d.requests("setBreakpoints").last().unwrap().clone();
+    assert_eq!(
+        last["arguments"]["breakpoints"],
+        json!([]),
+        "disabled breakpoints are not sent"
+    );
+    assert!(
+        d.inner.test.editor.debug_state().all_breakpoints().len() == 1,
+        "but stay listed"
+    );
+    d.inner.test.keys("d");
+    assert!(d
+        .inner
+        .test
+        .editor
+        .debug_state()
+        .all_breakpoints()
+        .is_empty());
+
+    // Exception filters: defaults come from the adapter; toggling re-sends them.
+    let filters = d.inner.test.editor.debug_state().exception_filters.clone();
+    assert_eq!(filters.len(), 2);
+    assert!(!filters[0].enabled && filters[1].enabled);
+    assert_eq!(
+        d.requests("setExceptionBreakpoints")[0]["arguments"]["filters"],
+        json!(["uncaught"]),
+        "the adapter's defaults are sent when the session is configured"
+    );
+    d.inner.test.keys("q"); // back to the buffer
+    d.inner.test.command("DebugException all");
+    d.inner
+        .until("setExceptionBreakpoints with both filters", |_| {
+            dap_requests(&d.dap_dir, "setExceptionBreakpoints")
+                .last()
+                .is_some_and(|r| r["arguments"]["filters"] == json!(["all", "uncaught"]))
+        })
+        .await;
+
+    // K evaluates the expression under the cursor into the hover popup.
+    d.inner.test.set_cursor(0, 7); // on `Main`
+    d.inner.test.press('K');
+    d.inner
+        .until("the hover", |s| s.test.editor.hover_info().is_some())
+        .await;
+    let hover = d.inner.test.editor.hover_info().unwrap().to_string();
+    assert!(
+        hover.contains("Main = Main@2") && hover.contains("name = \"Ann\""),
+        "{hover}"
+    );
+    d.inner.test.press_esc();
+
+    d.inner.test.keys(" ds");
+    d.inner.stop_lsp().await;
+}
