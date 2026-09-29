@@ -281,12 +281,24 @@ pub fn rows(state: &DebugState) -> Vec<PanelRow> {
                 line: bp.line,
                 enabled: bp.enabled,
                 verified: bp.verified,
-                conditional: bp.condition.is_some(),
+                conditional: bp.condition.is_some()
+                    || bp.log_message.is_some()
+                    || bp.hit_condition.is_some(),
             },
             format!("{name}:{}", bp.line),
         );
         row.depth = 1;
-        row.value = bp.condition.as_ref().map(|c| format!("if {c}"));
+        let mut notes = Vec::new();
+        if let Some(condition) = &bp.condition {
+            notes.push(format!("if {condition}"));
+        }
+        if let Some(count) = &bp.hit_condition {
+            notes.push(format!("hits {count}"));
+        }
+        if let Some(message) = &bp.log_message {
+            notes.push(format!("log \"{message}\""));
+        }
+        row.value = (!notes.is_empty()).then(|| notes.join("  "));
         rows.push(row);
     }
 

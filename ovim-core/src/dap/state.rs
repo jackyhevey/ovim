@@ -18,6 +18,11 @@ pub struct BreakpointState {
     pub id: Option<u64>,
     /// Condition expression for conditional breakpoints (None = unconditional).
     pub condition: Option<String>,
+    /// Logpoint: print this message (with `{expression}` interpolation)
+    /// instead of stopping.
+    pub log_message: Option<String>,
+    /// Hit-count condition (`5`, `>3`, `%2`): stop only when it holds.
+    pub hit_condition: Option<String>,
     /// Disabled breakpoints stay in the list (and the gutter, hollow) but are
     /// not sent to the adapter.
     pub enabled: bool,
@@ -164,6 +169,8 @@ impl DebugState {
                 verified: false,
                 id: None,
                 condition: None,
+                log_message: None,
+                hit_condition: None,
                 enabled: true,
             });
         }
@@ -250,16 +257,16 @@ impl DebugState {
         entry.extend(old_entries.iter().filter(|bp| !bp.enabled).cloned());
         for bp in dap_bps {
             if let Some(line) = bp.line {
-                // Preserve existing condition if the breakpoint was already there.
-                let existing_condition = old_entries
-                    .iter()
-                    .find(|old| old.line == line)
-                    .and_then(|old| old.condition.clone());
+                // Keep what the user attached to the breakpoint (the reply
+                // knows nothing of it).
+                let old = old_entries.iter().find(|old| old.line == line);
                 entry.push(BreakpointState {
                     line,
                     verified: bp.verified,
                     id: bp.id,
-                    condition: existing_condition,
+                    condition: old.and_then(|o| o.condition.clone()),
+                    log_message: old.and_then(|o| o.log_message.clone()),
+                    hit_condition: old.and_then(|o| o.hit_condition.clone()),
                     enabled: true,
                 });
             }
@@ -284,18 +291,51 @@ impl DebugState {
 
     /// Set a condition on a breakpoint. If the breakpoint doesn't exist, creates it.
     pub fn set_breakpoint_condition(&mut self, path: &Path, line: u64, condition: Option<String>) {
+        self.edit_breakpoint(path, line, |bp| bp.condition = condition);
+    }
+
+    /// Makes the breakpoint at `line` a logpoint (`None` makes it a plain
+    /// breakpoint again). Creates the breakpoint when there is none.
+    pub fn set_breakpoint_log_message(&mut self, path: &Path, line: u64, message: Option<String>) {
+        self.edit_breakpoint(path, line, |bp| bp.log_message = message);
+    }
+
+    /// Sets the hit-count condition of the breakpoint at `line`.
+    pub fn set_breakpoint_hit_condition(
+        &mut self,
+        path: &Path,
+        line: u64,
+        hit_condition: Option<String>,
+    ) {
+        self.edit_breakpoint(path, line, |bp| bp.hit_condition = hit_condition);
+    }
+
+    fn edit_breakpoint(&mut self, path: &Path, line: u64, edit: impl FnOnce(&mut BreakpointState)) {
         let entry = self.breakpoints.entry(path.to_path_buf()).or_default();
         if let Some(bp) = entry.iter_mut().find(|bp| bp.line == line) {
-            bp.condition = condition;
+            edit(bp);
         } else {
-            entry.push(BreakpointState {
+            let mut bp = BreakpointState {
                 line,
                 verified: false,
                 id: None,
-                condition,
+                condition: None,
+                log_message: None,
+                hit_condition: None,
                 enabled: true,
-            });
+            };
+            edit(&mut bp);
+            entry.push(bp);
+            entry.sort_by_key(|bp| bp.line);
         }
+    }
+
+    /// The breakpoint at `line`, if any.
+    pub fn breakpoint_at(&self, path: &Path, line: u64) -> Option<&BreakpointState> {
+        self.breakpoints
+            .get(path)?
+            .iter()
+            .find(|bp| bp.line == line)
     }
 
     /// Get the condition for a breakpoint at a given line, if any.

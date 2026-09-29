@@ -1457,6 +1457,16 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
                         err(format!("Variable '{}' not found or not expandable", name))
                     }
                 }
+            } else if command == "DebugLogpoint" || command.starts_with("DebugLogpoint ") {
+                // :DebugLogpoint <message> - log instead of stopping at the cursor line
+                let message = command.strip_prefix("DebugLogpoint").unwrap_or("");
+                ok(editor
+                    .set_cursor_breakpoint_extra(crate::editor::BreakpointExtra::Logpoint, message))
+            } else if command == "DebugHitCount" || command.starts_with("DebugHitCount ") {
+                // :DebugHitCount <n|>n|%n> - stop only when the hit count matches
+                let count = command.strip_prefix("DebugHitCount").unwrap_or("");
+                ok(editor
+                    .set_cursor_breakpoint_extra(crate::editor::BreakpointExtra::HitCount, count))
             } else if let Some(condition) = command.strip_prefix("DebugCondition ") {
                 // :DebugCondition <expr> — set conditional breakpoint at cursor
                 let condition = condition.trim().to_string();
@@ -1473,16 +1483,8 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
                 } else {
                     editor.toggle_conditional_breakpoint(condition);
                 }
-                // Sync breakpoints if debug is active.
-                if editor.is_debug_active() {
-                    if let Some(file_path) = editor.buffer().file_path().map(|s| s.to_string()) {
-                        let path = std::path::PathBuf::from(&file_path);
-                        let lines = editor.dap_manager_mut().state.breakpoint_lines(&path);
-                        let _ = lines; // Sync will happen in event loop via pending action
-                        editor.dap_manager_mut().pending_action =
-                            Some(crate::dap::PendingDebugAction::SyncBreakpoints);
-                    }
-                }
+                // A live session hears about it right away.
+                editor.dap_manager_mut().request_breakpoint_sync();
                 ok("Conditional breakpoint set")
             // Handle :! shell command execution
             //

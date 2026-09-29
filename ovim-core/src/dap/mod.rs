@@ -131,6 +131,8 @@ pub struct DapManager {
     session_end: Option<SessionEnd>,
     /// Exit code from the most recent `exited` event.
     exit_code: Option<i32>,
+    /// What the adapter said it can do (`initialize` response).
+    capabilities: Option<DapCapabilities>,
 }
 
 /// How a debug session ended.
@@ -162,6 +164,7 @@ impl DapManager {
             console_output: Vec::new(),
             session_end: None,
             exit_code: None,
+            capabilities: None,
         }
     }
 
@@ -236,6 +239,7 @@ impl DapManager {
             .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
         let caps = client.initialize().await?;
         self.adopt_exception_filters(&caps.exception_breakpoint_filters);
+        self.capabilities = Some(caps);
         Ok(())
     }
 
@@ -255,6 +259,19 @@ impl DapManager {
                 label: f.label.clone(),
             })
             .collect();
+    }
+
+    /// Whether the running adapter supports logpoints (`None` before it has
+    /// answered `initialize`).
+    pub fn supports_log_points(&self) -> Option<bool> {
+        self.capabilities.as_ref().map(|c| c.supports_log_points)
+    }
+
+    /// Whether the running adapter supports hit-count conditions.
+    pub fn supports_hit_conditions(&self) -> Option<bool> {
+        self.capabilities
+            .as_ref()
+            .map(|c| c.supports_hit_conditional_breakpoints)
     }
 
     /// Sends the enabled exception filters (`setExceptionBreakpoints`). A
@@ -313,32 +330,69 @@ impl DapManager {
         path: &Path,
         lines: &[u64],
     ) -> Result<Vec<DapBreakpoint>> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
+        if self.client.is_none() {
+            anyhow::bail!("no debug adapter running");
+        }
 
         let source = DapSource {
             name: path.file_name().map(|n| n.to_string_lossy().to_string()),
             path: Some(path.to_string_lossy().to_string()),
         };
 
-        // Include conditions from state when syncing breakpoints.
-        let source_bps: Vec<DapSourceBreakpoint> = lines
-            .iter()
-            .map(|&line| DapSourceBreakpoint {
+        // Conditions, logpoints and hit counts ride along. An adapter that
+        // cannot honour a logpoint / hit count must not get the bare line
+        // (it would stop on every hit), so those are left out and said so.
+        let log_ok = self.supports_log_points() != Some(false);
+        let hit_ok = self.supports_hit_conditions() != Some(false);
+        let mut skipped = Vec::new();
+        let mut source_bps: Vec<DapSourceBreakpoint> = Vec::new();
+        for &line in lines {
+            let bp = self.state.breakpoint_at(path, line);
+            let log_message = bp.and_then(|b| b.log_message.clone());
+            let hit_condition = bp.and_then(|b| b.hit_condition.clone());
+            if (log_message.is_some() && !log_ok) || (hit_condition.is_some() && !hit_ok) {
+                skipped.push(line);
+                continue;
+            }
+            source_bps.push(DapSourceBreakpoint {
                 line,
-                condition: self
-                    .state
-                    .breakpoint_condition(path, line)
-                    .map(|s| s.to_owned()),
-            })
-            .collect();
+                condition: bp.and_then(|b| b.condition.clone()),
+                hit_condition,
+                log_message,
+            });
+        }
+        if !skipped.is_empty() {
+            let file = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            self.log_console(format!(
+                "The debug adapter does not support logpoints / hit counts: not set at {}:{}",
+                file.unwrap_or_default(),
+                skipped
+                    .iter()
+                    .map(|l| l.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
 
+        let kept_back: Vec<state::BreakpointState> = skipped
+            .iter()
+            .filter_map(|&line| self.state.breakpoint_at(path, line).cloned())
+            .collect();
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
         let result = client.set_breakpoints(&source, &source_bps).await?;
 
-        // Update state.
+        // Update state (the ones we did not send stay, unverified).
         self.state.update_breakpoints(path, &result);
+        if let Some(entry) = self.state.breakpoints.get_mut(path) {
+            for mut bp in kept_back {
+                bp.verified = false;
+                entry.push(bp);
+            }
+            entry.sort_by_key(|bp| bp.line);
+        }
 
         Ok(result)
     }

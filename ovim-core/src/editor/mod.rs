@@ -141,7 +141,7 @@ pub use code_explanation::{
 pub use code_lens::LensEntry;
 pub use command_context::CommandContext;
 pub use completion::CompletionMenu;
-pub use debug_integration::BreakpointMarker;
+pub use debug_integration::{BreakpointExtra, BreakpointMarker};
 pub use diff_review::{
     DiffLayout, DiffOverlayViewState, DiffReviewState, PendingGitFetch, DIFF_REVIEW_TITLE_PREFIX,
 };

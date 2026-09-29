@@ -17,6 +17,10 @@ pub struct DapSourceBreakpoint {
     pub line: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub condition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hit_condition: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -91,6 +95,10 @@ pub struct DapCapabilities {
     pub supports_conditional_breakpoints: bool,
     #[serde(default)]
     pub supports_terminate_request: bool,
+    #[serde(default)]
+    pub supports_log_points: bool,
+    #[serde(default)]
+    pub supports_hit_conditional_breakpoints: bool,
     /// Checkboxes the client may show for "break on exceptions".
     #[serde(default)]
     pub exception_breakpoint_filters: Vec<DapExceptionFilter>,

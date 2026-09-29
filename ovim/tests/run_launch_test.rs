@@ -1939,3 +1939,66 @@ async fn the_panel_lists_threads_and_switches_the_inspected_one() {
     d.inner.test.keys("q");
     d.inner.stop_lsp().await;
 }
+
+/// OV-00449: logpoints and hit counts are sent when the adapter supports
+/// them; when it does not, the line is not sent bare (it would stop on every
+/// hit) and the console says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn logpoints_and_hit_counts_follow_the_adapters_capabilities() {
+    for supported in [true, false] {
+        let mut d = stopped_session(|root| {
+            let mut scenario = stopped_scenario(root);
+            scenario["capabilities"] = json!({
+                "supportsLogPoints": supported,
+                "supportsHitConditionalBreakpoints": supported
+            });
+            scenario
+        })
+        .await;
+        let baseline = d.requests("setBreakpoints").len();
+        d.inner.test.set_cursor(0, 0);
+        d.inner.test.command("DebugLogpoint value is {n}");
+        d.inner
+            .until("the logpoint sync", |s| {
+                dap_requests(&s.root.join("dap"), "setBreakpoints").len() > baseline
+            })
+            .await;
+        let last = d.requests("setBreakpoints").last().unwrap().clone();
+        let sent = &last["arguments"]["breakpoints"];
+        if supported {
+            assert_eq!(sent[0]["logMessage"], "value is {n}", "{last}");
+            d.inner.test.command("DebugHitCount >3");
+            d.inner
+                .until("the hit count sync", |s| {
+                    dap_requests(&s.root.join("dap"), "setBreakpoints")
+                        .last()
+                        .is_some_and(|r| r["arguments"]["breakpoints"][0]["hitCondition"] == ">3")
+                })
+                .await;
+            let labels = d
+                .inner
+                .test
+                .editor
+                .debug_panel_rows()
+                .into_iter()
+                .filter_map(|r| r.value)
+                .collect::<Vec<_>>();
+            assert!(labels
+                .iter()
+                .any(|v| v.contains("hits >3") && v.contains("log")));
+        } else {
+            assert_eq!(sent, &json!([]), "not sent bare: {last}");
+            d.inner
+                .until("the explanation", |s| {
+                    s.console_text().contains("does not support logpoints")
+                })
+                .await;
+            assert_eq!(
+                d.inner.test.editor.debug_state().all_breakpoints().len(),
+                1,
+                "the breakpoint stays listed"
+            );
+        }
+        d.inner.stop_lsp().await;
+    }
+}

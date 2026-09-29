@@ -8,6 +8,7 @@ argv[1] is a directory shared with the test:
       "initialize_error": message; respond to initialize with a failure
       "on_configuration_done": list of DAP event/response bodies to emit
           each item: {"event": "output", "body": {...}, "delay": 0.1}
+      "capabilities": extra capabilities advertised (supportsLogPoints, ...)
       "exception_filters": advertised exceptionBreakpointFilters
       "threads": answer to threads; "frames_by_thread": {"<threadId>": [frame...]}
       "frames", "scopes": answers for stackTrace / scopes
@@ -80,6 +81,7 @@ while True:
         capabilities = {"supportsConfigurationDoneRequest": True}
         if "exception_filters" in scenario:
             capabilities["exceptionBreakpointFilters"] = scenario["exception_filters"]
+        capabilities.update(scenario.get("capabilities", {}))
         respond(request, capabilities)
         event("initialized")
     elif command in ("launch", "attach"):

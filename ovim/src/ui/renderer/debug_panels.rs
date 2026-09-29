@@ -157,7 +157,11 @@ fn row_line(row: &PanelRow, highlighted: bool, width: usize) -> Line<'static> {
                 base
             };
             spans.push(Span::styled(
-                format!("{indent}{}{}", if *selected { "> " } else { "  " }, row.label),
+                format!(
+                    "{indent}{}{}",
+                    if *selected { "> " } else { "  " },
+                    row.label
+                ),
                 style,
             ));
             if let Some(note) = &row.value {

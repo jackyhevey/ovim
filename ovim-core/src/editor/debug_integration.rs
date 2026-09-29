@@ -9,6 +9,13 @@ use crate::dap::DapManager;
 use crate::language_config::DapConfig;
 use std::path::Path;
 
+/// What `:DebugLogpoint` / `:DebugHitCount` attach to a breakpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakpointExtra {
+    Logpoint,
+    HitCount,
+}
+
 /// How a breakpoint is drawn in the gutter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakpointMarker {
@@ -96,7 +103,7 @@ impl Editor {
             .find(|bp| bp.line == line_1based)?;
         Some(if !bp.enabled {
             BreakpointMarker::Disabled
-        } else if bp.condition.is_some() {
+        } else if bp.condition.is_some() || bp.log_message.is_some() || bp.hit_condition.is_some() {
             BreakpointMarker::Conditional
         } else {
             BreakpointMarker::Enabled
@@ -750,6 +757,40 @@ impl Editor {
             .state
             .set_breakpoint_condition(&path, line, Some(condition));
         self.mark_dirty();
+    }
+
+    /// `:DebugLogpoint <message>` / `:DebugHitCount <n>`: attaches a log
+    /// message or a hit condition to the breakpoint at the cursor (creating
+    /// it); an empty value removes it. Returns what to tell the user.
+    pub fn set_cursor_breakpoint_extra(&mut self, kind: BreakpointExtra, value: &str) -> String {
+        let Some(file_path) = self.buffer().file_path().map(|s| s.to_string()) else {
+            return "Save the buffer to a file first".to_string();
+        };
+        let line = self.buffer().cursor().line() as u64 + 1;
+        let path = std::path::PathBuf::from(&file_path);
+        let value = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+        let supported = match kind {
+            BreakpointExtra::Logpoint => self.dap_manager.supports_log_points(),
+            BreakpointExtra::HitCount => self.dap_manager.supports_hit_conditions(),
+        };
+        let state = &mut self.dap_manager.state;
+        let removed = value.is_none();
+        match kind {
+            BreakpointExtra::Logpoint => state.set_breakpoint_log_message(&path, line, value),
+            BreakpointExtra::HitCount => state.set_breakpoint_hit_condition(&path, line, value),
+        }
+        self.after_breakpoint_change();
+        let what = match kind {
+            BreakpointExtra::Logpoint => "Logpoint",
+            BreakpointExtra::HitCount => "Hit count",
+        };
+        match (removed, supported) {
+            (true, _) => format!("{what} removed"),
+            (false, Some(false)) => format!(
+                "{what} set, but the running debug adapter does not support it (the breakpoint is not set until it does)"
+            ),
+            (false, _) => format!("{what} set at line {line}"),
+        }
     }
 
     /// Returns the DAP config for the current buffer's language, if any.
