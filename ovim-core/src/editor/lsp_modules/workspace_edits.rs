@@ -331,6 +331,35 @@ impl Editor {
         self.find_buffer_by_path(path.to_str()?)
     }
 
+    /// Points the buffer at `new_path` after its file moved on disk. The
+    /// language server hears `didClose` for the old URI and `didOpen` for the
+    /// new one (through the normal sync tick).
+    pub(in crate::editor) fn retarget_buffer_path(&mut self, index: usize, new_path: PathBuf) {
+        let Some(old_path) = self
+            .buffers
+            .get(index)
+            .and_then(|b| b.file_path())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let new_path = new_path.canonicalize().unwrap_or(new_path);
+        let new_path = new_path.to_string_lossy().to_string();
+        let is_current = index == self.current_buffer_index;
+        let mtime = std::fs::metadata(&new_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let buffer = &mut self.buffers[index];
+        buffer.set_file_path(new_path.clone());
+        if !buffer.is_modified() {
+            buffer.set_file_mtime(mtime);
+        }
+        if is_current {
+            self.registers.set_current_file(new_path.clone());
+        }
+        self.handle_file_path_transition_after_save(Some(old_path), Some(new_path));
+    }
+
     /// Keeps an open buffer coherent with a file the server just renamed or
     /// deleted: a renamed file's buffer follows it (and the language server
     /// hears `didClose` for the old URI and `didOpen` for the new one); a
@@ -357,21 +386,7 @@ impl Editor {
                 let Some(new_path) = uri_to_file_path(&rename.new_uri) else {
                     return;
                 };
-                let new_path = new_path.canonicalize().unwrap_or(new_path);
-                let new_path = new_path.to_string_lossy().to_string();
-                let is_current = index == self.current_buffer_index;
-                let mtime = std::fs::metadata(&new_path)
-                    .ok()
-                    .and_then(|m| m.modified().ok());
-                let buffer = &mut self.buffers[index];
-                buffer.set_file_path(new_path.clone());
-                if !buffer.is_modified() {
-                    buffer.set_file_mtime(mtime);
-                }
-                if is_current {
-                    self.registers.set_current_file(new_path.clone());
-                }
-                self.handle_file_path_transition_after_save(Some(old_path), Some(new_path));
+                self.retarget_buffer_path(index, new_path);
             }
             lsp_types::ResourceOp::Delete(_) => {
                 self.lsp.state.document_sync.remove(&old_path);

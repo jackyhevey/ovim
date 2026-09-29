@@ -1489,6 +1489,7 @@ impl Editor {
         // seen must be opened first, never sent a bare didChange.
         self.sync_open_documents().await;
         self.process_workspace_file_events().await;
+        self.process_pending_file_rename().await;
         self.send_lsp_changes_if_modified().await;
         self.send_lsp_save_if_needed().await;
 

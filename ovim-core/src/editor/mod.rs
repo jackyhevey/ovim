@@ -52,6 +52,7 @@ mod editing_state;
 mod execution;
 #[cfg(test)]
 mod execution_tests;
+mod file_rename;
 mod filetree;
 pub mod fuzzy;
 pub mod grep;

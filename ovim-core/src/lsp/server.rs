@@ -1006,6 +1006,12 @@ impl LanguageServer {
                 }),
                 // The editor watches the workspace for changes made outside
                 // it and forwards them to servers that register watchers.
+                file_operations: Some(lsp_types::WorkspaceFileOperationsClientCapabilities {
+                    dynamic_registration: Some(false),
+                    will_rename: Some(true),
+                    did_rename: Some(true),
+                    ..Default::default()
+                }),
                 did_change_watched_files: Some(
                     lsp_types::DidChangeWatchedFilesClientCapabilities {
                         dynamic_registration: Some(true),

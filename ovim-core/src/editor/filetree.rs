@@ -861,6 +861,28 @@ impl FileTree {
         Ok(parent.join(name))
     }
 
+    /// Validates a rename and returns `(current path, new path)` without
+    /// touching the disk; `None` when the name is unchanged or empty. Lets
+    /// callers consult language servers (`willRenameFiles`) before renaming.
+    pub fn plan_rename(
+        &self,
+        original: &Path,
+        input: &str,
+    ) -> anyhow::Result<Option<(PathBuf, PathBuf)>> {
+        if input.is_empty() {
+            return Ok(None);
+        }
+        let target = self.resolve_rename_path(original, input)?;
+        let original = self.resolve_mutable_entry_path(original, "renamed")?;
+        if target == original {
+            return Ok(None);
+        }
+        if target.exists() {
+            anyhow::bail!("{} already exists", target.display());
+        }
+        Ok(Some((original, target)))
+    }
+
     /// Rename an entry, returning `None` when the name is unchanged or empty.
     pub fn rename_entry(
         &mut self,

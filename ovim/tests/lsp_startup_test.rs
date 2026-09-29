@@ -506,3 +506,73 @@ async fn registered_file_watchers_receive_changes_to_unopened_files() {
     );
     session.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explorer_rename_asks_will_rename_first_and_reports_did_rename() {
+    let mut session = StartupSession::new();
+    let root = session.dir.path().canonicalize().unwrap();
+    let filters = json!({"filters": [{"pattern": {"glob": "**/*.controlled"}}]});
+    session.initialize_response(json!({"result": {"capabilities": {
+        "textDocumentSync": 1,
+        "workspace": {"fileOperations": {"willRename": filters, "didRename": filters}}
+    }}}));
+    let first = PathBuf::from(session.test.editor.buffer().file_path().unwrap());
+    let other = root.join("other.controlled");
+    std::fs::write(&first, "original\n").unwrap();
+    std::fs::write(&other, "uses first\n").unwrap();
+    session.wait_for_event("textDocument/didOpen").await;
+
+    // The server wants `other` rewritten when `first` is renamed.
+    let other_uri = ovim::lsp::uri_from_file_path(&other).unwrap();
+    std::fs::write(
+        root.join("response-workspace_willRenameFiles.json"),
+        json!({"result": {"changes": {other_uri.as_str(): [
+            {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 4}},
+             "newText": "renamed"}
+        ]}}})
+        .to_string(),
+    )
+    .unwrap();
+
+    session.test.editor.file_tree_mut().set_root(&root);
+    session
+        .test
+        .editor
+        .request_explorer_rename(first.clone(), "second.controlled".to_string());
+    session
+        .wait_until("didRenameFiles", |s| {
+            !s.events("workspace/didRenameFiles").is_empty()
+        })
+        .await;
+
+    let will = session.events("workspace/willRenameFiles");
+    assert_eq!(will.len(), 1);
+    let old_uri = ovim::lsp::uri_from_file_path(&first).unwrap();
+    let new_path = root.join("second.controlled");
+    let new_uri = ovim::lsp::uri_from_file_path(&new_path).unwrap();
+    assert_eq!(will[0]["params"]["files"][0]["oldUri"], old_uri.as_str());
+    assert_eq!(will[0]["params"]["files"][0]["newUri"], new_uri.as_str());
+    let did = session.events("workspace/didRenameFiles");
+    assert_eq!(did[0]["params"]["files"][0]["newUri"], new_uri.as_str());
+
+    // The server's willRename edit landed, the file moved, the buffer followed.
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), "renamed first\n");
+    assert!(!first.exists() && new_path.exists());
+    assert!(session
+        .test
+        .editor
+        .buffer()
+        .file_path()
+        .unwrap()
+        .ends_with("second.controlled"));
+
+    // The document is re-announced under its new URI.
+    session
+        .wait_until("didOpen for new uri", |s| {
+            s.events("textDocument/didOpen")
+                .iter()
+                .any(|e| e["params"]["textDocument"]["uri"] == new_uri.as_str())
+        })
+        .await;
+    session.stop().await;
+}

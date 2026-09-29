@@ -368,6 +368,8 @@ pub struct LspState {
     pub needs_lsp_init: bool,
     /// File path that needs didClose notification (set when switching files)
     pub pending_did_close_file: Option<String>,
+    /// File-explorer rename waiting for its `willRenameFiles` round trip.
+    pub pending_file_rename: Option<(std::path::PathBuf, String)>,
     /// Watches the workspace for changes made outside the editor (feeds
     /// `workspace/didChangeWatchedFiles`).
     pub workspace_watcher: super::workspace_watch::WorkspaceWatcher,
@@ -436,6 +438,7 @@ impl LspState {
             active_lsp_servers: HashMap::new(),
             needs_lsp_init: false,
             pending_did_close_file: None,
+            pending_file_rename: None,
             workspace_watcher: Default::default(),
             available_code_actions: Vec::new(),
             available_completions: Vec::new(),

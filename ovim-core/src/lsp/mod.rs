@@ -17,6 +17,7 @@
 
 #[macro_use]
 pub mod logger;
+mod file_operations;
 mod notifications;
 pub mod position;
 mod protocol;
