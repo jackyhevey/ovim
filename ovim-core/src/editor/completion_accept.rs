@@ -52,10 +52,14 @@ impl Editor {
     /// Accepts the selected completion; `mode` picks the insert or the
     /// replace range of `InsertReplaceEdit` items.
     pub fn accept_completion_with(&mut self, mode: CompletionAcceptMode) {
-        if let Some(item) = self.completion_menu.selected_item().cloned() {
+        if self.completion_menu.is_snippet_choices() {
+            self.accept_snippet_choice();
+        } else if let Some(item) = self.completion_menu.selected_item().cloned() {
             self.accept_completion_item(&item, mode);
         }
         self.dismiss_completion();
+        // The snippet just expanded may start on a choice stop.
+        self.snippet_show_choices();
     }
 
     /// Accepts a completion by index from available_completions (used by picker)
@@ -65,6 +69,7 @@ impl Editor {
         }
         self.lsp.state.available_completions.clear();
         self.dismiss_completion();
+        self.snippet_show_choices();
     }
 
     /// Commit characters: typing one of the selected item's `commitCharacters`
@@ -271,15 +276,15 @@ impl Editor {
         if let Some(command) = item.command.clone() {
             self.lsp.state.pending_completion_commands.push(command);
         }
+
+        // A method completion leaves the cursor inside `name(|)`: show its
+        // parameters right away.
+        self.request_signature_help_if_in_call();
     }
 
     /// Applies `edits` (pre-edit char offsets, any order) as a single undo
     /// step and puts the cursor at `cursor` (a post-edit char offset). The
     /// insert-mode recording is closed first and restarted afterwards so the
-
-        // A method completion leaves the cursor inside `name(|)`: show its
-        // parameters right away.
-        self.request_signature_help_if_in_call();
     /// edit is its own `Recorded` entry (see the note in
     /// `accept_completion_item`).
     pub(super) fn apply_offset_edits_as_one_undo(

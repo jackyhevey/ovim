@@ -2686,8 +2686,19 @@ fn project_lines(
                 (attachment.end_line, usize::MAX),
             )
         });
+    // The untouched placeholder of an expanded snippet is drawn as a selection
+    // (typing replaces it), like the terminal does (OV-00469).
+    let placeholder_selection = editor
+        .snippet_placeholder_highlight()
+        .filter(|_| editor.visual_selection().is_none())
+        .map(|(line, start, end)| ((line, start), (line, end.saturating_sub(1).max(start))));
     let selection = focused
-        .then(|| editor.visual_selection().or(attached_selection))
+        .then(|| {
+            editor
+                .visual_selection()
+                .or(attached_selection)
+                .or(placeholder_selection)
+        })
         .flatten();
     let selection_mode = if editor.visual_selection().is_some() {
         editor.mode()
@@ -4511,6 +4522,52 @@ mod tests {
         assert_eq!(closed[1].fold.as_deref(), Some("closed"));
         assert_eq!(closed[1].folded, Some(1));
         assert!(!editor.toggle_fold_at_gutter(5), "no fold starts on `d`");
+    }
+
+    /// OV-00469: the placeholder of an expanded snippet (typing replaces it)
+    /// is highlighted in the GUI like in the terminal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn gui_highlights_the_untouched_snippet_placeholder() {
+        let mut editor = Editor::with_content("ca");
+        editor
+            .buffer_mut()
+            .set_file_path("/tmp/snippet_gui.txt".into());
+        handle_viewport_resize(&mut editor, 100, 30);
+        editor.start_change_building(editor.cursor_position());
+        editor.set_mode(Mode::Insert);
+        editor
+            .buffer_mut()
+            .set_cursor_char_col(0, crate::unicode::CharCol(2));
+        let item = lsp_types::CompletionItem {
+            label: "call".into(),
+            insert_text: Some("call(${1:first}, ${2:second})".into()),
+            insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
+            ..Default::default()
+        };
+        editor
+            .completion_menu_mut()
+            .show(vec![item], 0, "ca".into());
+        editor.accept_completion();
+        assert_eq!(editor.buffer().line_text(0).unwrap(), "call(first, second)");
+
+        let selected = |editor: &Editor| -> String {
+            snapshot(editor, 1).panes[0].lines[0]
+                .segments
+                .iter()
+                .filter(|segment| segment.selected)
+                .map(|segment| segment.text.clone())
+                .collect()
+        };
+        assert_eq!(selected(&editor), "first");
+        // Typing over the placeholder drops the highlight.
+        for ch in "x".chars() {
+            crate::editor::InputHandler::handle_key_event(
+                &mut editor,
+                ovim_core::KeyEvent::new(ovim_core::KeyCode::Char(ch), ovim_core::Modifiers::NONE),
+            )
+            .unwrap();
+        }
+        assert_eq!(selected(&editor), "");
     }
 
     #[test]

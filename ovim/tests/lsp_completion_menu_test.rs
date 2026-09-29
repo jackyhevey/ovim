@@ -669,6 +669,80 @@ async fn choice_and_variable_snippets_insert_their_default_text() {
     session.stop().await;
 }
 
+/// OV-00476: a `${1|a,b,c|}` stop opens a small chooser over the inserted
+/// first choice; Down/Up move, Enter or Tab picks it over the placeholder,
+/// the next Tab moves on. Like every snippet stop it works for later stops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_snippet_choice_stop_opens_a_chooser() {
+    let mut session = Session::new("").await;
+    session.set_completion(json!([snippet_item(
+        "start",
+        "start(${1:name}, ${2|fast,slow,auto|})$0"
+    )]));
+    session.test.keys("ista");
+    session.pump_menu().await;
+    session.test.press_enter();
+    assert_eq!(session.line(0), "start(name, fast)");
+    // The first stop is a plain placeholder: no chooser yet.
+    assert!(!session.test.editor.completion_menu().is_visible());
+
+    // Tab to the choice stop: the chooser lists the choices in snippet order
+    // with the inserted first choice highlighted.
+    session.test.press_key(KeyCode::Tab);
+    assert_eq!(session.test.cursor(), (0, 12));
+    assert!(session.test.editor.completion_menu().is_visible());
+    assert_eq!(session.labels(), ["fast", "slow", "auto"]);
+    assert_eq!(
+        session
+            .test
+            .editor
+            .completion_menu()
+            .selected_item()
+            .unwrap()
+            .label,
+        "fast"
+    );
+
+    // Down, Down, Enter picks `auto` over `fast`; the stop stays current.
+    session.test.press_key(KeyCode::Down);
+    session.test.press_key(KeyCode::Down);
+    session.test.press_enter();
+    assert_eq!(session.line(0), "start(name, auto)");
+    assert!(!session.test.editor.completion_menu().is_visible());
+    assert!(session.test.editor.snippet_active());
+    assert_eq!(session.test.cursor(), (0, 16));
+
+    // The next Tab leaves the stop for $0 (after the `)`) and ends the session.
+    session.test.press_key(KeyCode::Tab);
+    assert_eq!(session.test.cursor(), (0, "start(name, auto)".len()));
+    assert!(!session.test.editor.snippet_active());
+    session.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn typing_over_a_choice_stop_filters_or_replaces_the_choices() {
+    let mut session = Session::new("").await;
+    session.set_completion(json!([snippet_item(
+        "kw",
+        "${1|public,private,protected|} class"
+    )]));
+    session.test.keys("ikw");
+    session.pump_menu().await;
+    session.test.press_enter();
+    assert_eq!(session.line(0), "public class");
+    // The chooser is open at the very first stop; `pri` narrows it to
+    // `private`, Tab picks it over whatever the placeholder now holds.
+    assert!(session.test.editor.completion_menu().is_visible());
+    session.test.keys("pri");
+    assert_eq!(session.line(0), "pri class");
+    assert_eq!(session.labels(), ["private"]);
+    session.test.press_key(KeyCode::Tab);
+    assert_eq!(session.line(0), "private class");
+    // A key that fits no choice just leaves the typed text.
+    session.test.keys("<Esc>");
+    session.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn plain_text_items_are_not_parsed_as_snippets() {
     let mut session = Session::new("").await;
