@@ -617,4 +617,144 @@ mod tests {
 
         panic!("YAML syntax highlighting did not finish");
     }
+
+    // ---- Characterization of the whole tick as the frontends drive it ----
+
+    use crate::dap::PendingDebugAction;
+    use crate::frontend::{
+        process_editor_tick, process_external_file_change, process_picker_results,
+    };
+
+    /// Tick until background syntax lands, asserting LSP init waits for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tick_starts_lsp_only_after_syntax_has_had_a_paint_tick() {
+        let mut editor = Editor::with_content("name: ovim\n");
+        editor.set_file_path("config.yaml".to_string());
+        editor.request_lsp_init();
+        let mut channels = FrontendChannels::new();
+
+        process_editor_tick(&mut editor, &mut channels).await;
+        assert!(editor.needs_lsp_init().is_some(), "syntax is still loading");
+
+        for _ in 0..200 {
+            if editor.buffer().has_syntax_highlighting() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            process_editor_tick(&mut editor, &mut channels).await;
+            if !editor.buffer().has_syntax_highlighting() {
+                assert!(editor.needs_lsp_init().is_some());
+            }
+        }
+        assert!(editor.buffer().has_syntax_highlighting());
+        process_editor_tick(&mut editor, &mut channels).await;
+        assert!(
+            editor.needs_lsp_init().is_none(),
+            "LSP init runs on the tick after syntax is ready"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tick_defers_lsp_init_while_a_yank_flash_is_visible() {
+        let mut editor = Editor::with_content("copy me\n");
+        editor.set_file_path("notes.no-such-language".to_string());
+        editor.request_lsp_init();
+        editor.set_yank_flash_lines(0, 0);
+        let mut channels = FrontendChannels::new();
+
+        process_editor_tick(&mut editor, &mut channels).await;
+        assert!(editor.needs_lsp_init().is_some());
+
+        tokio::time::sleep(std::time::Duration::from_millis(175)).await;
+        process_editor_tick(&mut editor, &mut channels).await;
+        assert!(editor.yank_flash().is_none());
+        assert!(
+            editor.needs_lsp_init().is_some(),
+            "the tick that clears the flash still defers LSP"
+        );
+
+        process_editor_tick(&mut editor, &mut channels).await;
+        assert!(editor.needs_lsp_init().is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tick_runs_the_queued_debug_action_and_marks_dirty() {
+        let mut editor = Editor::with_content("x\n");
+        editor.dap_manager_mut().pending_action = Some(PendingDebugAction::Evaluate {
+            expression: "x".to_string(),
+        });
+        editor.mark_clean();
+        let mut channels = FrontendChannels::new();
+
+        process_editor_tick(&mut editor, &mut channels).await;
+
+        assert!(editor.dap_manager_mut().pending_action.is_none());
+        assert!(
+            editor.status_message().starts_with("Eval error:"),
+            "{}",
+            editor.status_message()
+        );
+        assert!(editor.is_dirty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn picker_results_deliver_previews_and_mark_dirty() {
+        let mut editor = Editor::with_content("x\n");
+        let mut channels = FrontendChannels::new();
+        channels
+            .preview_tx
+            .send((
+                "/tmp/previewed.txt".to_string(),
+                crate::editor::PreviewCache {
+                    content: "preview".to_string(),
+                    highlighted_lines: Default::default(),
+                    language: None,
+                },
+            ))
+            .await
+            .unwrap();
+        editor.mark_clean();
+
+        process_picker_results(&mut editor, &mut channels);
+
+        assert!(editor.get_preview_cache("/tmp/previewed.txt").is_some());
+        assert!(editor.is_dirty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn external_file_change_reloads_a_clean_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("watched.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        let mut editor = Editor::new();
+        editor.load_file(&path).unwrap();
+        std::fs::write(&path, "after\n").unwrap();
+        editor
+            .buffer_mut()
+            .set_file_mtime(Some(std::time::SystemTime::UNIX_EPOCH));
+        editor.mark_clean();
+
+        process_external_file_change(&mut editor);
+
+        assert_eq!(editor.buffer().rope().to_string(), "after\n");
+        assert_eq!(
+            editor.status_message(),
+            "File reloaded after external change"
+        );
+        assert!(editor.is_dirty());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tick_leaves_shell_requests_queued_for_the_frontend() {
+        let mut editor = Editor::with_content("x\n");
+        crate::editor::InputHandler::execute_command_string(&mut editor, "!echo hi").unwrap();
+        let mut channels = FrontendChannels::new();
+
+        process_editor_tick(&mut editor, &mut channels).await;
+
+        assert_eq!(
+            editor.take_pending_shell_command().map(|p| p.command),
+            Some("echo hi".to_string())
+        );
+    }
 }
