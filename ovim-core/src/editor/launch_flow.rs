@@ -134,6 +134,9 @@ struct LaunchJob {
     session_end: Option<crate::dap::SessionEnd>,
     /// A test run shown in the test panel that has not been finalised yet.
     panel_run: bool,
+    /// While waiting for a debug JVM that will not print its port (Maven
+    /// surefire): the port to watch.
+    debug_port: Option<u16>,
 }
 
 fn append_capped(log: &mut String, text: &str) {
@@ -519,6 +522,7 @@ impl Editor {
             stopping: false,
             session_end: None,
             panel_run: false,
+            debug_port: None,
         });
         self.log_console(run_id, LineKind::System, "Looking up run configurations...");
     }
@@ -822,6 +826,7 @@ impl Editor {
             stopping: false,
             session_end: None,
             panel_run: false,
+            debug_port: None,
         };
 
         match request.source.clone() {
@@ -1260,9 +1265,16 @@ impl Editor {
         let Some(task) = job.plan.as_ref().and_then(|p| p.task.clone()) else {
             return;
         };
-        let Some(argv) = task.debug_argv.clone() else {
+        let Some(mut argv) = task.debug_argv.clone() else {
             return;
         };
+        job.debug_port = plan::surefire_debug_port(&argv);
+        if let Some(port) = crate::launch::process::free_port() {
+            if let Some(pinned) = plan::pin_surefire_debug_port(&argv, port) {
+                argv = pinned;
+                job.debug_port = Some(port);
+            }
+        }
         let spec = CommandSpec {
             argv,
             cwd: task.cwd.clone(),
@@ -1826,6 +1838,12 @@ impl Editor {
                     if tail.is_empty() { "(none)".to_string() } else { tail }
                 );
                 self.fail_job(job, message);
+                return true;
+            }
+        }
+        if let (Stage::AwaitingDebugPort { .. }, Some(port)) = (job.stage, job.debug_port) {
+            if crate::launch::process::port_is_listening(port) {
+                self.attach_to_listening_jvm(job, port);
                 return true;
             }
         }

@@ -940,6 +940,57 @@ async fn test_debug_waits_for_the_listening_line_on_stdout_or_stderr_and_attache
     }
 }
 
+/// OV-00445: surefire swallows the JVM's `Listening for transport` line, so
+/// ovim gives the JVM its own address and watches that port instead of
+/// waiting for text that never comes (it used to hang for the whole timeout).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maven_test_debug_attaches_when_the_pinned_port_listens_without_any_output() {
+    let mut d = DebugSession::new(&resolve_commands()).await;
+    let adapter = d.adapter(json!({}));
+    // Plays mvn: prints nothing about JDWP, but the "forked JVM" listens on the
+    // address handed to -Dmaven.surefire.debug.
+    let script = d.inner.write_script(
+        "mvn-fake.sh",
+        "echo '[INFO] T E S T S'\nport=$(echo \"$2\" | sed 's/.*address=127.0.0.1://')\necho \"$2\" > args.txt\nexec python3 -c \"import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', $port)); s.listen(1); time.sleep(300)\"",
+    );
+    let mut plan = test_plan(&d.inner, &script);
+    plan["test"]["debugArgv"] = json!([script, "-Dtest=FooTest", "-Dmaven.surefire.debug", "test"]);
+    d.inner.script_resolve(plan);
+    d.inner
+        .test
+        .editor
+        .set_debug_port_timeout(Duration::from_secs(20));
+    d.inner
+        .test
+        .editor
+        .launch_at_cursor_with(ovim_core::launch::LaunchMode::Debug, Some(adapter));
+    let dap_dir = d.dap_dir.clone();
+    d.inner
+        .until("attach", |_| !dap_requests(&dap_dir, "attach").is_empty())
+        .await;
+    let port = d.requests("attach")[0]["arguments"]["port"]
+        .as_u64()
+        .unwrap();
+    assert_ne!(port, 5005, "not the hardcoded surefire default");
+    let args = std::fs::read_to_string(d.inner.root.join("args.txt")).unwrap();
+    assert!(
+        args.contains(&format!("address=127.0.0.1:{port}")),
+        "{args}"
+    );
+
+    // Stop takes the whole process tree down, including the listener.
+    d.inner.test.keys(" rs");
+    d.inner.until("stopped", |s| s.run_finished()).await;
+    for _ in 0..100 {
+        if !ovim_core::launch::process::port_is_listening(port as u16) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!ovim_core::launch::process::port_is_listening(port as u16));
+    d.inner.stop_lsp().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_debug_that_never_listens_times_out_showing_the_output_and_kills_the_child() {
     let mut d = DebugSession::new(&resolve_commands()).await;

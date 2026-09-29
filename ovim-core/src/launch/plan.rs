@@ -554,6 +554,41 @@ pub fn plan_from_config(config: &DebugRunConfig, default_root: &Path) -> LaunchP
 
 /// Extracts the port from a JDWP "Listening for transport dt_socket at
 /// address: 5005" line, wherever it appears on the line.
+/// Surefire forks the test JVM with its output captured into the forked-VM
+/// protocol channel, so the `Listening for transport dt_socket` line of a
+/// `-Dmaven.surefire.debug` run never reaches Maven's output. Give the JVM an
+/// address of our choosing instead (also avoiding the hardcoded 5005), and
+/// watch that port. Returns the rewritten argv and the port, or `None` when
+/// `argv` has no bare `-Dmaven.surefire.debug`.
+pub fn pin_surefire_debug_port(argv: &[String], port: u16) -> Option<Vec<String>> {
+    if !argv.iter().any(|a| a == "-Dmaven.surefire.debug") {
+        return None;
+    }
+    Some(
+        argv.iter()
+            .map(|a| {
+                if a == "-Dmaven.surefire.debug" {
+                    format!(
+                        "-Dmaven.surefire.debug=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:{port}"
+                    )
+                } else {
+                    a.clone()
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The port of an explicit `-Dmaven.surefire.debug=...address=host:PORT`.
+pub fn surefire_debug_port(argv: &[String]) -> Option<u16> {
+    let value = argv
+        .iter()
+        .find_map(|a| a.strip_prefix("-Dmaven.surefire.debug="))?;
+    let address = value.split("address=").nth(1)?;
+    let address = address.split(',').next()?;
+    address.rsplit(':').next()?.parse().ok()
+}
+
 pub fn parse_listening_port(line: &str) -> Option<u16> {
     let idx = line.find("Listening for transport dt_socket at address:")?;
     let rest = &line[idx + "Listening for transport dt_socket at address:".len()..];
@@ -567,6 +602,20 @@ pub fn parse_listening_port(line: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn surefire_debug_gets_a_pinned_port_that_can_be_read_back() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let plain = argv(&["mvn", "-Dtest=A#b", "-Dmaven.surefire.debug", "test"]);
+        let pinned = pin_surefire_debug_port(&plain, 4711).unwrap();
+        assert_eq!(surefire_debug_port(&pinned), Some(4711));
+        assert_eq!(pinned[1], "-Dtest=A#b");
+        assert!(pin_surefire_debug_port(&argv(&["gradle", "test"]), 1).is_none());
+        // Someone else's explicit address is respected, not rewritten.
+        let own = argv(&["mvn", "-Dmaven.surefire.debug=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=localhost:6006"]);
+        assert!(pin_surefire_debug_port(&own, 1).is_none());
+        assert_eq!(surefire_debug_port(&own), Some(6006));
+    }
+
     #[test]
     fn gradle_test_argv_gets_a_clean_task_so_reruns_are_not_up_to_date() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
