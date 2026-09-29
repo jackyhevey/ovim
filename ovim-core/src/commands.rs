@@ -703,6 +703,14 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
             editor.run_test_all();
             ok("Running all tests...")
         }
+        "TestDebug" | "TD" => {
+            editor.debug_test_nearest();
+            ok("Debugging nearest test...")
+        }
+        "TestDebugFile" | "TDF" => {
+            editor.debug_test_file();
+            ok("Debugging tests of current file...")
+        }
         "TestLast" | "TL" => {
             editor.run_test_last();
             ok("Re-running last test...")

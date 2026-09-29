@@ -1181,3 +1181,143 @@ async fn running_a_hyperion_run_lens_goes_through_resolve_launch_at_the_lens_not
     assert!(s.console_text().contains("real-jvm"));
     s.stop_lsp().await;
 }
+
+// ---------------------------------------------------------------------------
+// Java tests through the normal test-runner keys (<Space>tn, :TestFile, ...)
+// ---------------------------------------------------------------------------
+
+const CALC_TEST: &str = "package com.example.app;\n\
+\n\
+import org.junit.jupiter.api.Test;\n\
+\n\
+class CalcTest {\n\
+    @Test\n\
+    void adds() {\n\
+        assertEquals(2, 1 + 1);\n\
+    }\n\
+\n\
+    @Test\n\
+    void subtracts() {\n\
+        assertEquals(1, 2 - 1);\n\
+    }\n\
+}\n";
+
+impl Session {
+    /// A Gradle project whose `gradlew` is a script: records its arguments and
+    /// writes a JUnit report in which `subtracts` fails.
+    fn fake_gradle_project(&self) -> PathBuf {
+        let app = self.root.join("app");
+        let src = app.join("src/test/java/com/example/app");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(self.root.join("gradle/wrapper")).unwrap();
+        std::fs::write(self.root.join("gradle/wrapper/gradle-wrapper.jar"), "").unwrap();
+        std::fs::write(self.root.join("settings.gradle.kts"), "include(\"app\")\n").unwrap();
+        std::fs::write(app.join("build.gradle.kts"), "").unwrap();
+        let file = src.join("CalcTest.java");
+        std::fs::write(&file, CALC_TEST).unwrap();
+        self.write_script(
+            "gradlew",
+            "echo \"$@\" >> gradle-args.txt\n\
+             mkdir -p app/build/test-results/test\n\
+             cat > app/build/test-results/test/TEST-com.example.app.CalcTest.xml <<'EOF'\n\
+             <testsuite name=\"com.example.app.CalcTest\">\n\
+             <testcase name=\"adds()\" classname=\"com.example.app.CalcTest\" time=\"0.01\"/>\n\
+             <testcase name=\"subtracts()\" classname=\"com.example.app.CalcTest\" time=\"0.2\">\n\
+             <failure message=\"expected: &lt;1&gt; but was: &lt;2&gt;\" type=\"AssertionFailedError\">AssertionFailedError\n\
+             \tat org.junit.jupiter.api.Assertions.fail(Assertions.java:1)\n\
+             \tat com.example.app.CalcTest.subtracts(CalcTest.java:13)\n\
+             </failure></testcase></testsuite>\n\
+             EOF\n\
+             exit 1",
+        );
+        file
+    }
+
+    fn gradle_invocations(&self) -> Vec<String> {
+        std::fs::read_to_string(self.root.join("gradle-args.txt"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn space_t_n_runs_the_java_test_under_the_cursor_and_fills_the_test_panel() {
+    use ovim_core::editor::TestRunStatus;
+    let mut s = Session::new(&resolve_commands()).await;
+    // The server has no answer for a .java file: the command is composed
+    // from the file itself.
+    let file = s.fake_gradle_project();
+    s.test.editor.load_file(file.display().to_string()).unwrap();
+    s.test.set_cursor(12, 8); // inside `subtracts`
+    s.test.keys(" tn");
+    s.until("the test run to finish", |s| s.run_finished())
+        .await;
+
+    assert_eq!(
+        s.gradle_invocations(),
+        vec![":app:cleanTest :app:test --tests com.example.app.CalcTest.subtracts --console=plain"]
+    );
+    let panel = s.test.editor.test_panel();
+    let run = panel.latest().expect("the test panel records the run");
+    assert_eq!(run.status, TestRunStatus::Failed);
+    assert_eq!(run.scope_label, "nearest");
+    assert_eq!(run.summary.as_deref(), Some("1 passed, 1 failed"));
+    let text = run.lines.join("\n");
+    assert!(text.contains("✓ CalcTest.adds"), "{text}");
+    assert!(text.contains("✗ CalcTest.subtracts"), "{text}");
+    assert!(text.contains("expected: <1> but was: <2>"), "{text}");
+    assert!(text.contains("at com.example.app.CalcTest.subtracts(CalcTest.java:13)"));
+    assert!(
+        !text.contains("org.junit"),
+        "framework frames are hidden: {text}"
+    );
+    assert_eq!(run.failures.len(), 1);
+    let location = run.failures[0].location.as_ref().unwrap();
+    assert!(location.path.ends_with("CalcTest.java"));
+    assert_eq!(location.line, 13);
+    // Failures reach the quickfix list too.
+    let entry = &s.test.editor.quickfix_list().entries()[0];
+    assert_eq!(entry.lnum, 13);
+    assert!(
+        entry.text.contains("CalcTest.subtracts()"),
+        "{}",
+        entry.text
+    );
+
+    // :TestLast replays the same request; :TestFile selects the class.
+    s.test.command("TestFile");
+    s.until("the file run to finish", |s| {
+        s.run_finished() && s.gradle_invocations().len() == 2
+    })
+    .await;
+    assert_eq!(
+        s.gradle_invocations()[1],
+        ":app:cleanTest :app:test --tests com.example.app.CalcTest --console=plain"
+    );
+    s.test.command("TestLast");
+    s.until("the rerun to finish", |s| {
+        s.run_finished() && s.gradle_invocations().len() == 3
+    })
+    .await;
+    assert_eq!(s.gradle_invocations()[2], s.gradle_invocations()[1]);
+    s.stop_lsp().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_java_file_without_a_build_file_says_why_no_test_can_run() {
+    let mut s = Session::new(&resolve_commands()).await;
+    let lone = s.root.join("Lone.java");
+    std::fs::write(&lone, CALC_TEST).unwrap();
+    s.test.editor.load_file(lone.display().to_string()).unwrap();
+    s.test.keys(" tn");
+    s.until("the failure message", |s| {
+        s.test
+            .editor
+            .status_message()
+            .contains("No Gradle or Maven project")
+    })
+    .await;
+    s.stop_lsp().await;
+}

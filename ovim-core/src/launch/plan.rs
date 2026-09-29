@@ -239,6 +239,8 @@ struct RawTest {
     cwd: Option<String>,
     #[serde(default)]
     reports_dir: Option<String>,
+    #[serde(default)]
+    gradle_task: Option<String>,
 }
 
 fn string_list(value: Option<&Value>) -> Vec<String> {
@@ -352,9 +354,10 @@ pub fn plan_from_resolved(value: &Value) -> Result<Option<LaunchPlan>, String> {
                 .cwd
                 .map(PathBuf::from)
                 .unwrap_or_else(|| project_root.clone());
+            let clean = |argv: Vec<String>| with_clean_test(argv, test.gradle_task.as_deref());
             plan.task = Some(TaskPlan {
-                argv: test.argv,
-                debug_argv: test.debug_argv.filter(|a| !a.is_empty()),
+                argv: clean(test.argv),
+                debug_argv: test.debug_argv.filter(|a| !a.is_empty()).map(clean),
                 cwd,
                 class_name: test.class_name,
                 method_name: test.method_name,
@@ -370,6 +373,34 @@ pub fn plan_from_resolved(value: &Value) -> Result<Option<LaunchPlan>, String> {
         }
     }
     Ok(Some(plan))
+}
+
+/// Gradle skips an unchanged test task as UP-TO-DATE and writes no new
+/// reports, so rerunning a test would show nothing. Runs `cleanTest` (in the
+/// same project) first. Other argv (Maven, custom) is returned as is.
+pub fn with_clean_test(mut argv: Vec<String>, gradle_task: Option<&str>) -> Vec<String> {
+    let Some(task) = gradle_task.filter(|t| t.ends_with("test") || t.ends_with("Test")) else {
+        return argv;
+    };
+    let Some(pos) = argv.iter().position(|a| a == task) else {
+        return argv;
+    };
+    let clean = match task.rsplit_once(':') {
+        Some((project, name)) => format!("{project}:clean{}", capitalize(name)),
+        None => format!("clean{}", capitalize(task)),
+    };
+    if !argv.contains(&clean) {
+        argv.insert(pos, clean);
+    }
+    argv
+}
+
+fn capitalize(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 // ---- .ovim/debug.toml and hyperion.runConfigurations ----
@@ -518,6 +549,27 @@ pub fn parse_listening_port(line: &str) -> Option<u16> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn gradle_test_argv_gets_a_clean_task_so_reruns_are_not_up_to_date() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            with_clean_test(
+                argv(&["gradlew", ":app:test", "--tests", "A"]),
+                Some(":app:test")
+            ),
+            argv(&["gradlew", ":app:cleanTest", ":app:test", "--tests", "A"])
+        );
+        assert_eq!(
+            with_clean_test(argv(&["gradle", "test"]), Some("test")),
+            argv(&["gradle", "cleanTest", "test"])
+        );
+        // Maven (no gradleTask) and already-clean argv are untouched.
+        let mvn = argv(&["mvn", "-Dtest=A", "test"]);
+        assert_eq!(with_clean_test(mvn.clone(), None), mvn);
+        let done = argv(&["gradle", ":a:cleanTest", ":a:test"]);
+        assert_eq!(with_clean_test(done.clone(), Some(":a:test")), done);
+    }
+
     use super::*;
 
     fn sample_main() -> Value {

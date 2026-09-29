@@ -279,6 +279,16 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
             editor.run_test_all();
             editor.reset_input_state();
         }
+        (&['t'], 'd') => {
+            // <Space>td - Debug the nearest test (Java / Kotlin)
+            editor.debug_test_nearest();
+            editor.reset_input_state();
+        }
+        (&['t'], 'D') => {
+            // <Space>tD - Debug the file's tests (Java / Kotlin)
+            editor.debug_test_file();
+            editor.reset_input_state();
+        }
         (&['t'], 'l') => {
             // <Space>tl - Test last (re-run last test command)
             editor.run_test_last();
