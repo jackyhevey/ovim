@@ -452,8 +452,9 @@ pub struct LspState {
     pub active_lsp_servers: HashMap<String, String>,
     /// Flag to indicate LSP needs initialization for current file
     pub needs_lsp_init: bool,
-    /// File path that needs didClose notification (set when switching files)
-    pub pending_did_close_file: Option<String>,
+    /// Documents that need a `didClose`, oldest first (a tick can close
+    /// several: a workspace edit deleting two files, `:bufdo bd`).
+    pub pending_did_close: Vec<String>,
     /// Buffer version the fold debounce is waiting on, and since when.
     pub fold_tracking: Option<(usize, std::time::Instant)>,
     /// `(header line, hidden line count)` of the fold markers currently shown.
@@ -540,7 +541,7 @@ impl LspState {
             status: String::new(),
             active_lsp_servers: HashMap::new(),
             needs_lsp_init: false,
-            pending_did_close_file: None,
+            pending_did_close: Vec::new(),
             fold_tracking: None,
             fold_markers: Vec::new(),
             workspace_edit_carriers: Vec::new(),

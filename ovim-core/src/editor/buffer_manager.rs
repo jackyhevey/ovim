@@ -326,8 +326,8 @@ impl Editor {
             self.request_diagnostics_refresh();
 
             // Mark that we need to send didClose for the old file
-            if old_file_path.is_some() {
-                self.lsp.state.pending_did_close_file = old_file_path;
+            if let Some(old) = old_file_path {
+                self.queue_lsp_did_close(old);
             }
         }
     }
@@ -369,8 +369,8 @@ impl Editor {
             self.request_diagnostics_refresh();
 
             // Mark that we need to send didClose for the old file
-            if old_file_path.is_some() {
-                self.lsp.state.pending_did_close_file = old_file_path;
+            if let Some(old) = old_file_path {
+                self.queue_lsp_did_close(old);
             }
         }
     }
@@ -389,7 +389,7 @@ impl Editor {
             // The server keeps documents open while their buffers are loaded;
             // deleting the buffer is what closes it.
             if !is_scratch_path(&path) {
-                self.lsp.state.pending_did_close_file = Some(path);
+                self.queue_lsp_did_close(path);
             }
         }
 

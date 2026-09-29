@@ -441,7 +441,7 @@ impl Editor {
             }
             lsp_types::ResourceOp::Delete(_) => {
                 self.lsp.state.document_sync.remove(&old_path);
-                self.lsp.state.pending_did_close_file = Some(old_path);
+                self.queue_lsp_did_close(old_path);
             }
             lsp_types::ResourceOp::Create(_) => {}
         }

@@ -1931,8 +1931,8 @@ impl Editor {
         self.sync_current_tab_buffer();
 
         // Mark that we need to send didClose for the old file
-        if old_file_path.is_some() {
-            self.lsp.state.pending_did_close_file = old_file_path;
+        if let Some(old) = old_file_path {
+            self.queue_lsp_did_close(old);
         }
 
         Ok(())

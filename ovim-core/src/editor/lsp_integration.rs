@@ -1518,7 +1518,7 @@ impl Editor {
 
         if let Some(old) = old_path {
             self.lsp.state.document_sync.remove(&old);
-            self.lsp.state.pending_did_close_file = Some(old);
+            self.queue_lsp_did_close(old);
         }
         if let Some(newp) = &new_path {
             // The target path may already be open on the server (e.g.
@@ -2200,12 +2200,23 @@ impl Editor {
         }
     }
 
-    /// Sends didClose notification to LSP for the pending file
-    pub async fn send_lsp_close_if_needed(&mut self) {
-        let Some(file_path) = self.lsp.state.pending_did_close_file.take() else {
-            return;
-        };
+    /// Queues a `didClose` for `path`, sent by the next
+    /// [`send_lsp_close_if_needed`](Self::send_lsp_close_if_needed).
+    pub(crate) fn queue_lsp_did_close(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        if !self.lsp.state.pending_did_close.contains(&path) {
+            self.lsp.state.pending_did_close.push(path);
+        }
+    }
 
+    /// Sends `didClose` for every queued document.
+    pub async fn send_lsp_close_if_needed(&mut self) {
+        for path in std::mem::take(&mut self.lsp.state.pending_did_close) {
+            self.send_did_close(&path).await;
+        }
+    }
+
+    async fn send_did_close(&mut self, file_path: &str) {
         // Switching away from a buffer only hides it: like other editors' LSP
         // clients (attach per loaded buffer, not per visible window) the
         // document stays open on the server while its buffer is loaded. That
@@ -2215,7 +2226,7 @@ impl Editor {
         let still_loaded = self
             .buffers
             .iter()
-            .any(|buffer| buffer.file_path() == Some(file_path.as_str()));
+            .any(|buffer| buffer.file_path() == Some(file_path));
         if still_loaded {
             return;
         }
@@ -2224,20 +2235,17 @@ impl Editor {
             return;
         };
 
-        let uri = match uri_from_file_path(&file_path) {
-            Some(u) => u,
-            None => return,
+        let Some(uri) = uri_from_file_path(file_path) else {
+            return;
         };
 
         // Get language_id from file extension
-        let language_id = match self.language_id_for_path(&file_path) {
-            Some(id) => id,
-            None => return,
+        let Some(language_id) = self.language_id_for_path(file_path) else {
+            return;
         };
 
-        let file_path_string = file_path.to_string();
         let _ = lsp.did_close_broadcast(uri, &language_id).await;
-        self.lsp.state.document_sync.remove(&file_path_string);
+        self.lsp.state.document_sync.remove(file_path);
     }
 
     // -------------------------------------------------------------------------
