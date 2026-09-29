@@ -92,6 +92,7 @@ fn project_snapshot_decorations(test: &EditorTest) -> serde_json::Value {
                 DecorationSource::InlayHint => "inlay_hint",
                 DecorationSource::Diagnostic => "diagnostic",
                 DecorationSource::CodeLens => "code_lens",
+                DecorationSource::Fold => "fold",
             }
             .to_string();
             let placement = match dec.placement {

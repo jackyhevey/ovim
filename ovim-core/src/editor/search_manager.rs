@@ -33,6 +33,16 @@ impl Editor {
         self.search.search_input.backspace()
     }
 
+    /// Removes everything before the search cursor (`CTRL-U`).
+    pub fn delete_search_to_start(&mut self) -> bool {
+        self.search.search_input.delete_to_start()
+    }
+
+    /// Removes the word before the search cursor (`CTRL-W`).
+    pub fn delete_search_word(&mut self) -> bool {
+        self.search.search_input.delete_word_backward()
+    }
+
     /// Removes the character at the search cursor.
     pub fn delete_from_search_buffer(&mut self) -> bool {
         self.search.search_input.delete()

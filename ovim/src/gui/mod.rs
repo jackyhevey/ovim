@@ -389,6 +389,8 @@ pub struct GuiSnapshot {
     pub picker: Option<GuiPicker>,
     pub completion: Option<GuiCompletion>,
     pub hover: Option<GuiHover>,
+    /// Parameter hints for the call being typed (insert mode).
+    pub signature_help: Option<GuiSignatureHelp>,
     pub file_tree: Option<GuiFileTree>,
     pub ai_chat: Option<GuiAiChat>,
     pub test_panel: Option<GuiTestPanel>,
@@ -424,6 +426,8 @@ pub struct GuiLine {
     pub breakpoint: Option<String>,
     /// The debugger is stopped on this line.
     pub executing: bool,
+    /// Number of lines hidden below this line by a closed fold.
+    pub folded: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -575,6 +579,20 @@ pub struct GuiCompletionItem {
     pub label: String,
     pub detail: Option<String>,
     pub kind: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiSignatureHelp {
+    /// Signature text before / of / after the active parameter.
+    pub before: String,
+    pub active: String,
+    pub after: String,
+    pub documentation: Option<String>,
+    pub signature_index: usize,
+    pub signature_count: usize,
+    pub line: usize,
+    pub display_column: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2559,6 +2577,7 @@ fn snapshot_with_cache(
                     .map(|(line, column)| display_column(buffer, line, column, tab_width)),
             }
         }),
+        signature_help: signature_help(editor, buffer, tab_width),
         file_tree: file_tree(editor),
         ai_chat: ai_chat(editor),
         test_panel: test_panel(editor),
@@ -2654,6 +2673,10 @@ fn project_lines(
     let mut projected = Vec::with_capacity(visible);
 
     'lines: for line_index in first_line..buffer.line_count() {
+        // Lines inside a closed fold are not shown.
+        if buffer.is_line_folded(line_index) {
+            continue;
+        }
         let indexed_line = buffer.line_index(line_index);
         let line_start = buffer.rope().line_to_char(line_index);
         let inline_text: std::sync::Arc<[(usize, std::sync::Arc<str>)]> = projected_decorations
@@ -2877,6 +2900,9 @@ fn project_lines(
                 diff: (!continuation).then(|| diff.clone()).flatten(),
                 breakpoint: (!continuation).then(|| breakpoint.clone()).flatten(),
                 executing: !continuation && executing,
+                folded: (!continuation)
+                    .then(|| buffer.fold_manager().folded_line_count_at(line_index))
+                    .flatten(),
             });
             if projected.len() >= visible {
                 break 'lines;
@@ -3485,7 +3511,19 @@ fn picker(editor: &Editor) -> Option<GuiPicker> {
             index,
             display: item.display.clone(),
             location: item.location.clone(),
-            detail: item.content.clone(),
+            detail: if picker.is_symbol_search() {
+                // `kind · container  file:line`
+                let columns =
+                    ovim_core::editor::project_nav::symbol_row_columns(item, picker.base_dir());
+                Some(match &columns.container {
+                    Some(container) => {
+                        format!("{} \u{b7} {}  {}", columns.kind, container, columns.file)
+                    }
+                    None => format!("{}  {}", columns.kind, columns.file),
+                })
+            } else {
+                item.content.clone()
+            },
             matched: item.match_positions.clone(),
         })
         .collect();
@@ -3498,6 +3536,32 @@ fn picker(editor: &Editor) -> Option<GuiPicker> {
         selected,
         total,
         items,
+    })
+}
+
+fn signature_help(
+    editor: &Editor,
+    buffer: &crate::buffer::Buffer,
+    tab_width: usize,
+) -> Option<GuiSignatureHelp> {
+    if editor.mode() != Mode::Insert {
+        return None;
+    }
+    let signature = editor.signature_help()?;
+    let (before, active, after) = signature.label_segments();
+    let (line, column) = signature.anchor;
+    Some(GuiSignatureHelp {
+        before,
+        active,
+        after,
+        documentation: signature
+            .parameter_documentation
+            .clone()
+            .or_else(|| signature.documentation.clone()),
+        signature_index: signature.signature_index,
+        signature_count: signature.signature_count,
+        line,
+        display_column: display_column(buffer, line, column, tab_width),
     })
 }
 

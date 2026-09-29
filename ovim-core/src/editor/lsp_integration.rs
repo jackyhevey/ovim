@@ -374,6 +374,8 @@ impl Editor {
 
         // --- Navigation ---
         changed |= self.poll_hover_slot();
+        changed |= self.poll_signature_help_slot();
+        changed |= self.poll_folding_slot();
         changed |= self.poll_goto_slots();
 
         // --- Completion ---
@@ -530,6 +532,7 @@ impl Editor {
                                 crate::modeline::Modeline::parse(&buffer.rope().to_string());
                             self.initialize_buffer_indent_options(&mut buffer);
                             self.initialize_buffer_git_status(&mut buffer);
+                            super::buffer_manager::mark_library_source_read_only(&mut buffer);
                             self.buffers[self.current_buffer_index] = buffer;
                             if let Some(modeline) = modeline.as_ref() {
                                 self.apply_modeline(modeline);
@@ -843,6 +846,12 @@ impl Editor {
         let Some(result) = self.lsp.slots.completion.poll_with_timeout(timeout) else {
             return false;
         };
+        // The request is over whatever the answer: never leave the
+        // "Requesting completions..." status behind (an empty result used to
+        // leave it on screen indefinitely).
+        if self.lsp_status() == lsp_modules::completion::REQUESTING_STATUS {
+            self.set_lsp_status(String::new());
+        }
 
         match result {
             Ok(result) => {
@@ -1075,6 +1084,7 @@ impl Editor {
         self.lsp.state.diagnostic_count = (0, 0, 0, 0);
         self.lsp.state.blame_mouse_hover = false;
         self.lsp.state.hover_info = None;
+        self.lsp.state.signature_help = None;
         self.lsp.state.hover_scroll = 0;
         self.lsp.state.hover_h_scroll = 0;
         self.lsp.state.hover_position = None;
@@ -2205,6 +2215,13 @@ impl Editor {
         if std::mem::take(&mut self.lsp.intents.hover) {
             let _ = self.hover_impl().await;
         }
+        if std::mem::take(&mut self.lsp.intents.folding_ranges) {
+            self.request_folding_ranges().await;
+        }
+        self.maintain_folds().await;
+        if std::mem::take(&mut self.lsp.intents.signature_help) {
+            let _ = self.signature_help_impl().await;
+        }
         if std::mem::take(&mut self.lsp.intents.completion) {
             let _ = self.completion_impl().await;
         }
@@ -2419,6 +2436,64 @@ mod tests {
     use crate::lsp::uri_from_file_path;
     use lsp_types::{CompletionItem, InlayHint, InlayHintLabel, Location, Position, Range};
     use tokio::sync::oneshot;
+
+    fn location(path: &std::path::Path, line: u32, character: u32) -> Location {
+        Location {
+            uri: uri_from_file_path(path).unwrap(),
+            range: Range::new(
+                Position::new(line, character),
+                Position::new(line, character),
+            ),
+        }
+    }
+
+    /// OV-00454: an LSP jump is a jump. `<C-o>` returns to where gd/gi/gr was
+    /// pressed (also across files) and `<C-i>` goes forward again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn ctrl_o_and_ctrl_i_follow_lsp_jumps_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("A.java");
+        let b = dir.path().join("B.java");
+        std::fs::write(&a, "a0\na1\na2\na3\na4\n").unwrap();
+        std::fs::write(&b, "b0\nb1\nb2\nb3\nb4\nb5\n").unwrap();
+        let mut editor = Editor::default();
+        editor.load_file(&a).unwrap();
+        editor
+            .buffer_mut()
+            .cursor_mut()
+            .set_position(2, crate::unicode::GraphemeCol(1));
+
+        // gd from A:3 into B:5 (cross-file), then a second jump inside B.
+        assert!(editor.handle_goto_location(Some(location(&b, 4, 0)), "Definition", "t", false));
+        assert!(editor.handle_goto_location(Some(location(&b, 1, 0)), "Definition", "t", false));
+        assert_eq!(editor.buffer().cursor().line(), 1);
+
+        assert!(editor.jump_back());
+        assert_eq!(
+            editor.buffer().file_path().map(std::path::Path::new),
+            Some(b.canonicalize().unwrap().as_path())
+        );
+        assert_eq!(editor.buffer().cursor().line(), 4);
+        assert!(editor.jump_back());
+        assert_eq!(
+            editor.buffer().file_path().map(std::path::Path::new),
+            Some(a.canonicalize().unwrap().as_path())
+        );
+        assert_eq!(
+            (
+                editor.buffer().cursor().line(),
+                editor.buffer().cursor().col().0
+            ),
+            (2, 1)
+        );
+        assert!(!editor.jump_back(), "nothing older than the first jump");
+
+        assert!(editor.jump_forward());
+        assert_eq!(editor.buffer().cursor().line(), 4);
+        assert!(editor.jump_forward());
+        assert_eq!(editor.buffer().cursor().line(), 1);
+        assert!(!editor.jump_forward());
+    }
 
     /// The server keeps a document open while its buffer is loaded, so the
     /// diagnostics of files the user switched away from stay available (the
@@ -2870,6 +2945,33 @@ mod tests {
         assert!(editor.poll_pending_completion_response());
         assert!(editor.completion_menu().is_visible());
         assert_eq!(editor.completion_menu().items().len(), 1);
+    }
+
+    /// OV-00456: an empty completion answer must not leave the
+    /// "Requesting completions..." status on screen.
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_completion_result_clears_the_requesting_status() {
+        let mut editor = Editor::with_content("let x = fo");
+        editor.set_file_path("/tmp/a.rs".to_string());
+        editor.set_mode(crate::mode::Mode::Insert);
+        let effective_path = editor.buffer().file_path().unwrap().to_string();
+        let bv = editor.buffer().version();
+        editor.set_lsp_status(lsp_modules::completion::REQUESTING_STATUS.to_string());
+        fire_completion_result(
+            &mut editor,
+            CompletionResult {
+                items: Vec::new(),
+                file_path: effective_path,
+                buffer_version: bv,
+                synced_content: None,
+                synced_lsp_version: None,
+            },
+        );
+        editor.poll_pending_completion_response();
+        assert_ne!(
+            editor.lsp_status(),
+            lsp_modules::completion::REQUESTING_STATUS
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

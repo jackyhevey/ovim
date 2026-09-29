@@ -17,6 +17,35 @@ use shell::{handle_read_shell_command, handle_shell_command, handle_write_to_com
 
 /// Handles input in Command mode
 pub fn handle_command_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()> {
+    if let Some(control) = super::helpers::prompt_control(&key_event) {
+        use super::helpers::PromptControl;
+        match control {
+            PromptControl::Cancel => {
+                return handle_command_mode(
+                    editor,
+                    KeyEvent::new(KeyCode::Esc, crate::Modifiers::NONE),
+                );
+            }
+            PromptControl::Backspace => {
+                return handle_command_mode(
+                    editor,
+                    KeyEvent::new(KeyCode::Backspace, crate::Modifiers::NONE),
+                );
+            }
+            PromptControl::DeleteToStart => {
+                editor.delete_command_line_to_start();
+                update_path_completion(editor);
+            }
+            PromptControl::DeleteWord => {
+                editor.delete_command_line_word();
+                update_path_completion(editor);
+            }
+            PromptControl::Home => editor.move_command_cursor_home(),
+            PromptControl::End => editor.move_command_cursor_end(),
+            PromptControl::Ignore => {}
+        }
+        return Ok(());
+    }
     match key_event.code {
         KeyCode::Char(ch) => {
             editor.append_to_command_line(ch);

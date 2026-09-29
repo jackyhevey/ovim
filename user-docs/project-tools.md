@@ -75,6 +75,27 @@ publishes diagnostics for documents it has open; Ovim keeps every loaded buffer
 open on the server, so files you switched away from stay in the list until the
 buffer is deleted.
 
+Symbol rows read `<kind glyph> Name  kind · container      relative/file:line`, in
+the language server's order.
+
+## Signature help and folding
+
+Typing `(` or `,` in a call shows the signature above the line with the active
+parameter highlighted and an `(n/m)` marker when there are overloads; every edit
+or cursor move keeps it in sync, `Esc` or leaving the call dismisses it.
+
+Folds use Vim's commands: `zc`/`zo`/`za` (one level), `zC`/`zO`/`zA`
+(recursive), `zR`/`zM` (all), `zv`, `zn`/`zN`/`zi`, `zd`/`zD`/`zE`, `zj`/`zk`,
+and `zf{motion}` for manual folds. Automatic folds come from the language
+server (`foldingRange`) with an indentation fallback, and are computed the first
+time you use a fold command in a buffer. A closed fold is one line: `j`/`k`
+step over it, `dd`/`yy` take all of it, and the header shows `⋯ N lines`.
+
+`Ctrl-O` / `Ctrl-I` (Tab) walk the jump list across files, including jumps made
+with `gd`, `gi` and `gr`. In the rename prompt and the `:` and `/` prompts
+`Ctrl-U` deletes to the start, `Ctrl-W` the previous word, `Ctrl-H` is backspace
+and `Ctrl-C` cancels.
+
 ## Breadcrumbs
 
 The class and method around the cursor (`Circle › area`) show in the status

@@ -161,6 +161,10 @@ impl InputHandler {
             return Ok(());
         }
 
+        let fold_prev = {
+            let cursor = editor.buffer().cursor();
+            (cursor.line(), cursor.col())
+        };
         let completing_insert_normal = editor.editing.insert_normal_pending;
         let mapping_handled = if allow_remap {
             Self::try_handle_mode_mapping(editor, key_event, remap_depth)?
@@ -241,6 +245,10 @@ impl InputHandler {
         // deliberate sub-row scroll (e.g. Ctrl-E) whose cursor sits off-screen by
         // design. Only run the post-command scroll update at this (outer) level
         // when we handled the key directly.
+        // Folds: keep ranges aligned with the text, keep the cursor out of
+        // closed folds, refresh the header markers.
+        editor.sync_folds_after_key(fold_prev.0, fold_prev.1);
+
         let is_viewport_pending = matches!(editor.pending_command(), Some('z') | Some('Z'));
         let preserve_viewport = editor.viewport.take_preserve_after_input();
         if !preserve_viewport && !is_viewport_pending && !mapping_handled {

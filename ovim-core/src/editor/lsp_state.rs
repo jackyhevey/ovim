@@ -297,6 +297,26 @@ pub struct AvailableCodeAction {
     pub resolved: bool,
 }
 
+/// Display model of one signature help popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignatureHelpState {
+    /// Full signature label, e.g. `join(String delimiter, String... parts)`.
+    pub label: String,
+    /// Char range (not bytes) of the active parameter within `label`.
+    pub active_param: Option<(usize, usize)>,
+    /// Zero-based index of the active parameter, when known.
+    pub active_param_index: Option<usize>,
+    /// Which overload is shown (zero-based) and how many the server offered.
+    pub signature_index: usize,
+    pub signature_count: usize,
+    /// Signature documentation (markdown/plain), if any.
+    pub documentation: Option<String>,
+    /// Documentation of the active parameter, if any.
+    pub parameter_documentation: Option<String>,
+    /// Cursor position `(line, grapheme col)` the popup is anchored to.
+    pub anchor: (usize, usize),
+}
+
 /// LSP-related state for the editor
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LspResultType {
@@ -321,6 +341,8 @@ pub struct LspIntents {
     pub goto_implementation_new_tab: bool,
     pub goto_type: bool,
     pub hover: bool,
+    pub folding_ranges: bool,
+    pub signature_help: bool,
     pub completion: bool,
     pub format_document: bool,
     pub code_actions: bool,
@@ -392,6 +414,8 @@ pub struct LspState {
     pub diagnostic_count: (usize, usize, usize, usize),
     /// Hover information to display (from LSP)
     pub hover_info: Option<String>,
+    /// Parameter-hints popup for the call being typed (insert mode).
+    pub signature_help: Option<Box<SignatureHelpState>>,
     /// Nonmodal commit details opened by pointing at the blame gutter.
     pub blame_mouse_hover: bool,
     /// Scroll offset for hover window (line number)
@@ -410,6 +434,15 @@ pub struct LspState {
     pub needs_lsp_init: bool,
     /// File path that needs didClose notification (set when switching files)
     pub pending_did_close_file: Option<String>,
+    /// Buffer version the fold debounce is waiting on, and since when.
+    pub fold_tracking: Option<(usize, std::time::Instant)>,
+    /// `(header line, hidden line count)` of the fold markers currently shown.
+    pub fold_markers: Vec<(usize, usize)>,
+    /// Buffers created purely to carry a workspace edit for a file the user
+    /// never opened (OV-00450). Only these may be written through to disk;
+    /// a buffer the user opened, even if hidden, is never persisted behind
+    /// their back.
+    pub workspace_edit_carriers: Vec<crate::buffer::BufferId>,
     /// File-explorer rename waiting for its `willRenameFiles` round trip.
     pub pending_file_rename: Option<(std::path::PathBuf, String)>,
     /// Server `showMessageRequest`s waiting their turn, the one currently
@@ -478,6 +511,7 @@ impl LspState {
             lsp_manager: None,
             diagnostic_count: (0, 0, 0, 0),
             hover_info: None,
+            signature_help: None,
             blame_mouse_hover: false,
             hover_scroll: 0,
             hover_h_scroll: 0,
@@ -487,6 +521,9 @@ impl LspState {
             active_lsp_servers: HashMap::new(),
             needs_lsp_init: false,
             pending_did_close_file: None,
+            fold_tracking: None,
+            fold_markers: Vec::new(),
+            workspace_edit_carriers: Vec::new(),
             pending_file_rename: None,
             hierarchy: None,
             queued_message_requests: Default::default(),
