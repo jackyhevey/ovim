@@ -202,7 +202,8 @@ impl DapManager {
     /// Adds a line to the debug console (shown in the run console).
     pub fn log_console(&mut self, text: String) {
         self.state.output_lines.push(format!("[console] {text}"));
-        self.console_output.push(("console".to_string(), format!("{text}\n")));
+        self.console_output
+            .push(("console".to_string(), format!("{text}\n")));
     }
 
     /// Returns (once) how the last session ended.

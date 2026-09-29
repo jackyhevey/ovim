@@ -589,14 +589,38 @@ async fn a_broken_debug_toml_is_reported_not_silently_ignored() {
 struct DebugSession {
     inner: Session,
     dap_dir: PathBuf,
+    _jdk: tokio::sync::MutexGuard<'static, ()>,
 }
 
+/// Port the fake JVM claims to listen on (the fake adapter does not connect).
+const FAKE_JDWP_PORT: u16 = 41999;
+
 impl DebugSession {
+    /// The debuggee is a fake JVM that announces its JDWP port and then
+    /// echoes its stdin until EOF.
     async fn new(commands: &[&str]) -> Self {
+        Self::with_jvm(
+            commands,
+            "while read line; do echo \"in:$line\"; done\nexit 0",
+        )
+        .await
+    }
+
+    /// `after_listening` is the fake JVM's script after it has printed the
+    /// `Listening for transport` line.
+    async fn with_jvm(commands: &[&str], after_listening: &str) -> Self {
+        let jdk = JDK_LOCK.lock().await;
         let inner = Session::new(commands).await;
+        inner.fake_java(&format!(
+            "echo 'Listening for transport dt_socket at address: {FAKE_JDWP_PORT}'\n{after_listening}"
+        ));
         let dap_dir = inner.root.join("dap");
         std::fs::create_dir_all(&dap_dir).unwrap();
-        Self { inner, dap_dir }
+        Self {
+            inner,
+            dap_dir,
+            _jdk: jdk,
+        }
     }
 
     fn adapter(&self, scenario: Value) -> (String, Vec<String>) {
@@ -643,15 +667,17 @@ async fn wait_gone(pid: i64) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn debug_at_cursor_launches_through_the_adapter_and_keeps_output_after_it_ends() {
-    let mut d = DebugSession::new(&resolve_commands()).await;
+async fn debug_at_cursor_starts_the_jvm_itself_attaches_the_adapter_and_keeps_output_after_it_ends()
+{
+    let mut d = DebugSession::with_jvm(
+        &resolve_commands(),
+        "echo hello\necho boom >&2\nsleep 0.5\nexit 2",
+    )
+    .await;
     let adapter = d.adapter(json!({
         "on_configuration_done": [
-            {"event": "output", "body": {"category": "stdout", "output": "hello\nwor"}},
-            {"event": "output", "body": {"category": "stdout", "output": "ld\n"}},
-            {"event": "output", "body": {"category": "stderr", "output": "boom\n"}},
-            {"event": "exited", "body": {"exitCode": 2}, "delay": 0.2},
-            {"event": "terminated"}
+            {"event": "output", "body": {"category": "stdout", "output": "adapter chatter\n"}, "delay": 0.1},
+            {"event": "terminated", "delay": 0.2}
         ]
     }));
     d.inner.script_resolve(d.inner.main_plan(None));
@@ -664,27 +690,19 @@ async fn debug_at_cursor_launches_through_the_adapter_and_keeps_output_after_it_
         .until("the session to end", |s| s.run_finished())
         .await;
 
-    let launch = d.requests("launch");
-    assert_eq!(launch.len(), 1);
-    let arguments = &launch[0]["arguments"];
-    assert_eq!(arguments["mainClass"], "com.example.Main");
-    assert_eq!(arguments["classpath"], "/cp/classes");
-    assert_eq!(arguments["projectRoot"], d.inner.root.to_str().unwrap());
-    assert_eq!(arguments["env"]["GREETING"], "hi");
-    let order: Vec<String> = [
-        "initialize",
-        "launch",
-        "setBreakpoints",
-        "configurationDone",
-    ]
-    .iter()
-    .filter(|c| !d.requests(c).is_empty())
-    .map(|c| c.to_string())
-    .collect();
+    // ovim owns the JVM; the adapter attaches to the port it announced.
     assert!(
-        order.contains(&"initialize".to_string())
-            && order.contains(&"configurationDone".to_string())
+        d.requests("launch").is_empty(),
+        "no DAP launch: ovim spawns the JVM"
     );
+    let attach = d.requests("attach");
+    assert_eq!(attach.len(), 1);
+    assert_eq!(attach[0]["arguments"]["port"], FAKE_JDWP_PORT);
+    assert_eq!(
+        attach[0]["arguments"]["projectRoot"],
+        d.inner.root.to_str().unwrap()
+    );
+    assert!(!d.requests("configurationDone").is_empty());
 
     let run = d.inner.test.editor.run_console().viewed().unwrap();
     let out: Vec<(LineKind, &str)> = run
@@ -693,12 +711,8 @@ async fn debug_at_cursor_launches_through_the_adapter_and_keeps_output_after_it_
         .map(|l| (l.kind, l.text.as_str()))
         .collect();
     assert!(out.contains(&(LineKind::Stdout, "hello")), "{out:?}");
-    assert!(
-        out.contains(&(LineKind::Stdout, "world")),
-        "split chunks are joined: {out:?}"
-    );
     assert!(out.contains(&(LineKind::Stderr, "boom")), "{out:?}");
-    assert_eq!(run.exit_code, Some(2), "the exited event's code is shown");
+    assert_eq!(run.exit_code, Some(2), "the JVM's own exit code is shown");
     assert_eq!(d.inner.outcome(), RunOutcome::Failed);
 
     // Output survives the session; the adapter and UI state are gone.
@@ -711,6 +725,38 @@ async fn debug_at_cursor_launches_through_the_adapter_and_keeps_output_after_it_
         !process_alive(pid),
         "the adapter process must not linger after terminate"
     );
+    d.inner.stop_lsp().await;
+}
+
+/// OV-00444: a debugged program reads the same stdin as a run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_debugged_program_takes_run_input_and_eof() {
+    let mut d = DebugSession::new(&resolve_commands()).await;
+    let adapter = d.adapter(json!({}));
+    d.inner.script_resolve(d.inner.main_plan(None));
+    d.inner
+        .test
+        .editor
+        .launch_at_cursor_with(ovim_core::launch::LaunchMode::Debug, Some(adapter));
+    let dap_dir = d.dap_dir.clone();
+    d.inner
+        .until("configurationDone", |_| {
+            !dap_requests(&dap_dir, "configurationDone").is_empty()
+        })
+        .await;
+    d.inner.test.command("RunInput hi there");
+    d.inner
+        .until("the echo", |s| s.console_text().contains("in:hi there"))
+        .await;
+    assert!(d.inner.console_text().contains("» hi there"));
+    d.inner.test.command("RunEof");
+    d.inner
+        .until("the program to end", |s| {
+            s.console_text().contains("Process finished")
+        })
+        .await;
+    d.inner.test.keys(" ds");
+    d.inner.until("stopped", |s| s.run_finished()).await;
     d.inner.stop_lsp().await;
 }
 
@@ -1620,7 +1666,9 @@ async fn eval_command_uses_the_repl_context_and_hover_uses_hover() {
     let mut d = stopped_session(stopped_scenario).await;
     d.inner.test.command("eval n * 2");
     d.inner
-        .until("the eval", |s| s.test.editor.status_message().contains("= 6"))
+        .until("the eval", |s| {
+            s.test.editor.status_message().contains("= 6")
+        })
         .await;
     let contexts: Vec<Value> = d
         .requests("evaluate")
@@ -1653,7 +1701,10 @@ async fn stopping_in_another_file_opens_it_and_marks_only_that_buffer() {
         "the stop opens the file"
     );
     assert_eq!(d.inner.test.editor.buffer().cursor().line(), 2);
-    assert_eq!(d.inner.test.editor.execution_line_in_current_buffer(), Some(3));
+    assert_eq!(
+        d.inner.test.editor.execution_line_in_current_buffer(),
+        Some(3)
+    );
 
     // Back in the original file the marker must not show up on line 3.
     let main = d.inner.root.join("Main.controlled");

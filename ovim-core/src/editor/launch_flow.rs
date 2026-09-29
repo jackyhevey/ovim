@@ -279,7 +279,7 @@ impl Editor {
             self.log_console(run_id, LineKind::System, format!("» {text}"));
         } else {
             self.set_status_message(
-                "The running program does not take input (only Run, not Debug or tests, feeds stdin)",
+                "The running program does not take input (only a Run or Debug of a main feeds stdin, not tests)",
             );
         }
     }
@@ -1167,11 +1167,7 @@ impl Editor {
             }
             (PlanKind::Main, _) if plan.build.is_some() => self.start_build(job),
             (PlanKind::Main, LaunchMode::Run) => self.start_run_process(job),
-            (PlanKind::Main, LaunchMode::Debug) => {
-                let launch = plan.launch.as_ref().expect("main plans carry launch");
-                let request = DapLaunchRequest::Launch(launch.dap_arguments.clone());
-                self.begin_debugger(job, request);
-            }
+            (PlanKind::Main, LaunchMode::Debug) => self.start_debug_process(job),
             (PlanKind::Test | PlanKind::Task, LaunchMode::Run) => self.start_run_process(job),
             (PlanKind::Test | PlanKind::Task, LaunchMode::Debug) => self.start_debug_task(job),
         }
@@ -1192,8 +1188,8 @@ impl Editor {
         stage: Stage,
     ) {
         // Only the program itself reads stdin, not builds or test tasks.
-        let interactive =
-            stage == Stage::Running && job.plan.as_ref().is_some_and(|p| p.kind == PlanKind::Main);
+        let interactive = matches!(stage, Stage::Running | Stage::AwaitingDebugPort { .. })
+            && job.plan.as_ref().is_some_and(|p| p.kind == PlanKind::Main);
         self.log_console(
             job.run_id,
             LineKind::System,
@@ -1240,6 +1236,24 @@ impl Editor {
         };
         job.started_wall = SystemTime::now();
         self.spawn_step(job, &spec, RunPhase::Running, Stage::Running);
+    }
+
+    /// Debugging a `main`: ovim starts the JVM itself (suspended, listening
+    /// on a free port) so the program has the same stdin, output and process
+    /// group handling as Run; the adapter then attaches.
+    fn start_debug_process(&mut self, job: &mut LaunchJob) {
+        let Some(launch) = job.plan.as_ref().and_then(|p| p.launch.clone()) else {
+            return;
+        };
+        job.started_wall = SystemTime::now();
+        self.spawn_step(
+            job,
+            &launch.debug_command(),
+            RunPhase::WaitingForDebugger,
+            Stage::AwaitingDebugPort {
+                deadline: Instant::now() + self.launch.debug_port_timeout,
+            },
+        );
     }
 
     fn start_debug_task(&mut self, job: &mut LaunchJob) {
@@ -1573,11 +1587,7 @@ impl Editor {
         job.clear_log();
         match (plan.kind, job.request.mode) {
             (_, LaunchMode::Run) => self.start_run_process(job),
-            (_, LaunchMode::Debug) => {
-                let launch = plan.launch.as_ref().expect("built plans are main plans");
-                let request = DapLaunchRequest::Launch(launch.dap_arguments.clone());
-                self.begin_debugger(job, request);
-            }
+            (_, LaunchMode::Debug) => self.start_debug_process(job),
         }
     }
 
@@ -1843,22 +1853,22 @@ impl Editor {
                 let end = job
                     .session_end
                     .unwrap_or(crate::dap::SessionEnd { exit_code: None });
+                let exit = end.exit_code.or(job.proc_exit.and_then(|p| p.code));
                 let outcome = if job.stopping {
                     RunOutcome::Stopped
                 } else {
-                    match end.exit_code {
+                    match exit {
                         Some(0) => RunOutcome::Succeeded,
                         Some(_) => RunOutcome::Failed,
                         None => RunOutcome::Ended,
                     }
                 };
-                let text = match (job.stopping, end.exit_code) {
+                let text = match (job.stopping, exit) {
                     (true, _) => "Debug session stopped".to_string(),
                     (false, Some(code)) => format!("Debug session ended (exit code {code})"),
                     (false, None) => "Debug session ended".to_string(),
                 };
                 self.log_console(job.run_id, LineKind::System, text);
-                let exit = end.exit_code.or(job.proc_exit.and_then(|p| p.code));
                 self.finish_job(job, outcome, exit);
                 changed = true;
             }

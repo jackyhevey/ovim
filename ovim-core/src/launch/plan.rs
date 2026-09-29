@@ -58,8 +58,26 @@ pub struct JavaLaunch {
 impl JavaLaunch {
     /// The command that runs this program without a debugger.
     pub fn run_command(&self) -> CommandSpec {
+        self.command(false)
+    }
+
+    /// The command that starts the JVM suspended, waiting for a debugger on a
+    /// free port it announces with `Listening for transport dt_socket at
+    /// address: N`. ovim owns the process (stdin, output, process group) and
+    /// the adapter attaches to it.
+    pub fn debug_command(&self) -> CommandSpec {
+        self.command(true)
+    }
+
+    fn command(&self, debug: bool) -> CommandSpec {
         let mut argv = vec![java_program()];
         argv.extend(self.jvm_args.iter().cloned());
+        if debug {
+            argv.push(
+                "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0"
+                    .to_string(),
+            );
+        }
         if !self.classpath.is_empty() {
             argv.push("-cp".to_string());
             argv.push(self.classpath.clone());
