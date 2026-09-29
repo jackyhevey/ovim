@@ -63,6 +63,8 @@ use tokio::task::JoinHandle;
 #[derive(Clone, Debug, Default)]
 struct StoredDiagnostics {
     version: Option<i32>,
+    // Local document version when an unversioned publication was accepted.
+    observed_version: i32,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -673,10 +675,16 @@ impl LspManager {
 
     /// Merges diagnostics from all servers for a URI, deduplicating by range+message
     fn merge_diagnostics(server_map: &HashMap<String, StoredDiagnostics>) -> Vec<Diagnostic> {
+        Self::merge_diagnostic_sets(server_map.values())
+    }
+
+    fn merge_diagnostic_sets<'a>(
+        sets: impl Iterator<Item = &'a StoredDiagnostics>,
+    ) -> Vec<Diagnostic> {
         use std::collections::HashSet;
         let mut seen = HashSet::new();
         let mut merged = Vec::new();
-        for stored in server_map.values() {
+        for stored in sets {
             for diag in &stored.diagnostics {
                 // Deduplicate by (range, message) — different servers may report the same issue
                 let key = (
@@ -727,6 +735,30 @@ impl LspManager {
         }
 
         merged
+    }
+
+    /// Snapshot diagnostics whose positions belong to the current document.
+    /// Previously accepted publications may remain cached after didChange;
+    /// they must never be anchored against the newer buffer's text.
+    pub async fn current_diagnostic_snapshot(&self, uri: &Uri) -> (i32, i32, Vec<Diagnostic>) {
+        let versions = self.document_versions.lock().await;
+        let current = versions.get(uri).copied().unwrap_or(0);
+        let sent = self.last_sent_versions.lock().await;
+        let last_sent = sent.get(uri).copied().unwrap_or(0);
+        let diagnostics = self.diagnostics.lock().await;
+        let merged = if last_sent < current {
+            Vec::new()
+        } else {
+            diagnostics
+                .get(uri)
+                .map(|sets| {
+                    Self::merge_diagnostic_sets(sets.values().filter(|stored| {
+                        stored.version.unwrap_or(stored.observed_version) == current
+                    }))
+                })
+                .unwrap_or_default()
+        };
+        (current, last_sent, merged)
     }
 
     /// Gets diagnostics for a specific line in a file (merged from all servers, cached)
@@ -817,7 +849,7 @@ impl LspManager {
         //     (last_sent_versions[uri] < document_versions[uri]).  The server
         //     can only have seen up to last_sent, so its diagnostics cannot
         //     reflect pending content.  (OV-00162)
-        {
+        let observed_version = {
             let versions = self.document_versions.lock().await;
             if let Some(&current_version) = versions.get(&uri) {
                 if let Some(diag_version) = version {
@@ -919,7 +951,8 @@ impl LspManager {
                     }
                 }
             }
-        }
+            versions.get(&uri).copied().unwrap_or(0)
+        };
 
         self.deferred_diagnostics
             .lock()
@@ -949,6 +982,7 @@ impl LspManager {
             server_id.to_string(),
             StoredDiagnostics {
                 version,
+                observed_version,
                 diagnostics,
             },
         );
@@ -1120,6 +1154,79 @@ mod tests {
         assert_eq!(v2, 2);
 
         assert_eq!(manager.get_document_version(&uri).await, 2);
+    }
+
+    #[tokio::test]
+    async fn current_diagnostics_do_not_reanchor_old_publications_after_edits() {
+        for publication_version in [Some(1), None] {
+            let manager = LspManager::new();
+            let uri: Uri = "file:///Example.java".parse().unwrap();
+            manager
+                .document_versions
+                .lock()
+                .await
+                .insert(uri.clone(), 1);
+            manager
+                .last_sent_versions
+                .lock()
+                .await
+                .insert(uri.clone(), 1);
+            let warning = Diagnostic {
+                range: lsp_types::Range::new(
+                    lsp_types::Position::new(2, 0),
+                    lsp_types::Position::new(2, 5),
+                ),
+                message: "Possible null value".into(),
+                ..Diagnostic::default()
+            };
+            manager
+                .set_diagnostics(
+                    uri.clone(),
+                    "java",
+                    vec![warning.clone()],
+                    publication_version,
+                )
+                .await;
+            assert_eq!(
+                manager.current_diagnostic_snapshot(&uri).await.2,
+                vec![warning.clone()]
+            );
+            // Populate the legacy merged cache too. It must not confer freshness.
+            assert_eq!(manager.get_diagnostics(&uri).await.len(), 1);
+            manager.increment_document_version(&uri).await;
+            assert_eq!(
+                manager.current_diagnostic_snapshot(&uri).await,
+                (2, 1, vec![])
+            );
+            manager
+                .last_sent_versions
+                .lock()
+                .await
+                .insert(uri.clone(), 2);
+            assert_eq!(
+                manager.current_diagnostic_snapshot(&uri).await,
+                (2, 2, vec![])
+            );
+            let mut moved = warning;
+            moved.range.start.line += 3;
+            moved.range.end.line += 3;
+            manager
+                .set_diagnostics(
+                    uri.clone(),
+                    "java",
+                    vec![moved.clone()],
+                    publication_version.map(|_| 2),
+                )
+                .await;
+            assert_eq!(
+                manager.current_diagnostic_snapshot(&uri).await.2,
+                vec![moved]
+            );
+            manager
+                .set_diagnostics(uri.clone(), "java", vec![], publication_version.map(|_| 2))
+                .await;
+            assert!(manager.current_diagnostic_snapshot(&uri).await.2.is_empty());
+        }
     }
 
     #[tokio::test]

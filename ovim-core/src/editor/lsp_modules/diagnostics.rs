@@ -195,13 +195,7 @@ impl Editor {
         let file_path_for_task = file_path.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
-            let doc_version = lsp.get_document_version(&uri).await;
-            let last_sent = lsp.get_last_sent_version(&uri).await;
-            let diagnostics = if last_sent < doc_version {
-                Vec::new()
-            } else {
-                lsp.get_diagnostics(&uri).await
-            };
+            let (doc_version, last_sent, diagnostics) = lsp.current_diagnostic_snapshot(&uri).await;
             let task_result = crate::editor::lsp_slot::DiagnosticResult {
                 file_path: file_path_for_task,
                 buffer_version,
@@ -238,22 +232,15 @@ impl Editor {
                     return false;
                 }
 
-                // Stamp version fields only after both guards: a refresh
-                // spawned for file A that completes after switching to file B
-                // must not poison B's version state (OV-00335). And only when
-                // the buffer hasn't advanced since the refresh was spawned —
-                // stamping an old lsp_version would move the tracked version
-                // BACKWARD, letting a stale versioned workspace edit pass the
-                // OV-00330 guard (external review finding).
-                if self.buffer().version() == result.buffer_version {
-                    self.lsp.state.current_file_lsp_version = result.lsp_version;
-                    self.lsp.state.current_file_lsp_sent_version = result.lsp_sent_version;
+                // A fetch carries positions for its original buffer. Keep the
+                // existing projected anchors until a current refresh arrives.
+                if self.buffer().version() != result.buffer_version {
+                    self.lsp.slots.diagnostics.invalidate();
+                    return false;
                 }
+                self.lsp.state.current_file_lsp_version = result.lsp_version;
+                self.lsp.state.current_file_lsp_sent_version = result.lsp_sent_version;
 
-                // Always store and display the latest diagnostics — they're the
-                // best data we have.  Showing slightly stale positions during
-                // editing is better UX than hiding all feedback for 150ms+.
-                // If the buffer changed since spawn, also request a fresh set.
                 self.lsp.state.diagnostic_count = result.count;
                 self.on_diagnostic_counts_changed(result.count.0, result.count.1);
                 self.lsp
@@ -287,13 +274,6 @@ impl Editor {
                     diag_decs,
                     &rope,
                 );
-
-                if self.buffer().version() != result.buffer_version {
-                    // Buffer was edited during the fetch — request a fresh set
-                    // for the current content.  The stale diagnostics stay visible
-                    // until the refresh completes (better than blank).
-                    self.lsp.slots.diagnostics.invalidate();
-                }
 
                 true
             }
@@ -678,10 +658,10 @@ mod tests {
     }
 
     /// When the buffer is edited between spawning a diagnostic refresh and
-    /// receiving the result, diagnostics should still be stored and displayed
-    /// (stale data is better than no data), and a re-request should be scheduled.
+    /// receiving the result, existing anchors must survive and the stale
+    /// result must be rejected, with a fresh request scheduled.
     #[tokio::test(flavor = "current_thread")]
-    async fn poll_keeps_diagnostics_when_buffer_edited_during_fetch() {
+    async fn poll_preserves_existing_anchors_when_buffer_edited_during_fetch() {
         use crate::editor::decoration::{
             Decoration, DecorationPlacement, DecorationSource, DecorationStyle,
         };
@@ -730,10 +710,12 @@ mod tests {
             },
         );
 
-        // Simulate a buffer edit AFTER the refresh was spawned.
-        editor
-            .buffer_mut()
-            .insert_text_at(0, crate::unicode::CharCol::ZERO, "// ");
+        // Insert lines AFTER the refresh was spawned; its positions are now stale.
+        editor.buffer_mut().insert_text_at(
+            0,
+            crate::unicode::CharCol::ZERO,
+            "// inserted\n// guard\n",
+        );
 
         assert_ne!(
             editor.buffer().version(),
@@ -741,12 +723,10 @@ mod tests {
             "buffer version should have changed after edit"
         );
 
-        // Poll should succeed (result ready) and detect the version mismatch.
+        // Reject the stale refresh without replacing the existing anchors.
         let changed = editor.poll_pending_diagnostic_refresh_response();
-        assert!(changed);
-
-        // File path still matches, so diagnostics are NOT stale (show-until-replaced).
-        assert!(!editor.diagnostics_cache_stale());
+        assert!(!changed);
+        assert_eq!(editor.decorations.for_line(0)[0].text, "old error");
         // A refresh should be requested for the current buffer content.
         assert!(editor.lsp.slots.diagnostics.is_stale());
 
