@@ -9,7 +9,7 @@
 
 // Submodules extend Editor with LSP functionality
 pub(in crate::editor) mod actions;
-mod completion;
+pub(super) mod completion;
 mod diagnostics;
 mod goto;
 mod hierarchy;

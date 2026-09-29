@@ -9,6 +9,9 @@ use crate::unicode::grapheme_at_index;
 use anyhow::{anyhow, Result};
 use std::collections::HashSet;
 
+/// Status shown while a completion request is in flight.
+pub(in crate::editor) const REQUESTING_STATUS: &str = "Requesting completions...";
+
 impl Editor {
     /// Request completion at current cursor position
     pub fn request_completion(&mut self) {
@@ -224,7 +227,7 @@ impl Editor {
 
         self.lsp.slots.completion.fire(task, rx);
 
-        self.set_lsp_status("Requesting completions...".to_string());
+        self.set_lsp_status(REQUESTING_STATUS.to_string());
         Ok(true)
     }
 }

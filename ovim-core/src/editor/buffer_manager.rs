@@ -16,6 +16,27 @@ pub(crate) fn is_scratch_path(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Directory the language server materializes library (jar) sources into.
+const MATERIALIZED_SOURCES_DIR: &str = "hyperion-materialized-sources";
+
+/// True for decompiled/extracted library sources: navigating into a
+/// dependency must not leave an editable buffer whose edits can never land
+/// anywhere useful (OV-00458).
+pub(crate) fn is_library_source_path(path: &str) -> bool {
+    std::path::Path::new(path).components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| name.starts_with(MATERIALIZED_SOURCES_DIR))
+    })
+}
+
+pub(crate) fn mark_library_source_read_only(buffer: &mut Buffer) {
+    if buffer.file_path().is_some_and(is_library_source_path) {
+        buffer.set_read_only(true);
+    }
+}
+
 /// Canonical identity of a buffer/URI path: absolute, symlinks resolved for
 /// the part that exists, lexically normalised for the rest. Scratch names
 /// (`[Title]`) are kept verbatim.
@@ -150,6 +171,7 @@ impl Editor {
         buf.set_language_catalog(self.language_catalog.clone());
         self.initialize_buffer_indent_options(&mut buf);
         self.initialize_buffer_git_status(&mut buf);
+        mark_library_source_read_only(&mut buf);
         self.buffers.push(buf);
         self.buffers.len() - 1
     }
@@ -358,6 +380,7 @@ impl Editor {
         buffer.set_language_catalog(self.language_catalog.clone());
         self.initialize_buffer_indent_options(&mut buffer);
         self.initialize_buffer_git_status(&mut buffer);
+        mark_library_source_read_only(&mut buffer);
         self.buffers.push(buffer);
         self.current_buffer_index = self.buffers.len() - 1;
         self.clear_lsp_state();
@@ -890,6 +913,26 @@ mod tests {
     use super::*;
     use std::fs;
     use std::str::FromStr;
+
+    /// OV-00458: materialized library sources open read-only.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn library_source_buffers_are_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = dir.path().join("hyperion-materialized-sources-v1").join("files");
+        fs::create_dir_all(&sources).unwrap();
+        let library = sources.join("65f9c7.java");
+        let own = dir.path().join("Own.java");
+        fs::write(&library, "class Lib {}\n").unwrap();
+        fs::write(&own, "class Own {}\n").unwrap();
+
+        let mut editor = Editor::default();
+        editor.open_file(&own).unwrap();
+        assert!(!editor.buffer().is_read_only());
+        editor.open_file(&library).unwrap();
+        assert!(editor.buffer().is_read_only());
+        assert!(is_library_source_path(&library.to_string_lossy()));
+        assert!(!is_library_source_path(&own.to_string_lossy()));
+    }
 
     #[test]
     fn is_scratch_path_detects_bracket_names() {

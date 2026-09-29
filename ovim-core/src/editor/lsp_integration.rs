@@ -532,6 +532,7 @@ impl Editor {
                                 crate::modeline::Modeline::parse(&buffer.rope().to_string());
                             self.initialize_buffer_indent_options(&mut buffer);
                             self.initialize_buffer_git_status(&mut buffer);
+                            super::buffer_manager::mark_library_source_read_only(&mut buffer);
                             self.buffers[self.current_buffer_index] = buffer;
                             if let Some(modeline) = modeline.as_ref() {
                                 self.apply_modeline(modeline);
@@ -845,6 +846,12 @@ impl Editor {
         let Some(result) = self.lsp.slots.completion.poll_with_timeout(timeout) else {
             return false;
         };
+        // The request is over whatever the answer: never leave the
+        // "Requesting completions..." status behind (an empty result used to
+        // leave it on screen indefinitely).
+        if self.lsp_status() == lsp_modules::completion::REQUESTING_STATUS {
+            self.set_lsp_status(String::new());
+        }
 
         match result {
             Ok(result) => {
@@ -2923,6 +2930,33 @@ mod tests {
         assert!(editor.poll_pending_completion_response());
         assert!(editor.completion_menu().is_visible());
         assert_eq!(editor.completion_menu().items().len(), 1);
+    }
+
+    /// OV-00456: an empty completion answer must not leave the
+    /// "Requesting completions..." status on screen.
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_completion_result_clears_the_requesting_status() {
+        let mut editor = Editor::with_content("let x = fo");
+        editor.set_file_path("/tmp/a.rs".to_string());
+        editor.set_mode(crate::mode::Mode::Insert);
+        let effective_path = editor.buffer().file_path().unwrap().to_string();
+        let bv = editor.buffer().version();
+        editor.set_lsp_status(lsp_modules::completion::REQUESTING_STATUS.to_string());
+        fire_completion_result(
+            &mut editor,
+            CompletionResult {
+                items: Vec::new(),
+                file_path: effective_path,
+                buffer_version: bv,
+                synced_content: None,
+                synced_lsp_version: None,
+            },
+        );
+        editor.poll_pending_completion_response();
+        assert_ne!(
+            editor.lsp_status(),
+            lsp_modules::completion::REQUESTING_STATUS
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

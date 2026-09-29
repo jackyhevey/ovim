@@ -405,8 +405,11 @@ impl Buffer {
 
         let path = Path::new(file_path);
         if !path.exists() {
-            // File was deleted externally
-            return Ok(true);
+            // Deleted externally - but only a buffer that was loaded from or
+            // saved to that path can lose it. Scratch buffers (`[LspInfo]`) and
+            // brand-new files never had an mtime and were never on disk
+            // (OV-00457: the poll reported "Failed to read file: .../[LspInfo]").
+            return Ok(self.file_mtime.is_some());
         }
 
         let current_mtime = std::fs::metadata(path)
@@ -520,5 +523,29 @@ impl Buffer {
         self.validate_cursor_position();
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod external_change_tests {
+    use super::*;
+
+    /// OV-00457: a scratch buffer (`[LspInfo]`) has a path that never exists
+    /// on disk; that is not an "external deletion".
+    #[test]
+    fn scratch_buffer_is_not_reported_as_externally_deleted() {
+        let mut buffer = Buffer::new_from_str("info");
+        buffer.set_file_path("/nonexistent-dir-ovim/[LspInfo]".to_string());
+        assert!(!buffer.check_external_modification().unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_loaded_file_that_vanishes_is_reported_as_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "x\n").unwrap();
+        let buffer = Buffer::load_file(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert!(buffer.check_external_modification().unwrap());
     }
 }
