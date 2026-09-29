@@ -412,6 +412,31 @@ pub fn render_status_line(frame: &mut Frame, editor: &Editor, theme: &Theme, are
         ));
     }
 
+    // Breadcrumbs: the enclosing class › method, in whatever room is left.
+    let breadcrumb_text = if is_ai_chat {
+        String::new()
+    } else {
+        let taken: usize = UnicodeWidthStr::width(mode_indicator.as_str())
+            + 1
+            + UnicodeWidthStr::width(file)
+            + UnicodeWidthStr::width(modified)
+            + UnicodeWidthStr::width(branch_display.as_str())
+            + right_spans
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+                .sum::<usize>();
+        fit_breadcrumbs(
+            &editor.breadcrumb_text(),
+            (area.width as usize).saturating_sub(taken + 2),
+        )
+    };
+    if !breadcrumb_text.is_empty() {
+        spans.push(Span::styled(
+            format!(" \u{203a} {breadcrumb_text}"),
+            Style::default().fg(accent_bg),
+        ));
+    }
+
     // Calculate padding (display columns, not bytes: unicode filenames,
     // branches, and status messages must not shift the right-side spans)
     let recording_len = if !recording_indicator.is_empty() {
@@ -419,7 +444,13 @@ pub fn render_status_line(frame: &mut Frame, editor: &Editor, theme: &Theme, are
     } else {
         1
     };
+    let breadcrumb_width = if breadcrumb_text.is_empty() {
+        0
+    } else {
+        UnicodeWidthStr::width(breadcrumb_text.as_str()) + 3
+    };
     let left_used = UnicodeWidthStr::width(mode_indicator.as_str())
+        + breadcrumb_width
         + recording_len
         + UnicodeWidthStr::width(file)
         + UnicodeWidthStr::width(modified)
@@ -438,6 +469,38 @@ pub fn render_status_line(frame: &mut Frame, editor: &Editor, theme: &Theme, are
     let paragraph =
         Paragraph::new(status_line).style(Style::default().bg(Color::Reset).fg(status_fg));
     frame.render_widget(paragraph, area);
+}
+
+/// Fits `text` (`Class › method`) into `width` columns, dropping the outermost
+/// crumbs first so the innermost symbol stays visible. Empty when there is not
+/// room for anything useful.
+pub fn fit_breadcrumbs(text: &str, width: usize) -> String {
+    if text.is_empty() || width < 6 {
+        return String::new();
+    }
+    if UnicodeWidthStr::width(text) <= width {
+        return text.to_string();
+    }
+    let parts: Vec<&str> = text.split(" \u{203a} ").collect();
+    for skip in 1..parts.len() {
+        let candidate = format!("\u{2026} \u{203a} {}", parts[skip..].join(" \u{203a} "));
+        if UnicodeWidthStr::width(candidate.as_str()) <= width {
+            return candidate;
+        }
+    }
+    // Even the innermost crumb alone is too wide: cut it with an ellipsis.
+    let last = parts.last().copied().unwrap_or("");
+    let mut out = String::new();
+    let mut used = 1;
+    for c in last.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    format!("{out}\u{2026}")
 }
 
 /// Renders the command line
@@ -1301,11 +1364,27 @@ fn truncate_middle(text: &str, max_cols: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        compact_path_hint, hidden_ai_chat_status_for, progress_padding, truncate_middle,
-        truncate_with_ellipsis, ToastLevel, ToastRow,
+        compact_path_hint, fit_breadcrumbs, hidden_ai_chat_status_for, progress_padding,
+        truncate_middle, truncate_with_ellipsis, ToastLevel, ToastRow,
     };
     use crate::editor::{ToastRequest, ToastSource};
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn breadcrumbs_drop_the_outermost_crumbs_first_and_keep_the_method() {
+        let text = "Circle \u{203a} Builder \u{203a} build";
+        assert_eq!(fit_breadcrumbs(text, 40), text);
+        assert_eq!(
+            fit_breadcrumbs(text, 20),
+            "\u{2026} \u{203a} Builder \u{203a} build"
+        );
+        assert_eq!(fit_breadcrumbs(text, 10), "\u{2026} \u{203a} build");
+        assert_eq!(fit_breadcrumbs(text, 3), "", "no room, no crumbs");
+        assert_eq!(fit_breadcrumbs("", 40), "");
+        assert!(
+            UnicodeWidthStr::width(fit_breadcrumbs("averyveryverylongmethodname", 8).as_str()) <= 8
+        );
+    }
 
     #[test]
     fn chat_status_line_shows_the_selected_model_without_mutating_configuration() {

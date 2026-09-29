@@ -5,7 +5,7 @@
 
 // Submodules for focused functionality
 #[path = "lsp_modules/mod.rs"]
-mod lsp_modules;
+pub(in crate::editor) mod lsp_modules;
 
 use super::*;
 use crate::lsp::{uri_from_file_path, LspManager};
@@ -687,43 +687,21 @@ impl Editor {
             }
         }
 
-        // Workspace symbols
+        // Workspace symbols (live picker: results replace the list in place)
         if let Some(result) = self.lsp.slots.workspace_symbols.poll_with_timeout(timeout) {
             match result {
-                Ok(r) if !r.symbols.is_empty() => {
-                    let count = r.symbols.len();
-                    self.lsp.state.available_workspace_symbols = r.symbols.clone();
+                Ok(r) => {
+                    let items = self.workspace_symbol_items(&r.symbols);
+                    let count = items.len();
+                    self.lsp.state.available_workspace_symbols = r.symbols;
                     self.lsp.state.active_lsp_result_type =
                         Some(crate::editor::LspResultType::WorkspaceSymbols);
-                    let items: Vec<crate::editor::picker::PickerResult> = r
-                        .symbols
-                        .iter()
-                        .filter_map(|sym| {
-                            let path = crate::lsp::uri_to_file_path(&sym.location.uri)?;
-                            let line = sym.location.range.start.line as usize;
-                            let col = self
-                                .utf16_to_grapheme_col(line, sym.location.range.start.character);
-                            Some(crate::editor::picker::PickerResult {
-                                display: format!(
-                                    "{}:{}:{}",
-                                    path.file_name().unwrap_or_default().to_string_lossy(),
-                                    line + 1,
-                                    col + 1
-                                ),
-                                location: path.to_string_lossy().to_string(),
-                                line,
-                                col,
-                                match_positions: Vec::new(),
-                                content: None,
-                            })
-                        })
-                        .collect();
-                    self.open_location_picker(items, "Workspace Symbols");
-                    self.set_lsp_status(format!("Found {} symbols", count));
-                    changed = true;
-                }
-                Ok(_) => {
-                    self.set_lsp_status("No workspace symbols found".to_string());
+                    if let Some(picker) = self.picker_mut().filter(|p| p.is_symbol_search()) {
+                        picker.set_results(items);
+                        self.mark_picker_selection_changed();
+                        self.set_lsp_status(format!("{count} symbols"));
+                        changed = true;
+                    }
                 }
                 Err(e) => {
                     self.set_lsp_status(format!("Workspace symbols request failed: {}", e));
@@ -1241,7 +1219,7 @@ impl Editor {
 
     /// Request workspace symbols
     pub fn request_workspace_symbols(&mut self) {
-        self.lsp.intents.workspace_symbols = true;
+        self.open_workspace_symbol_picker();
     }
 
     /// Request rename at current cursor position
@@ -2162,12 +2140,17 @@ impl Editor {
             return;
         };
 
-        // Switching away from a buffer that is still shown in another window
-        // or tab must not close the document on the server.
-        let still_open = self.buffers.iter().enumerate().any(|(index, buffer)| {
-            buffer.file_path() == Some(file_path.as_str()) && self.buffer_is_open_in_ui(index)
-        });
-        if still_open {
+        // Switching away from a buffer only hides it: like other editors' LSP
+        // clients (attach per loaded buffer, not per visible window) the
+        // document stays open on the server while its buffer is loaded. That
+        // keeps its diagnostics alive for the Problems view and keeps the
+        // server's picture of the project current. The document is closed when
+        // the buffer goes away or its path changes (save-as, rename, delete).
+        let still_loaded = self
+            .buffers
+            .iter()
+            .any(|buffer| buffer.file_path() == Some(file_path.as_str()));
+        if still_loaded {
             return;
         }
 
@@ -2246,8 +2229,15 @@ impl Editor {
         if std::mem::take(&mut self.lsp.intents.document_symbols) {
             let _ = self.document_symbols_impl().await;
         }
-        if std::mem::take(&mut self.lsp.intents.workspace_symbols) {
-            let _ = self.workspace_symbols_impl().await;
+        // The live symbol picker asks again whenever its query changes.
+        if let Some(query) = self
+            .picker_mut()
+            .and_then(|picker| picker.take_symbol_query())
+        {
+            self.lsp.intents.workspace_symbols = Some(query);
+        }
+        if let Some(query) = self.lsp.intents.workspace_symbols.take() {
+            let _ = self.workspace_symbols_impl(query).await;
         }
         if std::mem::take(&mut self.lsp.intents.organize_imports) {
             let _ = self.organize_imports_impl().await;
@@ -2429,6 +2419,46 @@ mod tests {
     use crate::lsp::uri_from_file_path;
     use lsp_types::{CompletionItem, InlayHint, InlayHintLabel, Location, Position, Range};
     use tokio::sync::oneshot;
+
+    /// The server keeps a document open while its buffer is loaded, so the
+    /// diagnostics of files the user switched away from stay available (the
+    /// Problems view). Deleting the buffer is what closes it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn switching_buffers_keeps_documents_open_and_deleting_closes_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("A.java");
+        let b = dir.path().join("B.java");
+        std::fs::write(&a, "class A {}\n").unwrap();
+        std::fs::write(&b, "class B {}\n").unwrap();
+        let mut editor = Editor::default();
+        editor.enable_lsp();
+        editor.load_file(&a).unwrap();
+        editor.load_file(&b).unwrap();
+        for path in [&a, &b] {
+            editor
+                .lsp
+                .state
+                .document_sync
+                .entry(path.to_string_lossy().to_string())
+                .or_default();
+        }
+        let a_key = a.to_string_lossy().to_string();
+
+        // load_file(B) queued a close for A, but A's buffer is still loaded.
+        editor.send_lsp_close_if_needed().await;
+        assert!(editor.lsp.state.document_sync.contains_key(&a_key));
+
+        // Deleting A's buffer closes it.
+        let index = editor
+            .buffers
+            .iter()
+            .position(|buffer| buffer.file_path() == Some(a_key.as_str()))
+            .unwrap();
+        editor.switch_to_buffer(index);
+        editor.delete_current_buffer();
+        editor.send_lsp_close_if_needed().await;
+        assert!(!editor.lsp.state.document_sync.contains_key(&a_key));
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn test_handle_location_result_new_tab_updates_current_file_register() {

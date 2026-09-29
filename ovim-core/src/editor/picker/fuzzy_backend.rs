@@ -4,6 +4,10 @@ pub enum FuzzyListKind {
     Custom,
     Completion,
     LspLocations,
+    /// Each result carries an ex command (in `location`) to run on selection.
+    Command,
+    /// Live `workspace/symbol` results; the server does the filtering.
+    WorkspaceSymbols,
     DebugConfig,
     /// Actions offered by a server's `window/showMessageRequest`.
     MessageAction,

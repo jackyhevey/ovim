@@ -138,7 +138,7 @@ impl Editor {
         }
     }
 
-    fn clear_definition_returns(&mut self) {
+    pub(crate) fn clear_definition_returns(&mut self) {
         for index in 0..self.tab_count() {
             if let Some(tab) = self.tab_page_manager.tab_mut(index) {
                 tab.definition_origin = None;

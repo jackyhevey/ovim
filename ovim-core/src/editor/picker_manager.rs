@@ -539,6 +539,18 @@ impl Editor {
             PickerAction::MessageRequestAction { index } => {
                 self.answer_active_message_request(Some(index));
             }
+            PickerAction::RunCommand { command } => {
+                match crate::commands::execute_command(self, &command) {
+                    crate::command_result::CommandResult::Success(response) => {
+                        if let Some(message) = response.message {
+                            self.set_status_message(message.into_owned());
+                        }
+                    }
+                    crate::command_result::CommandResult::Error(response) => {
+                        self.set_status_message(response.error);
+                    }
+                }
+            }
         }
         Ok(())
     }

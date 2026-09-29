@@ -14,9 +14,10 @@ pub use state::{
     DecorationInfo, DiagnosticCounts, DiagnosticItem, DiagnosticsInfo, EditorSnapshot,
     ErrorResponse, HealthInfo, ImageAttachmentSnapshot, LineEntry, LinesResponse,
     LspServerInfoItem, LspStatusInfo, MetricsInfo, ModeInfo, OutlineInfo, OutlineSymbol,
-    PickerInfo, PickerResultInfo, QueuedChatSnapshot, RenderInfo, SendKeysResult, SuccessResponse,
-    SymbolSearchInfo, SymbolSearchResult, ToolCallSnapshot, TraceInfo, TraceNode, ViewSnapshot,
-    VisualSelection, AGENT_API_SCHEMA_VERSION, SNAPSHOT_SCHEMA_VERSION,
+    PickerInfo, PickerResultInfo, QueuedChatSnapshot, RenderInfo, SearchReplaceInfo,
+    SearchReplaceRowInfo, SendKeysResult, SuccessResponse, SymbolSearchInfo, SymbolSearchResult,
+    ToolCallSnapshot, TraceInfo, TraceNode, ViewSnapshot, VisualSelection,
+    AGENT_API_SCHEMA_VERSION, SNAPSHOT_SCHEMA_VERSION,
 };
 
 use anyhow::Result;

@@ -380,6 +380,7 @@ fn render_overlays(
         mode,
         crate::mode::Mode::Picker
             | crate::mode::Mode::LspManager
+            | crate::mode::Mode::SearchReplace
             | crate::mode::Mode::HoverPreview
             | crate::mode::Mode::HoverNavigate
     ) || (mode == crate::mode::Mode::AiChat && editor.ai_chat_review_mode())
@@ -392,6 +393,12 @@ fn render_overlays(
     if editor.mode() == crate::mode::Mode::LspManager {
         if let Some(panel) = editor.lsp_manager_panel() {
             super::lsp_manager::render_lsp_manager(frame, panel);
+        }
+    }
+
+    if editor.mode() == crate::mode::Mode::SearchReplace {
+        if let Some(panel) = editor.search_replace_panel() {
+            super::search_replace::render_search_replace(frame, panel);
         }
     }
 
@@ -539,6 +546,15 @@ fn set_cursor_position(
                 let max_x = mgr_area.right().saturating_sub(2);
                 let cursor_x = (inner_x + 2 + input_width as u16).min(max_x);
                 frame.set_cursor_position((cursor_x, inner_y));
+            }
+        }
+        return;
+    }
+
+    if editor.mode() == crate::mode::Mode::SearchReplace {
+        if let Some(panel) = editor.search_replace_panel() {
+            if let Some(position) = super::search_replace::cursor_position(frame.area(), panel) {
+                frame.set_cursor_position(position);
             }
         }
         return;

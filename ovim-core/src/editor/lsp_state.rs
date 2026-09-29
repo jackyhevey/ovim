@@ -329,7 +329,8 @@ pub struct LspIntents {
     pub type_hierarchy: bool,
     pub find_references: bool,
     pub document_symbols: bool,
-    pub workspace_symbols: bool,
+    /// Pending `workspace/symbol` query (live symbol picker).
+    pub workspace_symbols: Option<String>,
     pub organize_imports: bool,
     pub rename: Option<String>,
     pub semantic_tokens: bool,

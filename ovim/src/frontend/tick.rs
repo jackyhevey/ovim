@@ -466,6 +466,14 @@ async fn poll_background_tasks(editor: &mut Editor) {
     if editor.poll_pending_test() {
         editor.mark_dirty();
     }
+    if editor.poll_search_replace() {
+        editor.mark_dirty();
+    }
+    editor.track_recent_file();
+    editor.request_outline_if_needed().await;
+    if editor.poll_outline() {
+        editor.mark_dirty();
+    }
     if editor.poll_git_refresh() {
         editor.mark_dirty();
     }

@@ -31,6 +31,17 @@ pub enum PickerAction {
     SelectDebugConfig { index: usize },
     /// Answer a server `window/showMessageRequest` with action `index`
     MessageRequestAction { index: usize },
+    /// Run an ex command (git status / log entries)
+    RunCommand { command: String },
+}
+
+/// What a picker is for, when it needs bindings beyond select/cancel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerRole {
+    /// `Ctrl-T` stages/unstages the selected file, `Ctrl-E` opens it.
+    GitStatus,
+    /// `Ctrl-T` cycles the severity filter.
+    Problems,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

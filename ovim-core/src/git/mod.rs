@@ -1,3 +1,6 @@
+pub mod conflict;
+pub mod ops;
+
 use anyhow::Result;
 use chrono::{TimeZone, Utc};
 use git2::{DiffOptions, Oid, Repository};

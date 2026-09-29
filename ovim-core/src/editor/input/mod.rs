@@ -49,6 +49,7 @@ mod debug_panel_mode;
 /// LSP Manager mode handler
 mod lsp_manager_mode;
 mod run_console_mode;
+mod search_replace_mode;
 
 /// Rename input mode handler
 mod rename_input_mode;
@@ -199,6 +200,9 @@ impl InputHandler {
                 Mode::AiChat => ai_chat_mode::handle_ai_chat_mode(editor, key_event),
                 Mode::RunConsole => run_console_mode::handle_run_console_mode(editor, key_event),
                 Mode::DebugPanel => debug_panel_mode::handle_debug_panel_mode(editor, key_event),
+                Mode::SearchReplace => {
+                    search_replace_mode::handle_search_replace_mode(editor, key_event)
+                }
             }
         };
 

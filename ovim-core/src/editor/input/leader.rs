@@ -50,8 +50,8 @@ fn handle_first_leader_key(editor: &mut Editor, key: char) -> Result<()> {
             editor.reset_input_state();
         }
         'o' => {
-            // <Space>o - Document outline (symbols)
-            editor.request_document_symbols();
+            // <Space>o - Document outline (symbol tree)
+            editor.open_outline_picker();
             editor.reset_input_state();
         }
         'S' => {
@@ -380,6 +380,33 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
             editor.reset_input_state();
         }
 
+        (&['s'], 'd') => {
+            // <Space>sd - Problems (all published diagnostics, by file)
+            editor.open_problems_picker(crate::editor::problems::ProblemFilter::All);
+            editor.reset_input_state();
+        }
+        (&['s'], 'h') => {
+            // <Space>sh - Recent files (this project, across sessions)
+            editor.open_recent_files_picker();
+            editor.reset_input_state();
+        }
+        (&['s'], 'b') => {
+            // <Space>sb - Open buffers
+            editor.open_buffer_picker();
+            editor.reset_input_state();
+        }
+        (&['s'], 'S') => {
+            // <Space>sS - Workspace symbols (live query)
+            editor.open_workspace_symbol_picker();
+            editor.reset_input_state();
+        }
+        (&['s'], 'r') => {
+            // <Space>sr - Replace in files (prefilled with the word under the cursor)
+            let word = editor.buffer().word_under_cursor().map(|(word, _, _)| word);
+            editor.open_search_replace(word);
+            editor.reset_input_state();
+        }
+
         // <Space>g... sequences (git)
         (&['g'], 'd') => {
             // <Space>gd - Toggle the branch diff review
@@ -389,6 +416,81 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
         (&['g'], 'f') => {
             // <Space>gf - Fetch the review base branch
             editor.fetch_review_base();
+            editor.reset_input_state();
+        }
+        (&['g'], 'g') => {
+            // <Space>gg - Git status (changed files)
+            editor.open_git_status_picker();
+            editor.reset_input_state();
+        }
+        (&['g'], 's') => {
+            // <Space>gs - Stage the hunk under the cursor
+            editor.git_stage_hunk();
+            editor.reset_input_state();
+        }
+        (&['g'], 'u') => {
+            // <Space>gu - Unstage the hunk under the cursor
+            editor.git_unstage_hunk();
+            editor.reset_input_state();
+        }
+        (&['g'], 'S') => {
+            // <Space>gS - Stage the file
+            editor.git_stage_file();
+            editor.reset_input_state();
+        }
+        (&['g'], 'U') => {
+            // <Space>gU - Unstage the file
+            editor.git_unstage_file();
+            editor.reset_input_state();
+        }
+        (&['g'], 'c') => {
+            // <Space>gc - Commit (message buffer)
+            editor.open_commit_message(false);
+            editor.reset_input_state();
+        }
+        (&['g'], 'C') => {
+            // <Space>gC - Amend the last commit
+            editor.open_commit_message(true);
+            editor.reset_input_state();
+        }
+        (&['g'], 'l') => {
+            // <Space>gl - History of the current file
+            editor.open_file_history_picker();
+            editor.reset_input_state();
+        }
+        (&['g'], 'L') => {
+            // <Space>gL - History of the current line
+            editor.open_line_history_picker();
+            editor.reset_input_state();
+        }
+        (&['g'], 'm') => {
+            // <Space>gm... - merge conflicts (n/p navigate, o ours, t theirs, b both, x neither)
+            editor.set_input_state(InputState::Leader {
+                keys: vec!['g', 'm'],
+            });
+        }
+        (&['g', 'm'], 'n') => {
+            editor.goto_conflict(true);
+            editor.reset_input_state();
+        }
+        (&['g', 'm'], 'p') => {
+            editor.goto_conflict(false);
+            editor.reset_input_state();
+        }
+        (&['g', 'm'], 'o') => {
+            editor.resolve_conflict(crate::git::conflict::Resolution::Ours);
+            editor.reset_input_state();
+        }
+        (&['g', 'm'], 't') => {
+            editor.resolve_conflict(crate::git::conflict::Resolution::Theirs);
+            editor.reset_input_state();
+        }
+        (&['g', 'm'], 'b') => {
+            editor.resolve_conflict(crate::git::conflict::Resolution::Both);
+            editor.reset_input_state();
+        }
+        (&['g', 'm'], 'x') => {
+            editor.resolve_conflict(crate::git::conflict::Resolution::Neither);
             editor.reset_input_state();
         }
 

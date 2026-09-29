@@ -21,8 +21,8 @@ use ovim::api::{
     AgentEventsResponse, ApiRequest, ApiResponse, BufferInfo, CursorPosition, DecorationInfo,
     DiagnosticCounts, DiagnosticItem, DiagnosticsInfo, EditorSnapshot, ErrorResponse, HealthInfo,
     LineEntry, LinesResponse, LspServerInfoItem, LspStatusInfo, ModeInfo, PickerInfo,
-    PickerResultInfo, RenderInfo, SuccessResponse, ViewSnapshot, VisualSelection,
-    AGENT_API_SCHEMA_VERSION, SNAPSHOT_SCHEMA_VERSION,
+    PickerResultInfo, RenderInfo, SearchReplaceInfo, SearchReplaceRowInfo, SuccessResponse,
+    ViewSnapshot, VisualSelection, AGENT_API_SCHEMA_VERSION, SNAPSHOT_SCHEMA_VERSION,
 };
 use ovim::editor::{self, Editor, InputHandler};
 use ovim::mode::Mode;
@@ -913,6 +913,7 @@ fn create_view_snapshot(editor: &Editor, dimensions: Option<(u16, u16)>) -> View
         search_forward: editor.search_forward(),
         status: editor.status_message().to_string(),
         active_session: editor.active_session().map(str::to_string),
+        breadcrumbs: editor.breadcrumb_text(),
     }
 }
 
@@ -996,6 +997,65 @@ pub(crate) fn create_snapshot_with_dimensions(
         loading: p.is_loading(),
     });
 
+    let search_replace = editor
+        .is_search_replace_open()
+        .then(|| editor.search_replace_panel())
+        .flatten()
+        .map(|panel| {
+            use ovim_core::editor::search_replace::ReviewRow;
+            let rows = panel
+                .rows()
+                .into_iter()
+                .enumerate()
+                .take(2000)
+                .map(|(index, row)| match row {
+                    ReviewRow::File(file) => {
+                        let file = &panel.results[file];
+                        SearchReplaceRowInfo {
+                            kind: "file".to_string(),
+                            path: file.rel.clone(),
+                            line: 0,
+                            checked: file.checked_count() == file.matches.len(),
+                            selected: index == panel.selected,
+                            preview: String::new(),
+                        }
+                    }
+                    ReviewRow::Match(file, m) => {
+                        let file = &panel.results[file];
+                        let entry = &file.matches[m];
+                        let text = &entry.found.line_text;
+                        SearchReplaceRowInfo {
+                            kind: "match".to_string(),
+                            path: file.rel.clone(),
+                            line: entry.found.line + 1,
+                            checked: entry.checked,
+                            selected: index == panel.selected,
+                            preview: format!(
+                                "{}{}{}",
+                                &text[..entry.found.start_byte],
+                                panel.replacement_for(&entry.found),
+                                &text[entry.found.end_byte..]
+                            ),
+                        }
+                    }
+                })
+                .collect();
+            SearchReplaceInfo {
+                find: panel.find.text().to_string(),
+                replace: panel.replace.text().to_string(),
+                files: panel.files.text().to_string(),
+                focus: panel.focus.as_str().to_string(),
+                regex: panel.regex,
+                case_sensitive: panel.case_sensitive,
+                whole_word: panel.whole_word,
+                searching: panel.searching,
+                error: panel.error.clone(),
+                total_matches: panel.total_matches(),
+                checked_matches: panel.checked_matches(),
+                rows,
+            }
+        });
+
     // Project decorations into the snapshot. Phase-05 Step F: each stored
     // decoration holds a source-version `char_offset`; we project it through
     // `edit_log.edits_since(source_version)` so clients see the **live**
@@ -1066,6 +1126,7 @@ pub(crate) fn create_snapshot_with_dimensions(
         registers,
         marks,
         picker,
+        search_replace,
         hover_info: editor.hover_info().map(|s| s.to_string()),
         ai_chat: create_ai_chat_snapshot(editor),
         decorations,
@@ -1319,6 +1380,7 @@ fn create_snapshot_light(editor: &Editor, dimensions: Option<(u16, u16)>) -> Edi
         registers: HashMap::new(),
         marks: HashMap::new(),
         picker: None,
+        search_replace: None,
         hover_info: editor.hover_info().map(|s| s.to_string()),
         ai_chat: create_ai_chat_snapshot(editor),
         // Lightweight snapshot deliberately omits decorations to keep polling

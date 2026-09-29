@@ -24,6 +24,7 @@ mod markdown_conceal;
 mod overlays;
 mod picker_widget;
 mod run_console;
+pub mod search_replace;
 mod status_widgets;
 mod styles;
 mod terminal_images;
