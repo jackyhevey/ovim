@@ -190,10 +190,10 @@ extensions = ["kt", "kts"]
 filenames = ["build.gradle.kts", "settings.gradle.kts"]
 
 [language.syntax]
-# Kotlin highlighting is currently best-effort; we reuse the Java grammar until
-# we add a dedicated Kotlin grammar crate.
-grammar = "tree-sitter-java"
-official = { crate = "tree_sitter_java", constant = "HIGHLIGHTS_QUERY" }
+# fwcd's Kotlin grammar (crate tree-sitter-kotlin-sg); highlight query in
+# src/syntax/queries/kotlin.scm. Covers .kt and .kts.
+grammar = "tree-sitter-kotlin-sg"
+file = { path = "src/syntax/queries/kotlin.scm" }
 
 [language.lsp]
 command = "hyperion-lsp"

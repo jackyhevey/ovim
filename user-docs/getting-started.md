@@ -180,7 +180,9 @@ vim-test style bindings, prefixed with `Space t` in normal mode:
 | `Space t n` | `:TestNearest` | the test at/near the cursor |
 | `Space t f` | `:TestFile` | the current file's tests |
 | `Space t a` / `Space t s` | `:TestSuite` | the whole suite |
-| `Space t l` | `:TestLast` | the previous test command again |
+| `Space t d` | `:TestDebug` | the nearest test under the debugger (Java / Kotlin) |
+| `Space t D` | `:TestDebugFile` | the file's tests under the debugger (Java / Kotlin) |
+| `Space t l` | `:TestLast` | the previous test command again (same mode: run or debug) |
 | `Space t v` | `:TestVisit` | nothing — jumps back to the last-tested spot |
 | `Space t t` | `:TestPanel` | nothing — toggles the test panel |
 | `Space t o` | `:TestOutput` | nothing — opens the raw log in a buffer |
@@ -205,6 +207,16 @@ uv/poetry/pipenv/pdm prefixes), and `go test`
 (with subtest and table-entry `-run` patterns). The nearest test is found via
 tree-sitter, so Rust `mod` nesting, nested `describe` blocks, Python classes,
 and Go `t.Run` subtests all resolve to correct filters.
+
+**Java and Kotlin** tests (JUnit 4/5, TestNG, kotlin.test) run through Gradle or
+Maven. The language server (`hyperion.resolveLaunch`, target `test`) says how
+to run the test at the cursor; when it cannot, ovim composes the command from
+the file: tree-sitter finds `@Test` / `@ParameterizedTest` methods and nested
+classes, the nearest `build.gradle(.kts)` / `pom.xml` picks the module, and
+Gradle `--tests` / Maven `-Dtest=` selects them (`./gradlew` only when its
+wrapper jar exists). The test panel lists every test with pass/fail, failure
+message and stack frames from the JUnit XML reports; failing frames go to the
+quickfix list. See [Running and Debugging](running-and-debugging.md).
 
 Other languages can be wired up with `[language.test]` in `languages.toml` —
 see [configuration.md](configuration.md).

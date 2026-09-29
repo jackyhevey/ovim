@@ -201,6 +201,13 @@ impl DebugAdapterClient {
         Ok(bps)
     }
 
+    /// `setExceptionBreakpoints` with the ids of the enabled filters.
+    pub async fn set_exception_breakpoints(&self, filters: &[String]) -> Result<()> {
+        let args = serde_json::json!({ "filters": filters });
+        self.request("setExceptionBreakpoints", Some(args)).await?;
+        Ok(())
+    }
+
     pub async fn continue_(&self, thread_id: u64) -> Result<()> {
         let args = serde_json::json!({ "threadId": thread_id });
         self.request("continue", Some(args)).await?;

@@ -1388,6 +1388,7 @@ describe("Ovim Solid workbench", () => {
             running: false,
             executionLine: 27,
             stack: [],
+            rows: [],
             output: [],
         };
 
@@ -1414,6 +1415,90 @@ describe("Ovim Solid workbench", () => {
             expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
         } finally {
             delete mockSnapshot.debug;
+        }
+    });
+
+    it("lists variables, watches and breakpoints and marks breakpoint and execution lines in the gutter", () => {
+        const first = mockSnapshot.lines[0];
+        const second = mockSnapshot.lines[1];
+        const previous = {
+            first: first.breakpoint,
+            executing: first.executing,
+            second: second.breakpoint,
+        };
+        first.breakpoint = "enabled";
+        first.executing = true;
+        second.breakpoint = "disabled";
+        mockSnapshot.debug = {
+            running: false,
+            executionLine: 1,
+            stack: [],
+            rows: [
+                {
+                    index: 3,
+                    kind: "header",
+                    depth: 0,
+                    label: "Variables",
+                    expandable: false,
+                    expanded: false,
+                    conditional: false,
+                },
+                {
+                    index: 5,
+                    kind: "variable",
+                    depth: 1,
+                    label: "user",
+                    value: "User@1",
+                    typeName: "User",
+                    expandable: true,
+                    expanded: true,
+                    conditional: false,
+                },
+                {
+                    index: 6,
+                    kind: "variable",
+                    depth: 2,
+                    label: "name",
+                    value: '"Ann"',
+                    expandable: false,
+                    expanded: false,
+                    conditional: false,
+                },
+                {
+                    index: 9,
+                    kind: "breakpoint",
+                    depth: 1,
+                    label: "Main.java:12",
+                    expandable: false,
+                    expanded: false,
+                    enabled: false,
+                    conditional: false,
+                },
+            ],
+            output: [],
+        };
+
+        try {
+            const { container } = render(() => <App />);
+            const user = screen.getByRole("treeitem", { name: /user/ });
+            expect(user.getAttribute("aria-expanded")).toBe("true");
+            expect(screen.getByText('"Ann"')).toBeTruthy();
+            expect(screen.getByText("Main.java:12")).toBeTruthy();
+            expect(screen.getByRole("button", { name: "Enable" })).toBeTruthy();
+            expect(
+                container.querySelector(".line-number.breakpoint-enabled"),
+            ).toBeTruthy();
+            expect(
+                container.querySelector(".line-number.breakpoint-disabled"),
+            ).toBeTruthy();
+            expect(
+                container.querySelector(".code-line.executing"),
+            ).toBeTruthy();
+        } finally {
+            delete mockSnapshot.debug;
+            first.breakpoint = previous.first;
+            first.executing = previous.executing;
+            second.breakpoint = previous.second;
         }
     });
 

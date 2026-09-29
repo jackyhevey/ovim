@@ -20,6 +20,7 @@
 //! languages.toml. Nearest-test discovery is tree-sitter based (see
 //! `nearest.rs`).
 
+mod jvm;
 mod nearest;
 mod runners;
 
@@ -30,7 +31,9 @@ pub use runners::TestScope;
 use runners::{build_test_command, TestContext, TestInvocation};
 
 use crate::editor::Editor;
-use std::path::PathBuf;
+use crate::launch::plan::LaunchMode;
+use crate::syntax::Language;
+use std::path::{Path, PathBuf};
 
 /// Remembered state of the last test run, for `:TestLast` / `:TestVisit`.
 #[derive(Debug, Clone)]
@@ -41,6 +44,9 @@ pub struct LastTest {
     pub file: String,
     /// 0-indexed cursor line at run time.
     pub line: usize,
+    /// JVM tests run through the launch pipeline; re-running replays this
+    /// request instead of the shell `command`.
+    pub request: Option<crate::editor::LaunchRequest>,
 }
 
 impl Editor {
@@ -62,6 +68,10 @@ impl Editor {
     /// `<Space>tl` - Re-run the last test command.
     pub fn run_test_last(&mut self) {
         match self.build.last_test.clone() {
+            Some(LastTest {
+                request: Some(request),
+                ..
+            }) => self.begin_request(request),
             Some(last) => self.spawn_test_job("re-run", &last.command, last.cwd),
             None => self.set_status_message("No previous test command".to_string()),
         }
@@ -92,7 +102,21 @@ impl Editor {
         self.center_cursor_in_viewport();
     }
 
+    /// `<Space>td` - Debug the nearest test (Java / Kotlin).
+    pub fn debug_test_nearest(&mut self) {
+        self.run_test_with_mode(TestScope::Nearest, LaunchMode::Debug);
+    }
+
+    /// `<Space>tD` - Debug the current file's tests (Java / Kotlin).
+    pub fn debug_test_file(&mut self) {
+        self.run_test_with_mode(TestScope::File, LaunchMode::Debug);
+    }
+
     fn run_test(&mut self, scope: TestScope) {
+        self.run_test_with_mode(scope, LaunchMode::Run);
+    }
+
+    fn run_test_with_mode(&mut self, scope: TestScope, mode: LaunchMode) {
         let Some(file_path) = self.buffer().file_path().map(str::to_string) else {
             self.set_status_message(
                 "Buffer has no file - save it before running tests".to_string(),
@@ -104,6 +128,24 @@ impl Editor {
         let cursor_line = self.buffer().cursor().line();
 
         let language = crate::syntax::LanguageRegistry::detect_from_path(&abs_file);
+        if matches!(language, Some(Language::Java | Language::Kotlin)) {
+            self.run_jvm_test(
+                scope,
+                mode,
+                abs_file,
+                source,
+                cursor_line,
+                language.unwrap(),
+            );
+            return;
+        }
+        if mode == LaunchMode::Debug {
+            self.set_status_message(
+                "Debugging tests is supported for Java and Kotlin; use :debug for this file type"
+                    .to_string(),
+            );
+            return;
+        }
         let lang_registry = crate::language_config::LanguageRegistry::try_get();
         let test_config = lang_registry
             .and_then(|reg| reg.detect(&abs_file))
@@ -124,6 +166,7 @@ impl Editor {
                     cwd: cwd.clone(),
                     file: abs_file.to_string_lossy().to_string(),
                     line: cursor_line,
+                    request: None,
                 });
                 let label = match scope {
                     TestScope::Nearest => "nearest",
@@ -134,6 +177,89 @@ impl Editor {
             }
             Err(msg) => self.set_status_message(msg),
         }
+    }
+
+    /// Java / Kotlin tests go through the launch pipeline: the language
+    /// server's `hyperion.resolveLaunch` (target `test`) says how to run
+    /// them, with a command composed from the file when it cannot. Results
+    /// come back from the JUnit XML reports into the test panel.
+    fn run_jvm_test(
+        &mut self,
+        scope: TestScope,
+        mode: LaunchMode,
+        file: PathBuf,
+        source: String,
+        cursor_line: usize,
+        language: Language,
+    ) {
+        let local = jvm::local_test_plan(scope, &file, &source, cursor_line, language);
+        let project_root = self.launch_project_root(Some(&file));
+        let request_source = match (scope, local) {
+            (TestScope::Suite, Ok(local)) => crate::editor::LaunchSource::Plan {
+                plan: Box::new(local.plan),
+                project_root,
+            },
+            (TestScope::Suite, Err(message)) => {
+                self.set_status_message(message);
+                return;
+            }
+            (_, local) => {
+                let Some(language_id) = self.language_id_for_path(&file.to_string_lossy()) else {
+                    self.set_status_message(format!("Don't know how to test {}", file.display()));
+                    return;
+                };
+                // Where to ask the server: the cursor when it is on the test
+                // (or for the file scope, the class), else the discovered
+                // anchor.
+                let (line, character, fallback) = match local {
+                    Ok(local) => {
+                        let (line, col) = match scope {
+                            TestScope::Nearest if local.cursor_inside => {
+                                let c = self.buffer().cursor();
+                                (c.line(), self.col_to_utf16(c.line(), c.col().0) as usize)
+                            }
+                            _ => local.anchor,
+                        };
+                        (line, col, Ok(Box::new(local.plan)))
+                    }
+                    Err(message) => {
+                        let c = self.buffer().cursor();
+                        (
+                            c.line(),
+                            self.col_to_utf16(c.line(), c.col().0) as usize,
+                            Err(message),
+                        )
+                    }
+                };
+                crate::editor::LaunchSource::Cursor {
+                    file: file.clone(),
+                    language_id,
+                    line: line as u32,
+                    character: character as u32,
+                    target: "test".to_string(),
+                    project_root,
+                    fallback,
+                }
+            }
+        };
+        let request = crate::editor::LaunchRequest {
+            mode,
+            source: request_source,
+            adapter: None,
+        };
+        let label = match scope {
+            TestScope::Nearest => "nearest",
+            TestScope::File => "file",
+            TestScope::Suite => "suite",
+        };
+        self.build.last_test = Some(LastTest {
+            command: format!("{} tests ({label})", mode.verb().to_lowercase()),
+            cwd: file.parent().map(Path::to_path_buf).unwrap_or_default(),
+            file: file.to_string_lossy().to_string(),
+            line: cursor_line,
+            request: Some(request.clone()),
+        });
+        self.begin_request(request);
     }
 
     /// Runs a test command in the background, streaming its output into the

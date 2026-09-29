@@ -46,6 +46,9 @@ If it is missing, opening a Java/Kotlin/Scala/Groovy file shows the build hint i
 | Scala | `.scala`, `.sc` | hyperion-lsp | same as Java |
 | Groovy | `.groovy`, `.gradle` | hyperion-lsp | same as Java |
 
+Syntax highlighting uses a dedicated tree-sitter grammar for each of these: Kotlin (`.kt`, `.kts`, `build.gradle.kts`) uses the
+`tree-sitter-kotlin-sg` grammar (data/sealed classes, coroutines, string templates, lambdas, `when`), not the Java grammar.
+
 ### Syntax Highlighting Only
 
 - Markdown (`.md`, `.markdown`)

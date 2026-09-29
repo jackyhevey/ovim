@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 
@@ -74,11 +74,25 @@ pub struct ProcessHandle {
     rx: mpsc::UnboundedReceiver<ProcEvent>,
     kill_tx: Option<oneshot::Sender<()>>,
     pid: Option<u32>,
+    /// Text for the child's stdin; `None` when stdin is closed (or was never
+    /// piped). Dropping the sender closes the pipe.
+    stdin_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 impl ProcessHandle {
-    /// Starts `spec`. Must be called inside a tokio runtime.
+    /// Starts `spec` with stdin closed (builds). Must be called inside a
+    /// tokio runtime.
     pub fn spawn(spec: &CommandSpec) -> Result<Self, String> {
+        Self::spawn_with(spec, false)
+    }
+
+    /// Starts `spec` with a pipe on stdin, fed through [`send_stdin`](Self::send_stdin)
+    /// (programs that read `System.in`).
+    pub fn spawn_interactive(spec: &CommandSpec) -> Result<Self, String> {
+        Self::spawn_with(spec, true)
+    }
+
+    fn spawn_with(spec: &CommandSpec, interactive: bool) -> Result<Self, String> {
         let Some(program) = spec.argv.first() else {
             return Err("empty command".to_string());
         };
@@ -87,7 +101,11 @@ impl ProcessHandle {
             .args(&spec.argv[1..])
             .current_dir(&spec.cwd)
             .envs(&spec.env)
-            .stdin(Stdio::null())
+            .stdin(if interactive {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
@@ -104,6 +122,19 @@ impl ProcessHandle {
         let pid = child.id();
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        let stdin_tx = child.stdin.take().map(|mut stdin| {
+            let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            tokio::spawn(async move {
+                while let Some(bytes) = rx.recv().await {
+                    // A program that stopped reading (or exited) closes the pipe.
+                    if stdin.write_all(&bytes).await.is_err() || stdin.flush().await.is_err() {
+                        break;
+                    }
+                }
+                // Channel closed: dropping `stdin` here signals EOF.
+            });
+            tx
+        });
 
         let (tx, rx) = mpsc::unbounded_channel();
         let (kill_tx, kill_rx) = oneshot::channel::<()>();
@@ -151,7 +182,25 @@ impl ProcessHandle {
             rx,
             kill_tx: Some(kill_tx),
             pid,
+            stdin_tx,
         })
+    }
+
+    /// Whether the child's stdin is still open for [`send_stdin`](Self::send_stdin).
+    pub fn accepts_stdin(&self) -> bool {
+        self.stdin_tx.as_ref().is_some_and(|tx| !tx.is_closed())
+    }
+
+    /// Writes `text` to the child's stdin. Returns false when stdin is closed.
+    pub fn send_stdin(&self, text: &str) -> bool {
+        self.stdin_tx
+            .as_ref()
+            .is_some_and(|tx| tx.send(text.as_bytes().to_vec()).is_ok())
+    }
+
+    /// Closes the child's stdin (EOF for `System.in`).
+    pub fn close_stdin(&mut self) {
+        self.stdin_tx = None;
     }
 
     /// Next pending event without blocking.
@@ -256,6 +305,36 @@ mod tests {
                 killed: false
             }
         );
+    }
+
+    #[tokio::test]
+    async fn interactive_children_read_lines_from_stdin_until_eof() {
+        let mut handle = ProcessHandle::spawn_interactive(&spec(
+            "while read line; do echo \"got:$line\"; done; echo eof",
+        ))
+        .unwrap();
+        assert!(handle.accepts_stdin());
+        assert!(handle.send_stdin("one\n"));
+        assert!(handle.send_stdin("two words\n"));
+        handle.close_stdin();
+        assert!(!handle.accepts_stdin());
+        let (lines, exit) = tokio::time::timeout(Duration::from_secs(5), drain(&mut handle))
+            .await
+            .unwrap();
+        let out: Vec<String> = lines.into_iter().map(|(_, t)| t).collect();
+        assert_eq!(out, vec!["got:one", "got:two words", "eof"]);
+        assert_eq!(exit.code, Some(0));
+    }
+
+    #[tokio::test]
+    async fn plain_spawn_gives_the_child_an_empty_stdin() {
+        let mut handle = ProcessHandle::spawn(&spec("read x; echo \"[$x]\"")).unwrap();
+        assert!(!handle.accepts_stdin());
+        assert!(!handle.send_stdin("ignored\n"));
+        let (lines, _) = tokio::time::timeout(Duration::from_secs(5), drain(&mut handle))
+            .await
+            .unwrap();
+        assert_eq!(lines, vec![(StreamKind::Stdout, "[]".to_string())]);
     }
 
     #[tokio::test]

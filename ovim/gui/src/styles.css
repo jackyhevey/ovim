@@ -2263,7 +2263,118 @@ button:focus-visible {
     opacity: 0.4;
 }
 .debug-panel {
-    grid-template-rows: auto auto minmax(80px, 0.7fr) minmax(80px, 1fr);
+    grid-template-rows: auto auto minmax(60px, 0.5fr) minmax(80px, 1fr) minmax(
+            50px,
+            0.5fr
+        );
+}
+.debug-rows {
+    overflow: auto;
+    padding: 4px 0;
+    font-size: var(--text-micro);
+}
+.debug-row {
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    min-height: 20px;
+    padding-right: 6px;
+    white-space: nowrap;
+}
+.debug-row.header {
+    margin-top: 4px;
+    color: var(--accent);
+    font-weight: 650;
+}
+.debug-row.note {
+    color: var(--text-secondary);
+}
+.debug-row:not(.header):not(.note):hover {
+    background: var(--surface-selected);
+    cursor: pointer;
+}
+.debug-row.disabled {
+    opacity: 0.55;
+}
+.debug-row-marker {
+    width: 12px;
+    flex: 0 0 auto;
+    color: var(--error);
+}
+.debug-row.variable .debug-row-marker,
+.debug-row.watch .debug-row-marker {
+    color: var(--text-secondary);
+}
+.debug-row-value {
+    color: var(--success);
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.debug-row small {
+    color: var(--text-secondary);
+}
+.debug-row-actions {
+    margin-left: auto;
+    display: none;
+    gap: 3px;
+}
+.debug-row:hover .debug-row-actions {
+    display: flex;
+}
+.debug-row-actions button {
+    padding: 0 5px;
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-2);
+    background: transparent;
+    font-size: var(--text-micro);
+}
+.line-number.breakpoint-enabled,
+.line-number.breakpoint-conditional,
+.line-number.breakpoint-disabled {
+    position: relative;
+}
+.line-number.breakpoint-enabled::before,
+.line-number.breakpoint-conditional::before,
+.line-number.breakpoint-disabled::before {
+    content: "";
+    position: absolute;
+    left: 4px;
+    top: 50%;
+    width: 9px;
+    height: 9px;
+    margin-top: -4.5px;
+    border-radius: 50%;
+    background: var(--error);
+}
+.line-number.breakpoint-conditional::before {
+    border-radius: 2px;
+    transform: rotate(45deg) scale(0.85);
+}
+.line-number.breakpoint-disabled::before {
+    background: transparent;
+    border: 1.5px solid var(--text-secondary);
+}
+.line-number.execution-line {
+    color: var(--warning, #e5c07b);
+    font-weight: 700;
+}
+.line-number.execution-line::after {
+    content: "▶";
+    position: absolute;
+    left: 15px;
+    top: 50%;
+    margin-top: -7px;
+    font-size: 9px;
+    line-height: 14px;
+    color: var(--warning, #e5c07b);
+}
+.code-line.executing {
+    background: color-mix(in srgb, var(--warning, #e5c07b) 14%, transparent);
+}
+.line-number {
+    position: relative;
+    cursor: pointer;
 }
 .debug-controls {
     min-width: 0;

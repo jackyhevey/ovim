@@ -2502,6 +2502,9 @@ function App() {
                                                             line.number,
                                                             props.pane.focused,
                                                         ),
+                                                    executing: Boolean(
+                                                        line.executing,
+                                                    ),
                                                 }}
                                             >
                                                 <span
@@ -2532,7 +2535,34 @@ function App() {
                                                         }}
                                                     </Show>
                                                 </span>
-                                                <span class="line-number">
+                                                <span
+                                                    class={`line-number ${line.breakpoint ? `breakpoint-${line.breakpoint}` : ""}`}
+                                                    classList={{
+                                                        "execution-line":
+                                                            Boolean(
+                                                                line.executing,
+                                                            ),
+                                                    }}
+                                                    title={
+                                                        line.continuation
+                                                            ? undefined
+                                                            : "Click to toggle a breakpoint"
+                                                    }
+                                                    onMouseDown={(event) => {
+                                                        if (
+                                                            line.continuation ||
+                                                            !props.pane.focused
+                                                        )
+                                                            return;
+                                                        event.preventDefault();
+                                                        void mutate(
+                                                            "gui_toggle_breakpoint",
+                                                            {
+                                                                line: line.number,
+                                                            },
+                                                        );
+                                                    }}
+                                                >
                                                     {line.continuation
                                                         ? ""
                                                         : line.number}
@@ -3200,6 +3230,131 @@ function App() {
                                         {frame.file}:{frame.line}
                                     </small>
                                 </button>
+                            )}
+                        </For>
+                    </div>
+                    <div
+                        class="debug-rows"
+                        role="tree"
+                        aria-label="Variables, watches and breakpoints"
+                    >
+                        <For each={debug().rows}>
+                            {(row) => (
+                                <Show
+                                    when={
+                                        row.kind !== "header" &&
+                                        row.kind !== "note"
+                                    }
+                                    fallback={
+                                        <div
+                                            class={`debug-row ${row.kind}`}
+                                            style={{
+                                                "padding-left": `${row.depth * 12 + 6}px`,
+                                            }}
+                                        >
+                                            {row.label}
+                                        </div>
+                                    }
+                                >
+                                    <div
+                                        class={`debug-row ${row.kind}`}
+                                        classList={{
+                                            disabled: row.enabled === false,
+                                        }}
+                                        role="treeitem"
+                                        aria-expanded={
+                                            row.expandable
+                                                ? row.expanded
+                                                : undefined
+                                        }
+                                        style={{
+                                            "padding-left": `${row.depth * 12 + 6}px`,
+                                        }}
+                                        onClick={() => {
+                                            void mutate("gui_debug_panel_row", {
+                                                index: row.index,
+                                                action: "activate",
+                                            });
+                                        }}
+                                    >
+                                        <span class="debug-row-marker">
+                                            {row.kind === "breakpoint"
+                                                ? row.enabled === false
+                                                    ? "○"
+                                                    : row.conditional
+                                                      ? "◆"
+                                                      : "●"
+                                                : row.kind === "exception"
+                                                  ? row.enabled
+                                                      ? "☑"
+                                                      : "☐"
+                                                  : row.expandable
+                                                    ? row.expanded
+                                                        ? "▾"
+                                                        : "▸"
+                                                    : ""}
+                                        </span>
+                                        <b>{row.label}</b>
+                                        <Show when={row.value}>
+                                            <span class="debug-row-value">
+                                                {row.value}
+                                            </span>
+                                        </Show>
+                                        <Show when={row.typeName}>
+                                            <small>{row.typeName}</small>
+                                        </Show>
+                                        <Show
+                                            when={
+                                                row.kind === "breakpoint" ||
+                                                row.kind === "watch"
+                                            }
+                                        >
+                                            <span class="debug-row-actions">
+                                                <Show
+                                                    when={
+                                                        row.kind ===
+                                                        "breakpoint"
+                                                    }
+                                                >
+                                                    <button
+                                                        type="button"
+                                                        title="Enable or disable"
+                                                        onClick={(event) => {
+                                                            event.stopPropagation();
+                                                            void mutate(
+                                                                "gui_debug_panel_row",
+                                                                {
+                                                                    index: row.index,
+                                                                    action: "toggle",
+                                                                },
+                                                            );
+                                                        }}
+                                                    >
+                                                        {row.enabled === false
+                                                            ? "Enable"
+                                                            : "Disable"}
+                                                    </button>
+                                                </Show>
+                                                <button
+                                                    type="button"
+                                                    title="Remove"
+                                                    onClick={(event) => {
+                                                        event.stopPropagation();
+                                                        void mutate(
+                                                            "gui_debug_panel_row",
+                                                            {
+                                                                index: row.index,
+                                                                action: "delete",
+                                                            },
+                                                        );
+                                                    }}
+                                                >
+                                                    Remove
+                                                </button>
+                                            </span>
+                                        </Show>
+                                    </div>
+                                </Show>
                             )}
                         </For>
                     </div>

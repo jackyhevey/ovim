@@ -18,6 +18,41 @@ pub struct BreakpointState {
     pub id: Option<u64>,
     /// Condition expression for conditional breakpoints (None = unconditional).
     pub condition: Option<String>,
+    /// Disabled breakpoints stay in the list (and the gutter, hollow) but are
+    /// not sent to the adapter.
+    pub enabled: bool,
+}
+
+/// A watch expression, re-evaluated at every stop.
+#[derive(Debug, Clone)]
+pub struct Watch {
+    pub expression: String,
+    /// `Ok(value)` or `Err(message)` from the last evaluation while stopped.
+    pub result: Option<Result<String, String>>,
+    pub type_: Option<String>,
+    /// Non-zero when the value has children that can be expanded.
+    pub variables_reference: u64,
+}
+
+/// An exception category the adapter can break on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExceptionFilter {
+    pub id: String,
+    pub label: String,
+    pub enabled: bool,
+}
+
+/// Cursor and scroll state of the focusable debug panel.
+#[derive(Debug, Clone, Default)]
+pub struct PanelUi {
+    /// Highlighted row (index into [`panel::rows`](super::panel::rows)).
+    pub cursor: usize,
+    /// First visible row (written by the renderer, which knows the height).
+    pub scroll: std::cell::Cell<usize>,
+    /// Rows that fit on screen; set by the renderer for paging.
+    pub view_height: std::cell::Cell<usize>,
+    /// Columns added to (or taken from) the default panel width.
+    pub width_delta: i16,
 }
 
 /// All debug state for the editor.
@@ -55,9 +90,19 @@ pub struct DebugState {
     /// Debuggee output lines.
     pub output_lines: Vec<String>,
 
+    // ---- Watches and exceptions ----
+    pub watches: Vec<Watch>,
+    /// Exception filters the adapter offered (kept across sessions so the
+    /// user's choice survives a restart).
+    pub exception_filters: Vec<ExceptionFilter>,
+
     // ---- UI ----
     /// Whether debug panels are visible.
     pub panels_visible: bool,
+    /// The user opened the panel themselves (`<Space>dv` / `<Space>df`): it
+    /// stays when a session ends instead of disappearing with it.
+    pub panel_pinned: bool,
+    pub panel: PanelUi,
 
     // ---- Execution line tracking ----
     /// Current execution file path (for gutter indicator).
@@ -86,7 +131,11 @@ impl DebugState {
             variables: HashMap::new(),
             expanded_refs: HashSet::new(),
             output_lines: Vec::new(),
+            watches: Vec::new(),
+            exception_filters: Vec::new(),
             panels_visible: false,
+            panel_pinned: false,
+            panel: PanelUi::default(),
             execution_file: None,
             execution_line: None,
         }
@@ -105,6 +154,7 @@ impl DebugState {
                 verified: false,
                 id: None,
                 condition: None,
+                enabled: true,
             });
         }
 
@@ -119,6 +169,61 @@ impl DebugState {
             .unwrap_or_default()
     }
 
+    /// Lines the adapter should know about (enabled breakpoints only).
+    pub fn enabled_breakpoint_lines(&self, path: &Path) -> Vec<u64> {
+        self.breakpoints
+            .get(path)
+            .map(|bps| {
+                bps.iter()
+                    .filter(|bp| bp.enabled)
+                    .map(|bp| bp.line)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Whether the breakpoint at `line` exists and is enabled.
+    pub fn is_breakpoint_enabled(&self, path: &Path, line: u64) -> bool {
+        self.breakpoints
+            .get(path)
+            .is_some_and(|bps| bps.iter().any(|bp| bp.line == line && bp.enabled))
+    }
+
+    /// Removes a breakpoint. Returns whether one existed.
+    pub fn remove_breakpoint(&mut self, path: &Path, line: u64) -> bool {
+        let Some(entry) = self.breakpoints.get_mut(path) else {
+            return false;
+        };
+        let before = entry.len();
+        entry.retain(|bp| bp.line != line);
+        // The (now empty) entry stays so the next sync tells the adapter
+        // that the file has no breakpoints any more.
+        entry.len() != before
+    }
+
+    /// Enables or disables a breakpoint. Returns the new state, or `None`
+    /// when there is no breakpoint at that line.
+    pub fn toggle_breakpoint_enabled(&mut self, path: &Path, line: u64) -> Option<bool> {
+        let bp = self
+            .breakpoints
+            .get_mut(path)?
+            .iter_mut()
+            .find(|bp| bp.line == line)?;
+        bp.enabled = !bp.enabled;
+        Some(bp.enabled)
+    }
+
+    /// Every breakpoint, ordered by file and line.
+    pub fn all_breakpoints(&self) -> Vec<(&Path, &BreakpointState)> {
+        let mut all: Vec<(&Path, &BreakpointState)> = self
+            .breakpoints
+            .iter()
+            .flat_map(|(path, bps)| bps.iter().map(move |bp| (path.as_path(), bp)))
+            .collect();
+        all.sort_by(|a, b| a.0.cmp(b.0).then(a.1.line.cmp(&b.1.line)));
+        all
+    }
+
     /// Check if a line has a breakpoint.
     pub fn has_breakpoint(&self, path: &Path, line: u64) -> bool {
         self.breakpoints
@@ -131,6 +236,8 @@ impl DebugState {
         let entry = self.breakpoints.entry(path.to_path_buf()).or_default();
         let old_entries = entry.clone();
         entry.clear();
+        // Disabled breakpoints were not sent, so the reply knows nothing of them.
+        entry.extend(old_entries.iter().filter(|bp| !bp.enabled).cloned());
         for bp in dap_bps {
             if let Some(line) = bp.line {
                 // Preserve existing condition if the breakpoint was already there.
@@ -143,9 +250,11 @@ impl DebugState {
                     verified: bp.verified,
                     id: bp.id,
                     condition: existing_condition,
+                    enabled: true,
                 });
             }
         }
+        entry.sort_by_key(|bp| bp.line);
     }
 
     /// Update the execution position from the selected stack frame.
@@ -174,6 +283,7 @@ impl DebugState {
                 verified: false,
                 id: None,
                 condition,
+                enabled: true,
             });
         }
     }
@@ -214,5 +324,16 @@ impl DebugState {
         self.expanded_refs.clear();
         self.execution_file = None;
         self.execution_line = None;
+        self.clear_watch_values();
+    }
+
+    /// Forgets watch results (they belong to a stop that no longer exists);
+    /// the expressions stay.
+    pub fn clear_watch_values(&mut self) {
+        for watch in &mut self.watches {
+            watch.result = None;
+            watch.type_ = None;
+            watch.variables_reference = 0;
+        }
     }
 }

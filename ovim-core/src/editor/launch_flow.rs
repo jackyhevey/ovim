@@ -55,6 +55,14 @@ pub enum LaunchSource {
         /// `auto`, `main` or `test`.
         target: String,
         project_root: PathBuf,
+        /// Composed locally (test discovery + build-tool filter); used when
+        /// the server cannot resolve the position, or the reason it cannot.
+        fallback: Result<Box<LaunchPlan>, String>,
+    },
+    /// A ready-made plan (e.g. the whole test suite composed locally).
+    Plan {
+        plan: Box<LaunchPlan>,
+        project_root: PathBuf,
     },
     /// A configuration from `.ovim/debug.toml` or `hyperion.runConfigurations`.
     Config {
@@ -80,6 +88,7 @@ impl LaunchRequest {
         match &self.source {
             LaunchSource::Cursor { project_root, .. }
             | LaunchSource::Config { project_root, .. }
+            | LaunchSource::Plan { project_root, .. }
             | LaunchSource::ConfigLookup { project_root } => project_root,
         }
     }
@@ -123,6 +132,8 @@ struct LaunchJob {
     stopping: bool,
     /// The debug session ended (or was stopped) while a child still ran.
     session_end: Option<crate::dap::SessionEnd>,
+    /// A test run shown in the test panel that has not been finalised yet.
+    panel_run: bool,
 }
 
 fn append_capped(log: &mut String, text: &str) {
@@ -185,6 +196,13 @@ pub(crate) struct LaunchState {
     pending_pick: Option<PendingPick>,
     debug_port_timeout: Duration,
     pub(crate) code_lens: super::code_lens::CodeLensState,
+    /// A stack frame whose source is not under the workspace, being looked up
+    /// through the language server (`workspace/symbol`): the file and 1-based
+    /// line to open, or a message.
+    pub(crate) frame_lookup: Option<oneshot::Receiver<Result<(PathBuf, usize), String>>>,
+    /// `:LspExec` in flight: (command, result).
+    pub(crate) server_command:
+        Option<oneshot::Receiver<(String, Result<serde_json::Value, String>)>>,
 }
 
 impl Default for LaunchState {
@@ -197,6 +215,8 @@ impl Default for LaunchState {
             pending_pick: None,
             debug_port_timeout: DEBUG_PORT_TIMEOUT,
             code_lens: Default::default(),
+            frame_lookup: None,
+            server_command: None,
         }
     }
 }
@@ -243,6 +263,113 @@ impl Editor {
     // Entry points (called from keys and commands; never block)
     // ------------------------------------------------------------------
 
+    /// `:RunInput <text>`: sends a line to the running program's stdin
+    /// (`System.in`). Empty text sends an empty line.
+    pub fn run_input(&mut self, text: &str) {
+        let Some(job) = self.launch.job.as_mut() else {
+            self.set_status_message("No program is running");
+            return;
+        };
+        let run_id = job.run_id;
+        let sent = job
+            .proc
+            .as_ref()
+            .is_some_and(|p| p.accepts_stdin() && p.send_stdin(&format!("{text}\n")));
+        if sent {
+            self.log_console(run_id, LineKind::System, format!("» {text}"));
+        } else {
+            self.set_status_message(
+                "The running program does not take input (only Run, not Debug or tests, feeds stdin)",
+            );
+        }
+    }
+
+    /// `:RunEof`: closes the program's stdin (like Ctrl-D in a terminal).
+    pub fn run_eof(&mut self) {
+        let Some(job) = self.launch.job.as_mut() else {
+            self.set_status_message("No program is running");
+            return;
+        };
+        let run_id = job.run_id;
+        let closed = job.proc.as_mut().is_some_and(|p| {
+            let open = p.accepts_stdin();
+            p.close_stdin();
+            open
+        });
+        if closed {
+            self.log_console(run_id, LineKind::System, "» (end of input)");
+        } else {
+            self.set_status_message("Input is already closed");
+        }
+    }
+
+    /// `:LspExec <command> [json args]`: runs a `workspace/executeCommand`
+    /// on the language server that owns the current file and reports the
+    /// outcome (result in the status line, or a scratch buffer when long).
+    pub fn lsp_execute_command(&mut self, command: &str, arguments: Vec<serde_json::Value>) {
+        let Some(file) = self.buffer().file_path().map(PathBuf::from) else {
+            self.set_status_message("Open a file first: the command runs on its language server");
+            return;
+        };
+        let Some(language_id) = self.language_id_for_path(&file.to_string_lossy()) else {
+            self.set_status_message(format!("No language server for {}", file.display()));
+            return;
+        };
+        let Some(manager) = self.lsp_manager() else {
+            self.set_status_message("LSP is not enabled");
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            self.set_status_message("Cannot run a server command: no async runtime available");
+            return;
+        }
+        let (tx, rx) = oneshot::channel();
+        let command = command.to_string();
+        let name = command.clone();
+        tokio::spawn(async move {
+            let result =
+                lsp::execute_for_document(manager, &language_id, &file, &command, arguments).await;
+            let _ = tx.send((command, result));
+        });
+        self.launch.server_command = Some(rx);
+        self.set_status_message(format!("Running {name}..."));
+    }
+
+    fn poll_server_command(&mut self) -> bool {
+        let Some(rx) = self.launch.server_command.as_mut() else {
+            return false;
+        };
+        let (command, result) = match rx.try_recv() {
+            Ok(done) => done,
+            Err(oneshot::error::TryRecvError::Empty) => return false,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.launch.server_command = None;
+                return false;
+            }
+        };
+        self.launch.server_command = None;
+        match result {
+            Err(message) => self.set_status_message(format!("{command} failed: {message}")),
+            Ok(value) => {
+                let compact = if value.is_null() {
+                    String::new()
+                } else {
+                    value.to_string()
+                };
+                if compact.is_empty() {
+                    self.set_status_message(format!("{command}: done"));
+                } else if compact.len() <= 120 {
+                    self.set_status_message(format!("{command}: {compact}"));
+                } else {
+                    let pretty = serde_json::to_string_pretty(&value).unwrap_or(compact);
+                    self.open_scratch_buffer("LspExec", &pretty);
+                    self.set_status_message(format!("{command}: result in the LspExec buffer"));
+                }
+            }
+        }
+        true
+    }
+
     /// Run or debug whatever is at the cursor (`target: auto`).
     pub fn launch_at_cursor(&mut self, mode: LaunchMode) {
         self.launch_at_cursor_with(mode, None);
@@ -274,6 +401,7 @@ impl Editor {
                 language_id,
                 target,
                 project_root,
+                fallback,
                 ..
             }) => self.begin_request(LaunchRequest {
                 mode,
@@ -284,6 +412,7 @@ impl Editor {
                     character,
                     target,
                     project_root,
+                    fallback,
                 },
                 adapter: None,
             }),
@@ -389,6 +518,7 @@ impl Editor {
             started_wall: SystemTime::now(),
             stopping: false,
             session_end: None,
+            panel_run: false,
         });
         self.log_console(run_id, LineKind::System, "Looking up run configurations...");
     }
@@ -463,6 +593,17 @@ impl Editor {
                 true
             }
             None => {
+                if let stacktrace::ConsoleLocation::Frame {
+                    class, file, line, ..
+                } = &location
+                {
+                    // Not in the workspace: libraries, other modules, the JDK.
+                    // Ask the language server that indexes them.
+                    if self.lookup_frame_via_lsp(class, file, *line) {
+                        self.set_status_message(format!("Looking up {class}..."));
+                        return true;
+                    }
+                }
                 let what = match &location {
                     stacktrace::ConsoleLocation::Frame { class, file, .. } => {
                         format!("{class} ({file})")
@@ -475,13 +616,63 @@ impl Editor {
         }
     }
 
+    /// Starts a `workspace/symbol` lookup for a stack frame's class. Returns
+    /// false when there is no server to ask.
+    fn lookup_frame_via_lsp(&mut self, class: &str, file: &str, line: usize) -> bool {
+        let Some(manager) = self.lsp_manager() else {
+            return false;
+        };
+        if tokio::runtime::Handle::try_current().is_err() {
+            return false;
+        }
+        let language_id = if file.ends_with(".kt") || file.ends_with(".kts") {
+            "kotlin"
+        } else {
+            "java"
+        }
+        .to_string();
+        let (class, file) = (class.to_string(), file.to_string());
+        let (tx, rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let result = stacktrace::lookup_frame_source(&manager, &language_id, &class, &file)
+                .await
+                .map(|path| (path, line));
+            let _ = tx.send(result);
+        });
+        self.launch.frame_lookup = Some(rx);
+        true
+    }
+
+    fn poll_frame_lookup(&mut self) -> bool {
+        let Some(rx) = self.launch.frame_lookup.as_mut() else {
+            return false;
+        };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(oneshot::error::TryRecvError::Empty) => return false,
+            Err(oneshot::error::TryRecvError::Closed) => {
+                self.launch.frame_lookup = None;
+                return false;
+            }
+        };
+        self.launch.frame_lookup = None;
+        match result {
+            Ok((path, line)) => self.open_location(&path, line, 1),
+            Err(message) => self.set_status_message(message),
+        }
+        true
+    }
+
     /// Opens `path` at a 1-based line/column and leaves console focus.
     pub(crate) fn open_location(&mut self, path: &Path, line: usize, col: usize) {
         if let Err(e) = self.open_file(path) {
             self.set_status_message(format!("Failed to open {}: {e}", path.display()));
             return;
         }
-        if self.mode == crate::mode::Mode::RunConsole {
+        if matches!(
+            self.mode,
+            crate::mode::Mode::RunConsole | crate::mode::Mode::DebugPanel
+        ) {
             self.mode = crate::mode::Mode::Normal;
         }
         let line0 = line.saturating_sub(1);
@@ -520,7 +711,7 @@ impl Editor {
     /// Workspace root for `file` (or the current buffer): the language
     /// server's root when one owns the file, else the nearest build marker,
     /// else the file's directory, else the process working directory.
-    fn launch_project_root(&self, file: Option<&Path>) -> PathBuf {
+    pub(crate) fn launch_project_root(&self, file: Option<&Path>) -> PathBuf {
         let current = self.buffer().file_path().map(PathBuf::from);
         let Some(file) = file.map(Path::to_path_buf).or(current) else {
             return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -571,11 +762,12 @@ impl Editor {
             line: cursor.line() as u32,
             character,
             target: target.to_string(),
+            fallback: Err("no local plan".to_string()),
         })
     }
 
     /// Starts a request, replacing whatever is running.
-    fn begin_request(&mut self, request: LaunchRequest) {
+    pub(crate) fn begin_request(&mut self, request: LaunchRequest) {
         if tokio::runtime::Handle::try_current().is_err() {
             self.set_status_message("Cannot start a run: no async runtime available");
             return;
@@ -601,6 +793,7 @@ impl Editor {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "file".to_string()),
             LaunchSource::Config { config, .. } => config.name.clone(),
+            LaunchSource::Plan { plan, .. } => plan.name.clone(),
             LaunchSource::ConfigLookup { .. } => "Run configurations".to_string(),
         };
         let run_id = self
@@ -624,10 +817,12 @@ impl Editor {
             started_wall: SystemTime::now(),
             stopping: false,
             session_end: None,
+            panel_run: false,
         };
 
         match request.source.clone() {
             LaunchSource::ConfigLookup { .. } => {}
+            LaunchSource::Plan { plan, .. } => self.begin_plan(&mut job, *plan),
             LaunchSource::Config {
                 config,
                 project_root,
@@ -735,25 +930,65 @@ impl Editor {
             self.finish_config_lookup(job, result);
             return;
         }
+        // Tests fall back to a plan composed locally (never to run configs).
+        let test_fallback = match &job.request.source {
+            LaunchSource::Cursor {
+                target, fallback, ..
+            } if target == "test" => Some(fallback.clone()),
+            _ => None,
+        };
+        let _ = mode;
         match result.outcome {
             ResolveOutcome::Plan(value) => match plan::plan_from_resolved(&value) {
                 Ok(Some(plan)) => self.begin_plan(job, plan),
-                Ok(None) => {
-                    self.no_plan_here(job, "nothing runnable at the cursor", result.configurations)
-                }
+                Ok(None) => match test_fallback {
+                    Some(fallback) => {
+                        self.begin_test_fallback(job, fallback, "no test found by the server")
+                    }
+                    None => self.no_plan_here(
+                        job,
+                        "nothing runnable at the cursor",
+                        result.configurations,
+                    ),
+                },
                 Err(message) => self.fail_job(job, message),
             },
-            ResolveOutcome::Nothing => self.no_plan_here(
-                job,
-                "no main method or test at the cursor",
-                result.configurations,
-            ),
+            ResolveOutcome::Nothing => match test_fallback {
+                Some(fallback) => {
+                    self.begin_test_fallback(job, fallback, "the server found no test here")
+                }
+                None => self.no_plan_here(
+                    job,
+                    "no main method or test at the cursor",
+                    result.configurations,
+                ),
+            },
             ResolveOutcome::Unsupported(reason)
             | ResolveOutcome::NoServer(reason)
-            | ResolveOutcome::Failed(reason) => {
-                let _ = mode;
-                self.no_plan_here(job, &reason, result.configurations)
+            | ResolveOutcome::Failed(reason) => match test_fallback {
+                Some(fallback) => self.begin_test_fallback(job, fallback, &reason),
+                None => self.no_plan_here(job, &reason, result.configurations),
+            },
+        }
+    }
+
+    /// Runs the locally composed test plan when the server had none.
+    fn begin_test_fallback(
+        &mut self,
+        job: &mut LaunchJob,
+        fallback: Result<Box<LaunchPlan>, String>,
+        why: &str,
+    ) {
+        match fallback {
+            Ok(plan) => {
+                self.log_console(
+                    job.run_id,
+                    LineKind::System,
+                    format!("({why}; using a test command composed from the file)"),
+                );
+                self.begin_plan(job, *plan);
             }
+            Err(message) => self.fail_job(job, message),
         }
     }
 
@@ -907,6 +1142,9 @@ impl Editor {
             self.log_console(job.run_id, LineKind::System, format!("warning: {warning}"));
         }
         job.plan = Some(plan.clone());
+        if plan.kind == PlanKind::Test {
+            self.start_test_panel_run(job, &plan);
+        }
 
         match (plan.kind, mode) {
             (PlanKind::Attach, _) => {
@@ -949,6 +1187,9 @@ impl Editor {
         phase: RunPhase,
         stage: Stage,
     ) {
+        // Only the program itself reads stdin, not builds or test tasks.
+        let interactive =
+            stage == Stage::Running && job.plan.as_ref().is_some_and(|p| p.kind == PlanKind::Main);
         self.log_console(
             job.run_id,
             LineKind::System,
@@ -958,7 +1199,12 @@ impl Editor {
             run.command = spec.display();
             run.cwd = spec.cwd.clone();
         }
-        match ProcessHandle::spawn(spec) {
+        let spawned = if interactive {
+            ProcessHandle::spawn_interactive(spec)
+        } else {
+            ProcessHandle::spawn(spec)
+        };
+        match spawned {
             Ok(proc) => {
                 job.proc = Some(proc);
                 job.proc_exit = None;
@@ -1111,6 +1357,8 @@ impl Editor {
     /// Advances the launch state machine. Returns true when a redraw is needed.
     pub fn poll_launch(&mut self) -> bool {
         let mut changed = self.ingest_debug_output();
+        changed |= self.poll_server_command();
+        changed |= self.poll_frame_lookup();
         let Some(mut job) = self.launch.job.take() else {
             changed |= self.acknowledge_orphan_session_end();
             self.start_queued_launch();
@@ -1254,7 +1502,7 @@ impl Editor {
                     LineKind::System,
                     format!("Process finished with exit code {code_text}"),
                 );
-                self.finish_test_reports(job);
+                self.finish_test_reports(job, ok);
                 if !ok {
                     let summary = self.report_build_problems(job, false);
                     if let Some(s) = summary {
@@ -1296,7 +1544,7 @@ impl Editor {
                     LineKind::System,
                     format!("Process finished with exit code {code_text}"),
                 );
-                self.finish_test_reports(job);
+                self.finish_test_reports(job, code == Some(0));
             }
             Stage::Resolving => {}
         }
@@ -1363,23 +1611,66 @@ impl Editor {
         summary
     }
 
+    /// Opens the test panel's record of a test plan (running).
+    fn start_test_panel_run(&mut self, job: &mut LaunchJob, plan: &LaunchPlan) {
+        let Some(task) = plan.task.as_ref() else {
+            return;
+        };
+        let debug = job.request.mode == LaunchMode::Debug;
+        let label = match (debug, task.method_name.is_some(), task.class_name.is_some()) {
+            (false, true, _) => "nearest",
+            (false, false, true) => "file",
+            (false, false, false) => "suite",
+            (true, true, _) => "debug nearest",
+            (true, false, true) => "debug file",
+            (true, false, false) => "debug suite",
+        };
+        let spec = CommandSpec {
+            argv: if debug {
+                task.debug_argv.clone().unwrap_or_else(|| task.argv.clone())
+            } else {
+                task.argv.clone()
+            },
+            cwd: task.cwd.clone(),
+            env: Default::default(),
+        };
+        self.build
+            .test_panel
+            .start_run(label, spec.display(), task.cwd.clone());
+        job.panel_run = true;
+    }
+
     /// After a test task, read JUnit XML from the plan's reports directory
-    /// and surface the outcome in the console and the quickfix list.
-    fn finish_test_reports(&mut self, job: &mut LaunchJob) {
+    /// and surface the outcome in the console, the test panel (per test:
+    /// pass/fail, message, jumpable frames) and the quickfix list.
+    fn finish_test_reports(&mut self, job: &mut LaunchJob, exit_ok: bool) {
         let Some(dir) = job
             .plan
             .as_ref()
             .and_then(|p| p.task.as_ref())
             .and_then(|t| t.reports_dir.clone())
         else {
+            self.finish_test_panel_run(job, exit_ok, Vec::new(), None, Vec::new());
             return;
         };
         let cases = junit::read_reports_dir(&dir, job.started_wall - Duration::from_secs(2));
-        let Some(summary) = junit::summary_text(&cases) else {
+        let summary = junit::summary_text(&cases);
+        let roots = job
+            .plan
+            .as_ref()
+            .map(|p| p.source_roots())
+            .unwrap_or_default();
+        let Some(summary_text) = summary.clone() else {
+            self.finish_test_panel_run(job, exit_ok, cases, None, Vec::new());
             return;
         };
-        self.log_console(job.run_id, LineKind::System, format!("Tests: {summary}"));
+        self.log_console(
+            job.run_id,
+            LineKind::System,
+            format!("Tests: {summary_text}"),
+        );
         let mut entries = Vec::new();
+        let mut failures = Vec::new();
         for case in cases.iter().filter(|c| {
             matches!(
                 c.status,
@@ -1396,32 +1687,115 @@ impl Editor {
                 LineKind::System,
                 format!("FAILED {label}: {message}"),
             );
-            // The first frame in a project file is where to go.
-            let roots = job
-                .plan
-                .as_ref()
-                .map(|p| p.source_roots())
-                .unwrap_or_default();
-            let location = case
+            // Frames in project files, in stack order: the first is where
+            // to go, the rest stay reachable through :cn.
+            let frames: Vec<(PathBuf, usize, usize)> = case
                 .details
                 .as_deref()
                 .into_iter()
                 .flat_map(str::lines)
                 .filter_map(stacktrace::parse_console_location)
-                .find_map(|loc| stacktrace::resolve_location(&loc, &dir, &roots));
-            if let Some((path, line, col)) = location {
-                entries.push(crate::editor::QuickfixEntry::error(
-                    Some(path),
-                    line,
-                    col,
-                    format!("{label}: {message}"),
-                ));
+                .filter_map(|loc| stacktrace::resolve_location(&loc, &dir, &roots))
+                .collect();
+            for (i, (path, line, col)) in frames.iter().enumerate() {
+                let text = if i == 0 {
+                    format!("{label}: {message}")
+                } else {
+                    format!("  called from here ({label})")
+                };
+                entries.push(if i == 0 {
+                    crate::editor::QuickfixEntry::error(Some(path.clone()), *line, *col, text)
+                } else {
+                    crate::editor::QuickfixEntry::info(Some(path.clone()), *line, *col, text)
+                });
             }
+            failures.push(crate::editor::TestFailure {
+                test_name: Some(label),
+                message,
+                location: frames
+                    .first()
+                    .map(|(p, l, c)| crate::editor::TestSourceLocation {
+                        path: p.clone(),
+                        line: *l,
+                        column: (*c > 0).then_some(*c),
+                    }),
+                frames: frames
+                    .iter()
+                    .map(|(p, l, c)| crate::editor::TestSourceLocation {
+                        path: p.clone(),
+                        line: *l,
+                        column: (*c > 0).then_some(*c),
+                    })
+                    .collect(),
+            });
         }
         if !entries.is_empty() {
             self.set_quickfix_list(entries, "test failures".to_string());
         }
-        self.set_status_message(format!("Tests: {summary}"));
+        self.finish_test_panel_run(job, exit_ok, cases, Some(summary_text.clone()), failures);
+        self.set_status_message(format!("Tests: {summary_text}"));
+    }
+
+    /// Fills the test panel's run for this job with per-test results.
+    fn finish_test_panel_run(
+        &mut self,
+        job: &mut LaunchJob,
+        exit_ok: bool,
+        cases: Vec<junit::TestCaseResult>,
+        summary: Option<String>,
+        failures: Vec<crate::editor::TestFailure>,
+    ) {
+        if !std::mem::take(&mut job.panel_run) {
+            return;
+        }
+        let tail: Vec<String> = job
+            .log
+            .lines()
+            .rev()
+            .take(40)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let Some(run) = self.build.test_panel.runs.last_mut() else {
+            return;
+        };
+        if run.status != crate::editor::TestRunStatus::Running {
+            return;
+        }
+        let all_passed = exit_ok
+            && !cases.iter().any(|c| {
+                matches!(
+                    c.status,
+                    junit::CaseStatus::Failed | junit::CaseStatus::Errored
+                )
+            });
+        run.status = if all_passed {
+            crate::editor::TestRunStatus::Passed
+        } else {
+            crate::editor::TestRunStatus::Failed
+        };
+        run.duration = Some(run.started.elapsed());
+        run.summary = summary;
+        run.failures = failures;
+        run.lines.clear();
+        if cases.is_empty() {
+            run.lines.push(if exit_ok {
+                "No test results were reported (no matching tests, or the build tool skipped them)."
+                    .to_string()
+            } else {
+                "The test task failed before reporting results. Last output:".to_string()
+            });
+            run.lines.extend(tail);
+        } else {
+            run.lines.extend(junit_panel_lines(&cases));
+        }
+        let output = run.lines.join("\n");
+        self.build.last_make_output = Some(job.log.clone())
+            .filter(|l| !l.is_empty())
+            .or(Some(output));
+        self.mark_dirty();
     }
 
     fn poll_debug_state(&mut self, job: &mut LaunchJob) -> bool {
@@ -1557,6 +1931,27 @@ impl Editor {
     }
 
     fn finish_job(&mut self, job: &mut LaunchJob, outcome: RunOutcome, code: Option<i32>) {
+        if std::mem::take(&mut job.panel_run) {
+            // The test never got as far as reporting results.
+            if let Some(run) = self.build.test_panel.runs.last_mut() {
+                if run.status == crate::editor::TestRunStatus::Running {
+                    run.duration = Some(run.started.elapsed());
+                    match &outcome {
+                        RunOutcome::Stopped => {
+                            run.status = crate::editor::TestRunStatus::Cancelled;
+                            run.lines.push("Stopped".to_string());
+                        }
+                        other => {
+                            run.status = crate::editor::TestRunStatus::Failed;
+                            run.lines.push(match other {
+                                RunOutcome::Error(m) => m.clone(),
+                                _ => "The test run failed before reporting results".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
         let status = self.launch.console.run_mut(job.run_id).map(|run| {
             run.finish(outcome.clone(), code);
             format!("{}: {}", run.title, run.status_text())
@@ -1567,7 +1962,9 @@ impl Editor {
                 _ => self.set_status_message(status),
             }
         }
-        self.dap_manager.state.panels_visible = false;
+        if !self.dap_manager.state.panel_pinned {
+            self.dap_manager.state.panels_visible = false;
+        }
         self.mark_dirty();
     }
 
@@ -1604,6 +2001,62 @@ impl Editor {
         }
         true
     }
+}
+
+/// One block per test for the test panel: `✓ Class.name (12ms)`, failures
+/// with message and the stack, skips dimmed by their `○` marker.
+fn junit_panel_lines(cases: &[junit::TestCaseResult]) -> Vec<String> {
+    let mut lines = Vec::new();
+    for case in cases {
+        let class = case
+            .class_name
+            .rsplit('.')
+            .next()
+            .unwrap_or(&case.class_name);
+        let name = case.name.trim_end_matches("()");
+        let time = if case.seconds >= 1.0 {
+            format!("{:.1}s", case.seconds)
+        } else {
+            format!("{}ms", (case.seconds * 1000.0).round() as u64)
+        };
+        match case.status {
+            junit::CaseStatus::Passed => lines.push(format!("✓ {class}.{name} ({time})")),
+            junit::CaseStatus::Skipped => lines.push(format!("○ {class}.{name} skipped")),
+            junit::CaseStatus::Failed | junit::CaseStatus::Errored => {
+                lines.push(format!("✗ {class}.{name} ({time})"));
+                if let Some(message) = &case.message {
+                    for (i, l) in message.lines().take(6).enumerate() {
+                        lines.push(format!("    {}{l}", if i == 0 { "" } else { "  " }));
+                    }
+                }
+                let frames = case
+                    .details
+                    .as_deref()
+                    .into_iter()
+                    .flat_map(str::lines)
+                    .map(str::trim)
+                    .filter(|l| l.starts_with("at "))
+                    .filter(|l| {
+                        ![
+                            "org.junit.",
+                            "org.gradle.",
+                            "jdk.internal.",
+                            "java.base/",
+                            "worker.org.gradle.",
+                            "org.apache.maven.",
+                            "org.opentest4j.",
+                        ]
+                        .iter()
+                        .any(|p| l[3..].starts_with(p))
+                    })
+                    .take(8);
+                for frame in frames {
+                    lines.push(format!("    {frame}"));
+                }
+            }
+        }
+    }
+    lines
 }
 
 fn last_lines(text: &str, n: usize) -> String {

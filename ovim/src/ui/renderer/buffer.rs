@@ -661,7 +661,8 @@ fn build_gutter_line(
     // walkthrough focus > agent edits > git. The walkthrough marker makes the
     // explained block visible even on blank or very short lines.
     let line_1based = (line_idx + 1) as u64;
-    let has_breakpoint = editor.has_breakpoint_at(line_1based);
+    let breakpoint = editor.breakpoint_marker_at(line_1based);
+    let has_breakpoint = breakpoint.is_some();
     let is_exec_line = editor
         .execution_position()
         .is_some_and(|(_, exec_line)| exec_line == line_1based);
@@ -673,10 +674,16 @@ fn build_gutter_line(
         .unwrap_or(false);
     let is_walkthrough_line = line_is_in_walkthrough(ctx.walkthrough_range, line_idx);
 
+    use ovim_core::editor::BreakpointMarker;
+    let (bp_glyph, bp_exec_glyph, bp_color) = match breakpoint {
+        Some(BreakpointMarker::Disabled) => ("○ ", "○▶", Color::DarkGray),
+        Some(BreakpointMarker::Conditional) => ("◆ ", "◆▶", Color::Red),
+        _ => ("● ", "●▶", Color::Red),
+    };
     let (sign_text, sign_color) = if has_breakpoint && is_exec_line {
-        ("●▶", Color::Red)
+        (bp_exec_glyph, bp_color)
     } else if has_breakpoint {
-        ("● ", Color::Red)
+        (bp_glyph, bp_color)
     } else if is_exec_line {
         ("▶ ", Color::Yellow)
     } else if !line_diagnostics.is_empty() {

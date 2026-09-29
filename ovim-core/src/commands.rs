@@ -512,6 +512,31 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
             editor.open_scratch_buffer("LspInfo", &info);
             crate::command_result::ok_silent()
         }
+        "LspReloadProject" => {
+            editor.lsp_execute_command("hyperion.reloadProject", Vec::new());
+            crate::command_result::ok_silent()
+        }
+        cmd if cmd == "LspExec" || cmd.starts_with("LspExec ") => {
+            let rest = cmd.trim_start_matches("LspExec").trim();
+            let (name, args) = match rest.split_once(char::is_whitespace) {
+                Some((name, args)) => (name, args.trim()),
+                None => (rest, ""),
+            };
+            if name.is_empty() {
+                return err("Usage: LspExec <command> [json arguments...]");
+            }
+            let parsed: Result<Vec<serde_json::Value>, _> =
+                serde_json::Deserializer::from_str(args)
+                    .into_iter::<serde_json::Value>()
+                    .collect();
+            match parsed {
+                Ok(arguments) => {
+                    editor.lsp_execute_command(name, arguments);
+                    crate::command_result::ok_silent()
+                }
+                Err(e) => err(format!("LspExec: arguments must be JSON values: {e}")),
+            }
+        }
         "LspRestart" => restart_lsp_servers(editor, None),
         cmd if cmd.starts_with("LspRestart ") => {
             let target = cmd.trim_start_matches("LspRestart ").trim();
@@ -687,6 +712,14 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
                 Err(_) => err("Usage: RunJump <line index>"),
             }
         }
+        "RunEof" => {
+            editor.run_eof();
+            crate::command_result::ok_silent()
+        }
+        cmd if cmd == "RunInput" || cmd.starts_with("RunInput ") => {
+            editor.run_input(cmd.strip_prefix("RunInput ").unwrap_or(""));
+            crate::command_result::ok_silent()
+        }
         "RunClear" => {
             editor.clear_run_console();
             crate::command_result::ok_silent()
@@ -702,6 +735,14 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
         "TestAll" | "TA" | "TestSuite" | "TS" => {
             editor.run_test_all();
             ok("Running all tests...")
+        }
+        "TestDebug" | "TD" => {
+            editor.debug_test_nearest();
+            ok("Debugging nearest test...")
+        }
+        "TestDebugFile" | "TDF" => {
+            editor.debug_test_file();
+            ok("Debugging tests of current file...")
         }
         "TestLast" | "TL" => {
             editor.run_test_last();
@@ -1290,6 +1331,60 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
                     }
                 } else {
                     err("Not stopped at a breakpoint")
+                }
+            } else if command == "DebugPanel" || command == "DebugFocus" {
+                editor.focus_debug_panel();
+                crate::command_result::ok_silent()
+            } else if let Some(expression) = command.strip_prefix("DebugWatch ") {
+                let expression = expression.trim();
+                if expression.is_empty() {
+                    err("Usage: :DebugWatch <expression>")
+                } else {
+                    editor.add_watch(expression.to_string());
+                    editor.dap_manager_mut().state.panels_visible = true;
+                    ok(format!("Watching {expression}"))
+                }
+            } else if let Some(what) = command.strip_prefix("DebugUnwatch") {
+                let what = what.trim();
+                let watches = &editor.debug_state().watches;
+                let index = if what.is_empty() {
+                    watches.len().checked_sub(1)
+                } else if let Ok(n) = what.parse::<usize>() {
+                    n.checked_sub(1).filter(|i| *i < watches.len())
+                } else {
+                    watches.iter().position(|w| w.expression == what)
+                };
+                match index {
+                    Some(index) => {
+                        editor.remove_watch(index);
+                        ok("Watch removed")
+                    }
+                    None => err("No such watch (use :DebugUnwatch <number|expression>)"),
+                }
+            } else if command == "DebugBreakpoints" || command.starts_with("DebugBreakpoints ") {
+                match command.trim_start_matches("DebugBreakpoints").trim() {
+                    "" | "list" => {
+                        editor.focus_debug_panel();
+                        crate::command_result::ok_silent()
+                    }
+                    "on" | "enable" => {
+                        editor.set_all_breakpoints_enabled(true);
+                        ok("All breakpoints enabled")
+                    }
+                    "off" | "disable" => {
+                        editor.set_all_breakpoints_enabled(false);
+                        ok("All breakpoints disabled")
+                    }
+                    "clear" => {
+                        editor.clear_all_breakpoints();
+                        ok("All breakpoints removed")
+                    }
+                    _ => err("Usage: :DebugBreakpoints [list|on|off|clear]"),
+                }
+            } else if command == "DebugException" || command.starts_with("DebugException ") {
+                match editor.toggle_exception_filter(command.trim_start_matches("DebugException")) {
+                    Ok(()) => crate::command_result::ok_silent(),
+                    Err(message) => err(message),
                 }
             } else if let Some(name) = command.strip_prefix("DebugExpand ") {
                 // :DebugExpand <name> — toggle expansion of a variable in the debug panel

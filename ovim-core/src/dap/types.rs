@@ -91,4 +91,16 @@ pub struct DapCapabilities {
     pub supports_conditional_breakpoints: bool,
     #[serde(default)]
     pub supports_terminate_request: bool,
+    /// Checkboxes the client may show for "break on exceptions".
+    #[serde(default)]
+    pub exception_breakpoint_filters: Vec<DapExceptionFilter>,
+}
+
+/// One entry of `exceptionBreakpointFilters` (e.g. "all", "uncaught").
+#[derive(Debug, Clone, Deserialize)]
+pub struct DapExceptionFilter {
+    pub filter: String,
+    pub label: String,
+    #[serde(default)]
+    pub default: Option<bool>,
 }

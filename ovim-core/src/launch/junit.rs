@@ -214,7 +214,9 @@ pub fn parse_junit_xml(xml: &str) -> Vec<TestCaseResult> {
                     case.status = status;
                     let ty = attr(&attrs, "type").unwrap_or_default();
                     let msg = attr(&attrs, "message").unwrap_or_default();
-                    case.message = Some(match (ty.is_empty(), msg.is_empty()) {
+                    // Gradle already writes `message="<type>: <text>"`.
+                    let msg_has_type = !ty.is_empty() && msg.starts_with(ty);
+                    case.message = Some(match (ty.is_empty() || msg_has_type, msg.is_empty()) {
                         (false, false) => format!("{ty}: {msg}"),
                         (false, true) => ty.to_string(),
                         _ => msg.to_string(),
@@ -312,6 +314,17 @@ mod tests {
         assert_eq!(cases[3].status, CaseStatus::Errored);
         assert!(cases[3].details.as_ref().unwrap().contains("Foo.java:3"));
         assert!((cases[1].seconds - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_message_that_already_names_its_type_is_not_prefixed_twice() {
+        let xml = r#"<testsuite><testcase name="t()" classname="C" time="0">
+<failure message="org.opentest4j.AssertionFailedError: expected: &lt;3&gt; but was: &lt;2&gt;" type="org.opentest4j.AssertionFailedError">stack</failure></testcase></testsuite>"#;
+        let cases = parse_junit_xml(xml);
+        assert_eq!(
+            cases[0].message.as_deref(),
+            Some("org.opentest4j.AssertionFailedError: expected: <3> but was: <2>")
+        );
     }
 
     #[test]

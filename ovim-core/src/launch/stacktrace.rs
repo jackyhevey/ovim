@@ -120,6 +120,70 @@ pub fn resolve_frame_source(class: &str, file: &str, roots: &[PathBuf]) -> Optio
     None
 }
 
+/// Finds the source file of `class` through the language server's
+/// `workspace/symbol` (classes in other modules, libraries with attached
+/// sources, JDK sources the server materialised).
+pub async fn lookup_frame_source(
+    manager: &crate::lsp::LspManager,
+    language_id: &str,
+    class: &str,
+    file: &str,
+) -> Result<PathBuf, String> {
+    // `com.foo.Outer$Inner` -> query `Outer`, wanted package `com.foo`.
+    let mut parts: Vec<&str> = class.split('.').collect();
+    let simple = parts.pop().unwrap_or(class);
+    let outer = simple.split('$').next().unwrap_or(simple).to_string();
+    let package = parts.join(".");
+    let symbols = manager
+        .workspace_symbols(language_id, outer.clone())
+        .await
+        // No server for the language, or the request failed: the source is
+        // simply not findable.
+        .map_err(|_| format!("Source not found for {class} ({file})"))?;
+    pick_frame_source(&symbols, &outer, &package, class, file)
+        .ok_or_else(|| format!("Source not found for {class} ({file})"))
+}
+
+/// Chooses the symbol that is `class`: a path ending in `<package>/<file>`
+/// beats a matching container package, which beats a same-named file.
+#[allow(deprecated)] // SymbolInformation::container_name
+fn pick_frame_source(
+    symbols: &[lsp_types::SymbolInformation],
+    outer: &str,
+    package: &str,
+    class: &str,
+    file: &str,
+) -> Option<PathBuf> {
+    let wanted_tail = package_dir(class).join(file);
+    let mut best: Option<(u8, PathBuf)> = None;
+    for symbol in symbols {
+        if symbol.name != outer {
+            continue;
+        }
+        let Some(path) = crate::lsp::uri_to_file_path(&symbol.location.uri) else {
+            continue;
+        };
+        let score = if path.ends_with(&wanted_tail) {
+            3
+        } else if !package.is_empty()
+            && symbol
+                .container_name
+                .as_deref()
+                .is_some_and(|c| c == package || c.starts_with(&format!("{package}.")))
+        {
+            2
+        } else if path.file_name().is_some_and(|n| n == file) {
+            1
+        } else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(s, _)| score > *s) {
+            best = Some((score, path));
+        }
+    }
+    best.map(|(_, path)| path)
+}
+
 /// Resolves a location to an absolute path plus 1-based line/column.
 pub fn resolve_location(
     location: &ConsoleLocation,
@@ -143,6 +207,50 @@ pub fn resolve_location(
 
 #[cfg(test)]
 mod tests {
+    fn symbol(name: &str, container: Option<&str>, path: &str) -> lsp_types::SymbolInformation {
+        #[allow(deprecated)]
+        lsp_types::SymbolInformation {
+            name: name.to_string(),
+            kind: lsp_types::SymbolKind::CLASS,
+            tags: None,
+            deprecated: None,
+            location: lsp_types::Location {
+                uri: crate::lsp::uri_from_file_path(std::path::Path::new(path)).unwrap(),
+                range: Default::default(),
+            },
+            container_name: container.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn frame_lookup_prefers_the_file_in_the_right_package() {
+        let symbols = vec![
+            symbol("List", Some("java.awt"), "/jdk/java/awt/List.java"),
+            symbol("List", Some("java.util"), "/jdk/java/util/List.java"),
+            symbol("Other", Some("java.util"), "/jdk/java/util/Other.java"),
+        ];
+        assert_eq!(
+            pick_frame_source(&symbols, "List", "java.util", "java.util.List", "List.java"),
+            Some(PathBuf::from("/jdk/java/util/List.java"))
+        );
+        // No package match by path: fall back to the container.
+        let symbols = vec![symbol("Foo", Some("com.acme"), "/x/generated/Foo.kt")];
+        assert_eq!(
+            pick_frame_source(
+                &symbols,
+                "Foo",
+                "com.acme",
+                "com.acme.Foo$Inner",
+                "Foo.java"
+            ),
+            Some(PathBuf::from("/x/generated/Foo.kt"))
+        );
+        assert_eq!(
+            pick_frame_source(&symbols, "Foo", "org.other", "org.other.Foo", "Bar.java"),
+            None
+        );
+    }
+
     use super::*;
 
     #[test]

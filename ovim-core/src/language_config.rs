@@ -379,6 +379,12 @@ impl LanguageRegistry {
         // Load user config (if exists)
         let user_config = Self::load_user_config();
 
+        // `[[lsp_settings]]` (initialization options / workspace settings for
+        // language servers) only ever come from the user's own file.
+        if let Some(user) = &user_config {
+            crate::lsp::user_settings::load_toml(user)?;
+        }
+
         // Parse and merge configurations
         let (languages, companions) = Self::parse_configs(embedded, user_config)?;
 

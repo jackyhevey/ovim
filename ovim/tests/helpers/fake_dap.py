@@ -8,6 +8,10 @@ argv[1] is a directory shared with the test:
       "initialize_error": message; respond to initialize with a failure
       "on_configuration_done": list of DAP event/response bodies to emit
           each item: {"event": "output", "body": {...}, "delay": 0.1}
+      "exception_filters": advertised exceptionBreakpointFilters
+      "frames", "scopes": answers for stackTrace / scopes
+      "variables": {"<variablesReference>": [variable, ...]}
+      "evaluate": {"<expression>": {"result": ..., "type": ..., "variablesReference": ...}}
 """
 
 import json
@@ -71,7 +75,10 @@ while True:
         if "initialize_error" in scenario:
             respond(request, success=False, message=scenario["initialize_error"])
             continue
-        respond(request, {"supportsConfigurationDoneRequest": True})
+        capabilities = {"supportsConfigurationDoneRequest": True}
+        if "exception_filters" in scenario:
+            capabilities["exceptionBreakpointFilters"] = scenario["exception_filters"]
+        respond(request, capabilities)
         event("initialized")
     elif command in ("launch", "attach"):
         if "launch_error" in scenario:
@@ -91,9 +98,17 @@ while True:
     elif command == "stackTrace":
         respond(request, {"stackFrames": scenario.get("frames", [])})
     elif command == "scopes":
-        respond(request, {"scopes": []})
+        respond(request, {"scopes": scenario.get("scopes", [])})
     elif command == "variables":
-        respond(request, {"variables": []})
+        ref = str(request["arguments"]["variablesReference"])
+        respond(request, {"variables": scenario.get("variables", {}).get(ref, [])})
+    elif command == "evaluate":
+        expression = request["arguments"]["expression"]
+        known = scenario.get("evaluate", {})
+        if expression in known:
+            respond(request, known[expression])
+        else:
+            respond(request, success=False, message=f"cannot evaluate {expression}")
     elif command == "disconnect":
         respond(request)
         if scenario.get("linger_after_disconnect"):

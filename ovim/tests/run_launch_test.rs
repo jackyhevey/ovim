@@ -1033,11 +1033,11 @@ async fn console_focus_scrolls_and_enter_jumps_to_a_stack_frame_in_the_project()
         .unwrap();
     s.test.editor.run_console_mut().set_cursor(jdk_line);
     s.test.press_enter();
-    assert!(
-        s.test.editor.status_message().contains("Source not found"),
-        "{}",
-        s.test.editor.status_message()
-    );
+    // The language server is asked (workspace/symbol) before giving up.
+    s.until("the lookup to give up", |s| {
+        s.test.editor.status_message().contains("Source not found")
+    })
+    .await;
 
     // `x` clears finished runs, `q` leaves focus.
     s.test.keys("x");
@@ -1179,5 +1179,418 @@ async fn running_a_hyperion_run_lens_goes_through_resolve_launch_at_the_lens_not
         "resolved at the lens position"
     );
     assert!(s.console_text().contains("real-jvm"));
+    s.stop_lsp().await;
+}
+
+// ---------------------------------------------------------------------------
+// Java tests through the normal test-runner keys (<Space>tn, :TestFile, ...)
+// ---------------------------------------------------------------------------
+
+const CALC_TEST: &str = "package com.example.app;\n\
+\n\
+import org.junit.jupiter.api.Test;\n\
+\n\
+class CalcTest {\n\
+    @Test\n\
+    void adds() {\n\
+        assertEquals(2, 1 + 1);\n\
+    }\n\
+\n\
+    @Test\n\
+    void subtracts() {\n\
+        assertEquals(1, 2 - 1);\n\
+    }\n\
+}\n";
+
+impl Session {
+    /// A Gradle project whose `gradlew` is a script: records its arguments and
+    /// writes a JUnit report in which `subtracts` fails.
+    fn fake_gradle_project(&self) -> PathBuf {
+        let app = self.root.join("app");
+        let src = app.join("src/test/java/com/example/app");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(self.root.join("gradle/wrapper")).unwrap();
+        std::fs::write(self.root.join("gradle/wrapper/gradle-wrapper.jar"), "").unwrap();
+        std::fs::write(self.root.join("settings.gradle.kts"), "include(\"app\")\n").unwrap();
+        std::fs::write(app.join("build.gradle.kts"), "").unwrap();
+        let file = src.join("CalcTest.java");
+        std::fs::write(&file, CALC_TEST).unwrap();
+        self.write_script(
+            "gradlew",
+            "echo \"$@\" >> gradle-args.txt\n\
+             mkdir -p app/build/test-results/test\n\
+             cat > app/build/test-results/test/TEST-com.example.app.CalcTest.xml <<'EOF'\n\
+             <testsuite name=\"com.example.app.CalcTest\">\n\
+             <testcase name=\"adds()\" classname=\"com.example.app.CalcTest\" time=\"0.01\"/>\n\
+             <testcase name=\"subtracts()\" classname=\"com.example.app.CalcTest\" time=\"0.2\">\n\
+             <failure message=\"expected: &lt;1&gt; but was: &lt;2&gt;\" type=\"AssertionFailedError\">AssertionFailedError\n\
+             \tat org.junit.jupiter.api.Assertions.fail(Assertions.java:1)\n\
+             \tat com.example.app.CalcTest.subtracts(CalcTest.java:13)\n\
+             </failure></testcase></testsuite>\n\
+             EOF\n\
+             exit 1",
+        );
+        file
+    }
+
+    fn gradle_invocations(&self) -> Vec<String> {
+        std::fs::read_to_string(self.root.join("gradle-args.txt"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn space_t_n_runs_the_java_test_under_the_cursor_and_fills_the_test_panel() {
+    use ovim_core::editor::TestRunStatus;
+    let mut s = Session::new(&resolve_commands()).await;
+    // The server has no answer for a .java file: the command is composed
+    // from the file itself.
+    let file = s.fake_gradle_project();
+    s.test.editor.load_file(file.display().to_string()).unwrap();
+    s.test.set_cursor(12, 8); // inside `subtracts`
+    s.test.keys(" tn");
+    s.until("the test run to finish", |s| s.run_finished())
+        .await;
+
+    assert_eq!(
+        s.gradle_invocations(),
+        vec![":app:cleanTest :app:test --tests com.example.app.CalcTest.subtracts --console=plain"]
+    );
+    let panel = s.test.editor.test_panel();
+    let run = panel.latest().expect("the test panel records the run");
+    assert_eq!(run.status, TestRunStatus::Failed);
+    assert_eq!(run.scope_label, "nearest");
+    assert_eq!(run.summary.as_deref(), Some("1 passed, 1 failed"));
+    let text = run.lines.join("\n");
+    assert!(text.contains("✓ CalcTest.adds"), "{text}");
+    assert!(text.contains("✗ CalcTest.subtracts"), "{text}");
+    assert!(text.contains("expected: <1> but was: <2>"), "{text}");
+    assert!(text.contains("at com.example.app.CalcTest.subtracts(CalcTest.java:13)"));
+    assert!(
+        !text.contains("org.junit"),
+        "framework frames are hidden: {text}"
+    );
+    assert_eq!(run.failures.len(), 1);
+    let location = run.failures[0].location.as_ref().unwrap();
+    assert!(location.path.ends_with("CalcTest.java"));
+    assert_eq!(location.line, 13);
+    // Failures reach the quickfix list too.
+    let entry = &s.test.editor.quickfix_list().entries()[0];
+    assert_eq!(entry.lnum, 13);
+    assert!(
+        entry.text.contains("CalcTest.subtracts()"),
+        "{}",
+        entry.text
+    );
+
+    // :TestLast replays the same request; :TestFile selects the class.
+    s.test.command("TestFile");
+    s.until("the file run to finish", |s| {
+        s.run_finished() && s.gradle_invocations().len() == 2
+    })
+    .await;
+    assert_eq!(
+        s.gradle_invocations()[1],
+        ":app:cleanTest :app:test --tests com.example.app.CalcTest --console=plain"
+    );
+    s.test.command("TestLast");
+    s.until("the rerun to finish", |s| {
+        s.run_finished() && s.gradle_invocations().len() == 3
+    })
+    .await;
+    assert_eq!(s.gradle_invocations()[2], s.gradle_invocations()[1]);
+    s.stop_lsp().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_java_file_without_a_build_file_says_why_no_test_can_run() {
+    let mut s = Session::new(&resolve_commands()).await;
+    let lone = s.root.join("Lone.java");
+    std::fs::write(&lone, CALC_TEST).unwrap();
+    s.test.editor.load_file(lone.display().to_string()).unwrap();
+    s.test.keys(" tn");
+    s.until("the failure message", |s| {
+        s.test
+            .editor
+            .status_message()
+            .contains("No Gradle or Maven project")
+    })
+    .await;
+    s.stop_lsp().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lsp_exec_runs_a_server_command_with_json_arguments_and_reports_the_result() {
+    let mut s = Session::new(&resolve_commands()).await;
+    s.script_resolve(json!({"reloaded": true}));
+    s.test
+        .command(r#"LspExec hyperion.resolveLaunch {"flag": 1} "two""#);
+    s.until("the server command result", |s| {
+        s.test.editor.status_message().contains("reloaded")
+    })
+    .await;
+    let calls = s.lsp_events("workspace/executeCommand");
+    let params = &calls.last().expect("the server got the command")["params"];
+    assert_eq!(params["command"], "hyperion.resolveLaunch");
+    assert_eq!(params["arguments"], json!([{"flag": 1}, "two"]));
+
+    // A command the server does not list is refused with an explanation.
+    s.test.command("LspExec no.such.command");
+    s.until("the refusal", |s| {
+        s.test.editor.status_message().contains("does not provide")
+    })
+    .await;
+    s.stop_lsp().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn user_lsp_settings_reach_the_server_as_initialization_options_and_workspace_settings() {
+    ovim_core::lsp::user_settings::configure(
+        &["controlled".to_string()],
+        ovim_core::lsp::user_settings::UserLspSettings {
+            initialization_options: Some(json!({"hyperion": {"buildToolClasspath": true}})),
+            settings: Some(json!({"hyperion": {"buildToolClasspath": true}})),
+        },
+    );
+    let mut s = Session::new(&resolve_commands()).await;
+    s.wait_for_event("workspace/didChangeConfiguration").await;
+    let init = s.lsp_events("initialize");
+    assert_eq!(
+        init[0]["params"]["initializationOptions"]["hyperion"]["buildToolClasspath"],
+        true
+    );
+    let config = s.lsp_events("workspace/didChangeConfiguration");
+    assert_eq!(
+        config[0]["params"]["settings"]["hyperion"]["buildToolClasspath"],
+        true
+    );
+    s.stop_lsp().await;
+}
+
+// ---------------------------------------------------------------------------
+// Debug panel: variables tree, watches, breakpoint list, exception filters
+// ---------------------------------------------------------------------------
+
+fn stopped_scenario(root: &Path) -> Value {
+    json!({
+        "exception_filters": [
+            {"filter": "all", "label": "All exceptions", "default": false},
+            {"filter": "uncaught", "label": "Uncaught exceptions", "default": true}
+        ],
+        "on_configuration_done": [
+            {"event": "stopped", "body": {"reason": "breakpoint", "threadId": 1, "allThreadsStopped": true}}
+        ],
+        "frames": [{
+            "id": 1, "name": "main", "line": 1, "column": 1,
+            "source": {"name": "Main.controlled", "path": root.join("Main.controlled")}
+        }],
+        "scopes": [{"name": "Locals", "variablesReference": 10}],
+        "variables": {
+            "10": [
+                {"name": "user", "value": "User@1", "type": "User", "variablesReference": 11},
+                {"name": "n", "value": "3", "type": "int", "variablesReference": 0}
+            ],
+            "11": [{"name": "name", "value": "\"Ann\"", "variablesReference": 0}]
+        },
+        "evaluate": {
+            "n * 2": {"result": "6", "type": "int"},
+            "Main": {"result": "Main@2", "type": "Main", "variablesReference": 11}
+        }
+    })
+}
+
+fn panel_labels(s: &Session) -> Vec<String> {
+    s.test
+        .editor
+        .debug_panel_rows()
+        .into_iter()
+        .map(|r| r.label)
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn debug_panel_expands_variables_and_manages_watches_breakpoints_and_exceptions() {
+    let mut d = DebugSession::new(&resolve_commands()).await;
+    let adapter = d.adapter(stopped_scenario(&d.inner.root));
+    d.inner.script_resolve(d.inner.main_plan(None));
+    d.inner
+        .test
+        .editor
+        .launch_at_cursor_with(ovim_core::launch::LaunchMode::Debug, Some(adapter));
+    d.inner
+        .until("the stop to be loaded", |s| {
+            s.test.editor.debug_state().variables.contains_key(&10)
+        })
+        .await;
+    assert!(panel_labels(&d.inner).contains(&"user".to_string()));
+
+    // Watches are evaluated at the stop, and again when added while stopped.
+    d.inner.test.command("DebugWatch n * 2");
+    d.inner
+        .until("the watch value", |s| {
+            s.test
+                .editor
+                .debug_state()
+                .watches
+                .first()
+                .is_some_and(|w| w.result == Some(Ok("6".to_string())))
+        })
+        .await;
+    d.inner.test.command("DebugWatch nosuch");
+    d.inner
+        .until("the failing watch", |s| {
+            s.test
+                .editor
+                .debug_state()
+                .watches
+                .get(1)
+                .is_some_and(|w| matches!(w.result, Some(Err(_))))
+        })
+        .await;
+
+    // Focus the panel; the cursor starts on the selected frame. Move to
+    // `user` and expand it with `l`.
+    d.inner.test.keys(" df");
+    assert_eq!(d.inner.test.editor.mode(), Mode::DebugPanel);
+    d.inner.test.keys("j");
+    let row = d.inner.test.editor.debug_panel_rows()
+        [d.inner.test.editor.debug_state().panel.cursor]
+        .clone();
+    assert_eq!(row.label, "user");
+    d.inner.test.keys("l");
+    d.inner
+        .until("the children to load", |s| {
+            panel_labels(s).contains(&"name".to_string())
+        })
+        .await;
+    assert_eq!(
+        d.requests("variables").len(),
+        2,
+        "children fetched once, on demand"
+    );
+    d.inner.test.keys("j");
+    d.inner.test.keys("h"); // on a child: go to the parent
+    assert_eq!(
+        d.inner.test.editor.debug_panel_rows()[d.inner.test.editor.debug_state().panel.cursor]
+            .label,
+        "user"
+    );
+    d.inner.test.keys("h"); // on the expanded parent: collapse
+    assert!(!panel_labels(&d.inner).contains(&"name".to_string()));
+
+    // Breakpoint list: toggle one in the buffer, disable it in the panel, delete it.
+    d.inner.test.keys("q");
+    d.inner.test.keys(" db");
+    d.inner
+        .until("setBreakpoints with the new line", |s| {
+            s.test
+                .editor
+                .debug_state()
+                .breakpoints
+                .values()
+                .any(|v| v.iter().any(|b| b.verified))
+        })
+        .await;
+    d.inner.test.keys(" df");
+    d.inner.test.keys("G"); // last row: the second exception filter
+    d.inner.test.keys("kk"); // over both filters, onto the breakpoint
+    let bp = d.inner.test.editor.debug_panel_rows()[d.inner.test.editor.debug_state().panel.cursor]
+        .clone();
+    assert_eq!(bp.label, "Main.controlled:1", "{bp:?}");
+    let sent = d.requests("setBreakpoints").len();
+    d.inner.test.keys("e");
+    d.inner
+        .until("the disabled breakpoint to be synced", |_| {
+            dap_requests(&d.dap_dir, "setBreakpoints").len() > sent
+        })
+        .await;
+    let last = d.requests("setBreakpoints").last().unwrap().clone();
+    assert_eq!(
+        last["arguments"]["breakpoints"],
+        json!([]),
+        "disabled breakpoints are not sent"
+    );
+    assert!(
+        d.inner.test.editor.debug_state().all_breakpoints().len() == 1,
+        "but stay listed"
+    );
+    d.inner.test.keys("d");
+    assert!(d
+        .inner
+        .test
+        .editor
+        .debug_state()
+        .all_breakpoints()
+        .is_empty());
+
+    // Exception filters: defaults come from the adapter; toggling re-sends them.
+    let filters = d.inner.test.editor.debug_state().exception_filters.clone();
+    assert_eq!(filters.len(), 2);
+    assert!(!filters[0].enabled && filters[1].enabled);
+    assert_eq!(
+        d.requests("setExceptionBreakpoints")[0]["arguments"]["filters"],
+        json!(["uncaught"]),
+        "the adapter's defaults are sent when the session is configured"
+    );
+    d.inner.test.keys("q"); // back to the buffer
+    d.inner.test.command("DebugException all");
+    d.inner
+        .until("setExceptionBreakpoints with both filters", |_| {
+            dap_requests(&d.dap_dir, "setExceptionBreakpoints")
+                .last()
+                .is_some_and(|r| r["arguments"]["filters"] == json!(["all", "uncaught"]))
+        })
+        .await;
+
+    // K evaluates the expression under the cursor into the hover popup.
+    d.inner.test.set_cursor(0, 7); // on `Main`
+    d.inner.test.press('K');
+    d.inner
+        .until("the hover", |s| s.test.editor.hover_info().is_some())
+        .await;
+    let hover = d.inner.test.editor.hover_info().unwrap().to_string();
+    assert!(
+        hover.contains("Main = Main@2") && hover.contains("name = \"Ann\""),
+        "{hover}"
+    );
+    d.inner.test.press_esc();
+
+    d.inner.test.keys(" ds");
+    d.inner.stop_lsp().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_input_feeds_the_programs_stdin_and_eof_ends_it() {
+    let _jdk = JDK_LOCK.lock().await;
+    let mut s = Session::new(&resolve_commands()).await;
+    s.fake_java("echo 'name?'\nread name\necho \"hello:$name\"\nwhile read more; do echo \"more:$more\"; done\necho done");
+    s.script_resolve(s.main_plan(None));
+    s.test.keys(" rr");
+    s.until("the prompt", |s| s.console_text().contains("name?"))
+        .await;
+    s.test.command("RunInput Ann");
+    s.until("the greeting", |s| s.console_text().contains("hello:Ann"))
+        .await;
+    assert!(s.console_text().contains("» Ann"), "the input is echoed");
+    s.test.command("RunInput second line");
+    s.until("the echo", |s| {
+        s.console_text().contains("more:second line")
+    })
+    .await;
+    s.test.command("RunEof");
+    s.until("the program to finish", |s| s.run_finished()).await;
+    assert!(s.console_text().contains("done"));
+    assert_eq!(s.outcome(), RunOutcome::Succeeded);
+
+    // After the run there is nothing to type into.
+    s.test.command("RunInput late");
+    assert!(s
+        .test
+        .editor
+        .status_message()
+        .contains("No program is running"));
     s.stop_lsp().await;
 }

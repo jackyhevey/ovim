@@ -20,6 +20,11 @@ and shows everything in the **run console**.
 | `Space r x` | `:RunClear` | drop finished runs from the console |
 | `Space c l` / `Space c L` | `:CodeLens`, `:CodeLensDebug` | run / debug the code lens on this line |
 
+Tests have their own keys (see [getting-started](getting-started.md#running-tests)):
+`Space t n` / `:TestNearest`, `Space t f` / `:TestFile`, `Space t a` / `:TestSuite`,
+`Space t l` / `:TestLast` and `Space t d` / `:TestDebug` (debug the nearest test) work
+for Java and Kotlin and fill the test panel with a result per test.
+
 While a debug session is stopped: `F5` continue, `F10` step over, `F11` step
 in, `Shift-F11` step out, `F9` toggle breakpoint (also while running),
 `Shift-F9` conditional breakpoint, `:eval expr`.
@@ -51,6 +56,32 @@ message telling you what to add.
    attaches to that port. It gives up after three minutes and shows the last
    output.
 
+### Tests
+
+`<Space>tn`, `:TestFile`, `:TestSuite` and `:TestDebug` ask the server the same
+way (`hyperion.resolveLaunch`, target `test`). If the server cannot answer
+(older Hyperion, still indexing, no server, or no test found by the server), ovim
+composes the command itself: tree-sitter finds the `@Test`, `@ParameterizedTest`,
+`@RepeatedTest`, `@TestFactory` and `@TestTemplate` methods and the classes
+around them (`Outer$Inner` for `@Nested`), the nearest `build.gradle(.kts)` /
+`pom.xml` picks the module, and the build tool's filter selects the tests:
+
+| Build tool | Run | Debug |
+|------------|-----|-------|
+| Gradle | `gradle :app:cleanTest :app:test --tests pkg.Class.method` | same plus `--debug-jvm` |
+| Maven | `mvn -Dtest=pkg.Class#method [-pl module -am] test` | same plus `-Dmaven.surefire.debug` |
+
+`cleanTest` runs first so an unchanged rerun is not skipped as UP-TO-DATE.
+`./gradlew` / `./mvnw` are used only when the wrapper is really there. The
+Gradle project path is derived from the module's directory relative to the
+`settings.gradle(.kts)` (custom `projectDir` mappings are not followed).
+
+After the run the JUnit XML reports are read into the **test panel**: one
+line per test (`✓`/`✗`/`○`), failure messages and their stack frames without
+JUnit/Gradle internals, a pass/fail summary. Failing frames in your code go to
+the quickfix list (`:cfirst`, `:cn`). `Space t l` (`:TestLast`) repeats the last test
+in the same mode (run or debug).
+
 ## The run console
 
 A panel at the bottom of the editor (a "Run" tab in the GUI) keeps the output
@@ -58,12 +89,18 @@ of every run, with stdout, stderr, build output and editor notes in separate
 colours. It stays after the process exits and shows the exit code and how long
 it ran. It keeps the last eight runs.
 
+Programs that read `System.in` work with Run: in the console `i` (or `:RunInput text`)
+sends a line to the program (echoed as `» text`), `D` (or `:RunEof`) ends the input.
+Debug sessions and test tasks do not take input.
+
 `Space r f` focuses it: `j`/`k` move, `Ctrl-d`/`Ctrl-u` page, `g`/`G` top/bottom
 (`G` follows live output again), `[` / `]` switch between runs, `r` rerun,
 `s` stop, `x` clear, `q` back to the buffer. On a stack-trace line
 (`at com.foo.Bar.baz(Bar.java:42)`) or a compiler error, `Enter` opens the
 source. Frames are looked up under the project root (`src/main/java`,
-`src/test/kotlin`, ...); JDK frames have no source and say so.
+`src/test/kotlin`, ...); when the file is not there (other module, library
+with sources, JDK sources the server materialised) ovim asks the language
+server through `workspace/symbol`.
 
 ## `.ovim/debug.toml`
 
@@ -108,10 +145,49 @@ refreshed once edits settle and on `workspace/codeLens/refresh`. `Space c l`
 on that line runs it. A `hyperion.run` lens goes through the same flow as
 `Space r r` (a real JVM), not through Hyperion's built-in interpreter.
 
-## Debug panels
+## Debug panel
 
-While a session is active the side panel shows the call stack and variables
-(`Space d v` toggles it, `Space d k`/`j` walk frames, `:DebugExpand name`
-expands a variable). Debuggee output goes to the run console, and it is still
-there after the program ends. When the session ends the execution marker is
-cleared and the adapter process is stopped.
+While a session is active (and pinned with `Space d v` even without one) the
+right side shows one list with the call stack, the variables of the selected
+frame, watch expressions, all breakpoints, and the exception-breakpoint filters
+the adapter offers. `Space d f` (or `:DebugPanel`) focuses it:
+
+| Key | Does |
+|-----|------|
+| `j` `k` `Ctrl-d` `Ctrl-u` `g` `G` | move (the list scrolls with the cursor) |
+| `Enter` `l` `Space` | select a frame, expand/collapse a variable or watch value, jump to a breakpoint, toggle an exception filter |
+| `h` | collapse, or go to the parent variable |
+| `d` `x` | delete the breakpoint or watch under the cursor |
+| `e` `t` | enable/disable the breakpoint (or filter) |
+| `a` | add a watch (`:DebugWatch`) |
+| `E` | toggle "break on exceptions" (first filter) |
+| `<` `>` | narrower / wider panel |
+| `c` `n` `i` `o` `s` | continue, step over/in/out, stop |
+| `q` `Esc` | back to the buffer |
+
+Commands: `:DebugWatch <expr>` (re-evaluated at every stop; a result with
+children can be expanded), `:DebugUnwatch [n|expr]`, `:DebugBreakpoints
+[list|on|off|clear]`, `:DebugException [name]`, `:DebugExpand name`,
+`:eval expr`. `Space d w` watches the expression under the cursor. `K` while
+stopped evaluates the expression under the cursor (`user.address.city` when on
+`city`) and shows it, with its children, in the hover popup.
+
+Disabled breakpoints stay listed and are drawn hollow (`○`) in the gutter but
+are not sent to the adapter; conditional ones are `◆`. Exception filters come
+from the adapter when a session starts, and your choice is kept for the next
+session. In the GUI the debugger panel has the same variable/watch/breakpoint
+list (click to expand, buttons to disable or remove), a click on a line number
+toggles a breakpoint, and breakpoint and execution-line markers appear in the
+gutter.
+
+Debuggee output goes to the run console, and it is still there after the
+program ends. When the session ends the execution marker is cleared and the
+adapter process is stopped.
+
+## Server commands
+
+`:LspExec <command> [json args...]` runs a `workspace/executeCommand` on the
+language server that owns the current file; `:LspReloadProject` is
+`:LspExec hyperion.reloadProject`. Options passed to language servers
+(for example `hyperion.buildToolClasspath`) are described in
+[configuration.md](configuration.md#language-server-options-lsp_settings--ovimlspconfigure).

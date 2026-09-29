@@ -28,6 +28,7 @@ mod server;
 mod supervisor;
 mod trigger_chars;
 mod types;
+pub mod user_settings;
 mod utils;
 mod watchers;
 

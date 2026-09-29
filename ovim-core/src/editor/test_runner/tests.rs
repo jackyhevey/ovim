@@ -756,3 +756,198 @@ fn rust_workspace_detected_from_dotted_table_header() {
     assert_eq!(inv.command, "cargo test --workspace");
     assert_eq!(inv.cwd, ws);
 }
+
+// ---------------------------------------------------------------------------
+// Java / Kotlin
+// ---------------------------------------------------------------------------
+
+const JAVA_SRC: &str = r#"package com.example.app;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.params.ParameterizedTest;
+
+class CalcTest {
+    @Test
+    void adds() {
+        assertEquals(2, 1 + 1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1, 2})
+    void squares(int n) {}
+
+    void helper() {}
+
+    @Nested
+    class Inner {
+        @org.junit.jupiter.api.Test
+        void nestedCase() {}
+    }
+}
+"#;
+
+const KOTLIN_SRC: &str = r#"package com.example.app
+
+import org.junit.jupiter.api.Test
+
+class KCalcTest {
+    @Test
+    fun `adds two numbers`() {
+        check(1 + 1 == 2)
+    }
+
+    @Test fun plain() {}
+
+    fun helper() {}
+}
+"#;
+
+#[test]
+fn java_discovery_finds_test_methods_and_nested_classes() {
+    let tests = discover_tests(Language::Java, JAVA_SRC);
+    let found: Vec<(String, Vec<String>, TestFlavor)> = tests
+        .iter()
+        .map(|t| (t.name.clone(), t.namespaces.clone(), t.flavor))
+        .collect();
+    assert_eq!(
+        found,
+        vec![
+            ("adds".into(), vec!["CalcTest".into()], TestFlavor::Exact),
+            (
+                "squares".into(),
+                vec!["CalcTest".into()],
+                TestFlavor::Parameterized
+            ),
+            (
+                "nestedCase".into(),
+                vec!["CalcTest".into(), "Inner".into()],
+                TestFlavor::Exact
+            ),
+        ]
+    );
+}
+
+#[test]
+fn kotlin_discovery_finds_backticked_and_inline_annotated_tests() {
+    let tests = discover_tests(Language::Kotlin, KOTLIN_SRC);
+    let names: Vec<&str> = tests.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(names, vec!["adds two numbers", "plain"]);
+    assert_eq!(tests[0].namespaces, vec!["KCalcTest".to_string()]);
+}
+
+fn gradle_project() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::write(root.join("settings.gradle.kts"), "include(\"app\")\n").unwrap();
+    fs::create_dir_all(root.join("app/src/test/java/com/example/app")).unwrap();
+    fs::write(root.join("app/build.gradle.kts"), "").unwrap();
+    let file = root.join("app/src/test/java/com/example/app/CalcTest.java");
+    fs::write(&file, JAVA_SRC).unwrap();
+    (dir, file)
+}
+
+#[test]
+fn jvm_local_plan_filters_gradle_by_nearest_method() {
+    use super::jvm::local_test_plan;
+    let (dir, file) = gradle_project();
+    let root = dir.path().canonicalize().unwrap();
+    // Cursor inside `adds`.
+    let local = local_test_plan(TestScope::Nearest, &file, JAVA_SRC, 9, Language::Java).unwrap();
+    let task = local.plan.task.as_ref().unwrap();
+    assert_eq!(
+        task.argv,
+        vec![
+            "gradle",
+            ":app:cleanTest",
+            ":app:test",
+            "--tests",
+            "com.example.app.CalcTest.adds",
+            "--console=plain"
+        ]
+    );
+    assert_eq!(
+        task.debug_argv.as_ref().unwrap().last().map(String::as_str),
+        Some("--debug-jvm")
+    );
+    assert_eq!(task.cwd, root);
+    assert_eq!(
+        task.reports_dir,
+        Some(root.join("app/build/test-results/test"))
+    );
+    assert!(local.cursor_inside);
+    assert_eq!(local.anchor.0, 7, "anchored on the @Test line of `adds`");
+
+    // Nested class: binary name with `$`.
+    let local = local_test_plan(TestScope::Nearest, &file, JAVA_SRC, 20, Language::Java).unwrap();
+    let argv = local.plan.task.unwrap().argv;
+    assert!(argv.contains(&"com.example.app.CalcTest$Inner.nestedCase".to_string()));
+}
+
+#[test]
+fn jvm_local_plan_file_scope_selects_every_test_class() {
+    use super::jvm::local_test_plan;
+    let (_dir, file) = gradle_project();
+    let local = local_test_plan(TestScope::File, &file, JAVA_SRC, 0, Language::Java).unwrap();
+    let task = local.plan.task.unwrap();
+    let filters: Vec<&String> = task
+        .argv
+        .iter()
+        .skip_while(|a| *a != "--tests")
+        .filter(|a| !a.starts_with("--"))
+        .collect();
+    assert_eq!(
+        filters,
+        vec!["com.example.app.CalcTest", "com.example.app.CalcTest$Inner"]
+    );
+    assert_eq!(local.anchor, (6, 0), "server is asked about the class line");
+}
+
+#[test]
+fn jvm_local_plan_uses_maven_with_surefire_filter_and_debug_flag() {
+    use super::jvm::local_test_plan;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    fs::write(root.join("pom.xml"), "<project/>").unwrap();
+    fs::create_dir_all(root.join("core/src/test/java")).unwrap();
+    fs::write(root.join("core/pom.xml"), "<project/>").unwrap();
+    let file = root.join("core/src/test/java/CalcTest.java");
+    let src = "package p;\nclass CalcTest {\n  @Test\n  void adds() {}\n}\n";
+    fs::write(&file, src).unwrap();
+    let local = local_test_plan(TestScope::Nearest, &file, src, 3, Language::Java).unwrap();
+    let task = local.plan.task.unwrap();
+    assert_eq!(
+        task.argv,
+        vec![
+            "mvn",
+            "-Dtest=p.CalcTest#adds",
+            "-Dsurefire.failIfNoSpecifiedTests=false",
+            "-DfailIfNoTests=false",
+            "-pl",
+            "core",
+            "-am",
+            "test"
+        ]
+    );
+    assert_eq!(task.debug_argv.unwrap()[1], "-Dmaven.surefire.debug");
+    assert_eq!(
+        task.reports_dir,
+        Some(root.join("core/target/surefire-reports"))
+    );
+}
+
+#[test]
+fn jvm_local_plan_reports_missing_project_and_missing_tests() {
+    use super::jvm::local_test_plan;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("Lone.java");
+    let err = local_test_plan(TestScope::Nearest, &file, JAVA_SRC, 0, Language::Java)
+        .err()
+        .unwrap();
+    assert!(err.contains("No Gradle or Maven project"), "{err}");
+    let (_d, file) = gradle_project();
+    let err = local_test_plan(TestScope::Nearest, &file, "class A {}", 0, Language::Java)
+        .err()
+        .unwrap();
+    assert_eq!(err, "No test found near cursor");
+}

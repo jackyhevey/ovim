@@ -112,12 +112,14 @@ fn compute_frame_layout(frame: &Frame, editor: &Editor) -> Option<FrameAreas> {
     };
 
     // Debug panels (if visible and session active)
-    let debug_panels_visible =
-        editor.debug_state().panels_visible && editor.debug_state().session_active;
+    let debug_panels_visible = editor.debug_state().panels_visible;
 
     // Debug side panel (right) — split from content area
     let (content_area, debug_side_area) = if debug_panels_visible {
-        let width = (content_area.width / 3).clamp(25, 50);
+        let width = super::debug_panels::panel_width(
+            content_area.width,
+            editor.debug_state().panel.width_delta,
+        );
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(1), Constraint::Length(width)])

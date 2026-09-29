@@ -189,6 +189,30 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
             editor.toggle_debug_panels();
             editor.reset_input_state();
         }
+        (&['d'], 'f') | (&['d'], 'B') => {
+            // <Space>df / <Space>dB - Focus the debug panel (stack, variables,
+            // watches, breakpoints)
+            editor.focus_debug_panel();
+            editor.reset_input_state();
+        }
+        (&['d'], 'w') => {
+            // <Space>dw - Add a watch expression (word under the cursor, or type one)
+            match editor.debug_expression_at_cursor() {
+                Some(expression) => editor.add_watch(expression),
+                None => {
+                    editor.set_mode(crate::mode::Mode::Command);
+                    editor.set_command_line("DebugWatch ");
+                }
+            }
+            editor.reset_input_state();
+        }
+        (&['d'], 'E') => {
+            // <Space>dE - Toggle "break on exceptions"
+            if let Err(message) = editor.toggle_exception_filter("") {
+                editor.set_status_message(message);
+            }
+            editor.reset_input_state();
+        }
         (&['d'], 'k') => {
             // <Space>dk - Select frame up (caller)
             if editor.is_debug_active() {
@@ -277,6 +301,16 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
         (&['t'], 'a') | (&['t'], 's') => {
             // <Space>ta / <Space>ts - Test suite (run full test suite)
             editor.run_test_all();
+            editor.reset_input_state();
+        }
+        (&['t'], 'd') => {
+            // <Space>td - Debug the nearest test (Java / Kotlin)
+            editor.debug_test_nearest();
+            editor.reset_input_state();
+        }
+        (&['t'], 'D') => {
+            // <Space>tD - Debug the file's tests (Java / Kotlin)
+            editor.debug_test_file();
             editor.reset_input_state();
         }
         (&['t'], 'l') => {

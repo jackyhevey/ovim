@@ -255,6 +255,7 @@ async fn process_pending_debug_action(editor: &mut Editor) {
             for path in &paths {
                 let _ = editor.debug_sync_breakpoints(path).await;
             }
+            let _ = editor.dap_manager().sync_exception_breakpoints().await;
             match editor.dap_manager_mut().configuration_done().await {
                 Ok(()) => editor.launch_debug_started(),
                 Err(e) => {
@@ -269,6 +270,39 @@ async fn process_pending_debug_action(editor: &mut Editor) {
                 editor.debug_state().breakpoints.keys().cloned().collect();
             for path in &paths {
                 let _ = editor.debug_sync_breakpoints(path).await;
+            }
+            let _ = editor.dap_manager().sync_exception_breakpoints().await;
+            editor.mark_dirty();
+        }
+        PendingDebugAction::RefreshWatches => {
+            editor.debug_refresh_watches().await;
+        }
+        PendingDebugAction::EvaluateHover { expression } => {
+            let frame_id = editor.selected_frame_id();
+            match editor
+                .dap_manager()
+                .evaluate(&expression, frame_id, Some("hover"))
+                .await
+            {
+                Ok((result, type_, var_ref)) => {
+                    let mut text = format!("{expression} = {result}");
+                    if let Some(type_) = type_.filter(|t| !t.is_empty()) {
+                        text.push_str(&format!("\ntype: {type_}"));
+                    }
+                    if var_ref > 0 {
+                        if let Ok(children) = editor.dap_manager().variables(var_ref).await {
+                            text.push('\n');
+                            for child in children.iter().take(20) {
+                                text.push_str(&format!("\n  {} = {}", child.name, child.value));
+                            }
+                            if children.len() > 20 {
+                                text.push_str(&format!("\n  ... {} more", children.len() - 20));
+                            }
+                        }
+                    }
+                    editor.set_hover_info(text);
+                }
+                Err(e) => editor.set_status_message(format!("{expression}: {e}")),
             }
             editor.mark_dirty();
         }
@@ -289,6 +323,7 @@ async fn process_pending_debug_action(editor: &mut Editor) {
             for var_ref in expanded {
                 let _ = editor.debug_fetch_variables(var_ref).await;
             }
+            editor.debug_refresh_watches().await;
             editor.mark_dirty();
         }
         PendingDebugAction::SelectFrame { index: _ } => {
@@ -303,6 +338,7 @@ async fn process_pending_debug_action(editor: &mut Editor) {
             for var_ref in scope_refs {
                 let _ = editor.debug_fetch_variables(var_ref).await;
             }
+            editor.debug_refresh_watches().await;
             editor.mark_dirty();
         }
         PendingDebugAction::Evaluate { expression } => {
