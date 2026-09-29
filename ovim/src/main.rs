@@ -187,12 +187,6 @@ async fn main() -> Result<()> {
     // Enable LSP support
     editor.enable_lsp();
 
-    // Create channel for Java LSP status updates (needed for both headless and TUI modes)
-    let (java_status_tx, java_status_rx) = mpsc::channel(64);
-
-    // Initialize the Java status sender in the lsp_init module
-    ovim::lsp_init::init_java_status_sender(java_status_tx);
-
     let start_time = SystemTime::now();
 
     // Handle headless mode
@@ -305,7 +299,6 @@ async fn main() -> Result<()> {
         event_loop::run_headless_loop(
             &mut editor,
             rx,
-            java_status_rx,
             start_time,
             session_info_arc,
             headless_dimensions,
@@ -335,7 +328,7 @@ async fn main() -> Result<()> {
         UI::new()?
     };
 
-    event_loop::run_event_loop(&mut ui, &mut editor, None, java_status_rx, start_time).await?;
+    event_loop::run_event_loop(&mut ui, &mut editor, None, start_time).await?;
 
     let code = editor.exit_code();
 

@@ -1,6 +1,5 @@
 pub mod auto_install;
 mod background;
-mod java;
 use background::InitRequest;
 pub use background::LspStartup;
 
@@ -16,8 +15,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-
-pub use java::init_java_status_sender;
 
 /// Install and initialize configured servers without borrowing the frontend.
 async fn initialize_configured_lsp(request: &InitRequest) {
@@ -173,7 +170,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
     };
 
     // Find project root using configured markers
-    let root_path = find_project_root(abs_path, &lsp_config.root_markers);
+    let root_path = lsp_config.find_root(abs_path);
 
     // Determine language ID (for TypeScript vs JavaScript, use extension-based logic)
     let language_id = if language.lsp_language_id == language.config.id {
@@ -603,29 +600,6 @@ fn find_companion_command(companion: &CompanionLspConfig) -> Option<String> {
     }
 
     None
-}
-
-/// Check if a file should use the Hyperion LSP (JVM-based language server).
-/// These languages need background initialization to avoid blocking the UI.
-fn is_hyperion_language(abs_path: &Path) -> bool {
-    let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    matches!(
-        ext,
-        "java" | "kt" | "kts" | "groovy" | "gradle" | "scala" | "sc" | "sbt"
-    )
-}
-
-/// Map file extension to the LSP language ID for Hyperion languages.
-fn hyperion_language_id(abs_path: &Path) -> String {
-    let ext = abs_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    match ext {
-        "java" => "java",
-        "kt" | "kts" => "kotlin",
-        "groovy" | "gradle" => "groovy",
-        "scala" | "sc" | "sbt" => "scala",
-        _ => "java",
-    }
-    .to_string()
 }
 
 /// Determine language ID for LSP initialization

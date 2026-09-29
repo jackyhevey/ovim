@@ -196,11 +196,29 @@ pub struct LspConfig {
     #[serde(default)]
     pub root_markers: Vec<String>,
 
+    /// Markers that identify a multi-module workspace root (e.g. Gradle's
+    /// `settings.gradle`). When any ancestor directory holds one of these, the
+    /// outermost such directory is the project root, taking precedence over
+    /// the nearest `root_markers` match (which would be a sub-module).
+    #[serde(default)]
+    pub outermost_root_markers: Vec<String>,
+
     /// Installation instructions (shown on failure)
     pub install_hint: Option<String>,
 
     /// Auto-install configuration (optional)
     pub auto_install: Option<AutoInstallConfig>,
+}
+
+impl LspConfig {
+    /// Resolve the workspace root for `file_path`.
+    pub fn find_root(&self, file_path: &Path) -> PathBuf {
+        find_project_root_with_outermost(
+            file_path,
+            &self.root_markers,
+            &self.outermost_root_markers,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -813,6 +831,27 @@ pub fn find_project_root(file_path: &Path, markers: &[String]) -> PathBuf {
         .to_path_buf()
 }
 
+/// Like [`find_project_root`], but a directory holding one of
+/// `outermost_markers` (searched from the top down) wins over a nearer
+/// `markers` match.
+pub fn find_project_root_with_outermost(
+    file_path: &Path,
+    markers: &[String],
+    outermost_markers: &[String],
+) -> PathBuf {
+    if !outermost_markers.is_empty() {
+        let outermost = file_path
+            .ancestors()
+            .skip(1)
+            .filter(|dir| outermost_markers.iter().any(|m| dir.join(m).exists()))
+            .last();
+        if let Some(dir) = outermost {
+            return dir.to_path_buf();
+        }
+    }
+    find_project_root(file_path, markers)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -930,6 +969,28 @@ mod tests {
 
         // Test no match
         assert!(registry.detect("unknown.xyz").is_none());
+    }
+
+    #[test]
+    fn outermost_root_marker_beats_nearest_submodule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("proj");
+        let sub = root.join("app/src/main/java");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(root.join("settings.gradle"), "").unwrap();
+        std::fs::write(root.join("app/build.gradle"), "").unwrap();
+        let file = sub.join("A.java");
+        let markers = vec!["build.gradle".to_string()];
+        let outer = vec!["settings.gradle".to_string()];
+        assert_eq!(find_project_root(&file, &markers), root.join("app"));
+        assert_eq!(
+            find_project_root_with_outermost(&file, &markers, &outer),
+            root
+        );
+        assert_eq!(
+            find_project_root_with_outermost(&file, &markers, &["nope".to_string()]),
+            root.join("app")
+        );
     }
 
     #[test]

@@ -31,6 +31,10 @@ pub struct DocumentSyncState {
     /// is not draining stdin refuses the notification instantly, and without
     /// this the tick would retry (and log) every 16 ms while it stays wedged.
     pub save_retry_after: Option<std::time::Instant>,
+    /// Earliest tick at which a failed didOpen may be retried by the
+    /// background open-document sync (same wedge-avoidance as
+    /// `save_retry_after`).
+    pub open_retry_after: Option<std::time::Instant>,
     /// The buffer content changed without the server hearing about it (e.g.
     /// reload after an external write). The next sync MUST send a full
     /// document update: reconcile seeding and the content-equality no-op

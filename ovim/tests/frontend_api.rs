@@ -23,15 +23,10 @@ use ovim::frontend::{
     FrontendChannels,
 };
 use ovim::mode::Mode;
-use tokio::sync::mpsc;
 
-/// Builds a `FrontendChannels` the way a frontend does: it owns the
-/// `java_status_tx` sender (normally wired up via
-/// `ovim::lsp_init::init_java_status_sender` in a real binary) and hands the
-/// receiver half to the channel bundle.
+/// Builds a `FrontendChannels` the way a frontend does.
 fn test_channels() -> FrontendChannels {
-    let (_java_status_tx, java_status_rx) = mpsc::channel(1);
-    FrontendChannels::new(java_status_rx)
+    FrontendChannels::new()
 }
 
 /// Contract step 2: build a `FrontendChannels` and run `process_editor_tick`

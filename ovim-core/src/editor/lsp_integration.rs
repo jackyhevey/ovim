@@ -1485,6 +1485,7 @@ impl Editor {
         // Step 1: Push pending content to the server.
         self.send_lsp_changes_if_modified().await;
         self.send_lsp_save_if_needed().await;
+        self.sync_open_documents().await;
 
         // Step 2: Now that the server is up-to-date, process diagnostics.
         let Some(lsp_manager) = self.lsp.state.lsp_manager.clone() else {
@@ -1798,6 +1799,135 @@ impl Editor {
         }
     }
 
+    /// Makes sure every document the user has open is known to its language
+    /// server: the current buffer plus every buffer visible in another window
+    /// or tab. Covers buffers opened before the server finished starting,
+    /// split/tab buffers, and buffers a restarted server has never seen.
+    ///
+    /// The current buffer's edits are streamed by `send_lsp_changes_if_modified`;
+    /// this only adds the missing `didOpen` for it, and both open and change
+    /// notifications for the other visible buffers.
+    pub async fn sync_open_documents(&mut self) {
+        const OPEN_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+        let Some(lsp) = self.lsp.state.lsp_manager.clone() else {
+            return;
+        };
+        if lsp.active_server_languages().is_empty() {
+            return;
+        }
+
+        for index in 0..self.buffers.len() {
+            let is_current = index == self.current_buffer_index;
+            if !is_current && !self.buffer_is_open_in_ui(index) {
+                continue;
+            }
+            let buffer = &self.buffers[index];
+            if super::buffer_manager::is_scratch_buffer(buffer) {
+                continue;
+            }
+            let Some(file_path) = buffer.file_path().map(str::to_string) else {
+                continue;
+            };
+            let Some(uri) = uri_from_file_path(&file_path) else {
+                continue;
+            };
+            let Some(language_id) = self.language_id_for_path(&file_path) else {
+                continue;
+            };
+            if lsp.servers_for_document_uri(&language_id, &uri).is_empty() {
+                continue;
+            }
+
+            let state = self.lsp.state.document_sync.get(&file_path);
+            let opened = state.is_some_and(|state| state.did_open_sent);
+            if is_current {
+                let retry_ok = state.is_none_or(|state| {
+                    state
+                        .open_retry_after
+                        .is_none_or(|at| std::time::Instant::now() >= at)
+                });
+                if !opened && retry_ok {
+                    self.ensure_lsp_document_synced().await;
+                    if !self
+                        .lsp
+                        .state
+                        .document_sync
+                        .get(&file_path)
+                        .is_some_and(|state| state.did_open_sent)
+                    {
+                        self.lsp
+                            .state
+                            .document_sync
+                            .entry(file_path)
+                            .or_default()
+                            .open_retry_after = Some(std::time::Instant::now() + OPEN_RETRY_DELAY);
+                    }
+                }
+                continue;
+            }
+
+            let content: Arc<str> = Arc::from(self.buffers[index].rope().to_string());
+            if !opened {
+                if state.is_some_and(|state| {
+                    state
+                        .open_retry_after
+                        .is_some_and(|at| std::time::Instant::now() < at)
+                }) {
+                    continue;
+                }
+                match lsp
+                    .did_open_broadcast(uri.clone(), &language_id, 1, content.to_string())
+                    .await
+                {
+                    Ok(()) => {
+                        let flushed_version = lsp.get_last_sent_version(&uri).await;
+                        self.mark_document_flushed(&file_path, content, flushed_version);
+                        self.lsp.slots.diagnostics.invalidate();
+                    }
+                    Err(error) => {
+                        crate::lsp_warn!("LSP", "didOpen failed for {}: {}", file_path, error);
+                        self.lsp
+                            .state
+                            .document_sync
+                            .entry(file_path)
+                            .or_default()
+                            .open_retry_after = Some(std::time::Instant::now() + OPEN_RETRY_DELAY);
+                    }
+                }
+                continue;
+            }
+
+            let Some(state) = state.filter(|state| state.is_modified()) else {
+                continue;
+            };
+            let old_content = state.last_flushed_content.clone();
+            if old_content.as_deref() == Some(&*content) {
+                if let Some(state) = self.lsp.state.document_sync.get_mut(&file_path) {
+                    state.buffer_modified = false;
+                }
+                continue;
+            }
+            if lsp
+                .did_change_broadcast(uri.clone(), &language_id, content.clone(), old_content)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let queued_version = lsp.get_document_version(&uri).await;
+            if let Some(state) = self.lsp.state.document_sync.get_mut(&file_path) {
+                state.mark_change_queued(content, queued_version);
+            }
+            if let Ok(Some((text, version))) = lsp
+                .flush_pending_changes_broadcast(&uri, &language_id)
+                .await
+            {
+                self.mark_document_flushed(&file_path, Arc::from(text), version);
+            }
+        }
+    }
+
     /// Ensures the LSP server has the latest document content before making a request
     ///
     /// CRITICAL FIX: When we make a hover/goto request immediately after typing,
@@ -1938,6 +2068,15 @@ impl Editor {
         let Some(file_path) = self.lsp.state.pending_did_close_file.take() else {
             return;
         };
+
+        // Switching away from a buffer that is still shown in another window
+        // or tab must not close the document on the server.
+        let still_open = self.buffers.iter().enumerate().any(|(index, buffer)| {
+            buffer.file_path() == Some(file_path.as_str()) && self.buffer_is_open_in_ui(index)
+        });
+        if still_open {
+            return;
+        }
 
         let Some(ref lsp) = self.lsp.state.lsp_manager else {
             return;

@@ -6,7 +6,6 @@ use ovim_core::language_catalog::{DynamicLanguageSpec, DynamicLspSpec, Registrat
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 /// A real stdio peer holds initialize until the test releases it. Tests drive
 /// the shared frontend tick, so a blocked startup fails before that release.
@@ -56,10 +55,9 @@ impl StartupSession {
         std::fs::write(root.join("project.marker"), "").unwrap();
         test.set_file_path(root.join("first.controlled").display().to_string());
         test.editor.request_lsp_init();
-        let (_, rx) = mpsc::channel(1);
         Self {
             test,
-            channels: FrontendChannels::new(rx),
+            channels: FrontendChannels::new(),
             dir,
         }
     }
@@ -139,7 +137,7 @@ async fn typing_during_startup_is_responsive_and_did_open_uses_latest_text() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn file_switch_during_startup_waits_for_the_shared_server_and_opens_current_file() {
+async fn every_open_buffer_is_opened_once_the_shared_server_is_ready() {
     let mut session = StartupSession::new();
     session.wait_for_event("initialize").await;
     let first = session
@@ -162,20 +160,61 @@ async fn file_switch_during_startup_waits_for_the_shared_server_and_opens_curren
     session.tick().await;
     session.ready();
 
-    let opened = session.wait_for_event("textDocument/didOpen").await;
-    assert_eq!(
-        opened["params"]["textDocument"]["uri"],
-        ovim::lsp::uri_from_file_path(&second).unwrap().as_str()
-    );
-    assert_eq!(opened["params"]["textDocument"]["text"], "second file\n");
+    // Both the current buffer and the buffer left behind in the first tab
+    // must reach the server; only one server is started for the shared root.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while session.events("textDocument/didOpen").len() < 2 {
+            session.tick().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both open buffers must be didOpen'd");
+    let opened = session.events("textDocument/didOpen");
+    let text_for = |path: &str| {
+        let uri = ovim::lsp::uri_from_file_path(path).unwrap();
+        opened
+            .iter()
+            .find(|event| event["params"]["textDocument"]["uri"] == uri.as_str())
+            .unwrap_or_else(|| panic!("no didOpen for {path}"))["params"]["textDocument"]["text"]
+            .clone()
+    };
+    assert_eq!(text_for(&second.display().to_string()), "second file\n");
+    assert_eq!(text_for(&first), "original\n");
     assert_eq!(session.events("initialize").len(), 1);
-    let manager = session.test.editor.lsp_manager().unwrap();
-    assert_eq!(
-        manager
-            .get_document_version(&ovim::lsp::uri_from_file_path(first).unwrap())
-            .await,
-        0
-    );
+    session.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn buffer_opened_in_a_split_after_startup_is_opened_on_the_server() {
+    let mut session = StartupSession::new();
+    session.ready();
+    session.wait_for_event("textDocument/didOpen").await;
+
+    let second: PathBuf = session
+        .dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("split.controlled");
+    std::fs::write(&second, "in a split\n").unwrap();
+    session.test.keys(":vsplit<CR>");
+    session.test.keys(&format!(":e {}<CR>", second.display()));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while session.events("textDocument/didOpen").len() < 2 {
+            session.tick().await;
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("split buffer must be didOpen'd");
+    session.test.keys("<C-w>w");
+    session.tick().await;
+    // Switching focus between windows must not close either document.
+    for _ in 0..5 {
+        session.tick().await;
+    }
+    assert!(session.events("textDocument/didClose").is_empty());
     session.stop().await;
 }
 
@@ -217,8 +256,7 @@ async fn cancelled_startup_reaps_its_process_and_can_be_retried() {
     let pid = Pid::from_raw(initialization["peerPid"].as_i64().unwrap() as i32);
 
     // Closing the frontend aborts its pending startup without a server response.
-    let (_, rx) = mpsc::channel(1);
-    session.channels = FrontendChannels::new(rx);
+    session.channels = FrontendChannels::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         while kill(pid, None).is_ok() {
             tokio::time::sleep(Duration::from_millis(10)).await;
