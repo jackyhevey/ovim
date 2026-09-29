@@ -410,6 +410,11 @@ pub struct LspState {
     pub needs_lsp_init: bool,
     /// File path that needs didClose notification (set when switching files)
     pub pending_did_close_file: Option<String>,
+    /// Buffers created purely to carry a workspace edit for a file the user
+    /// never opened (OV-00450). Only these may be written through to disk;
+    /// a buffer the user opened, even if hidden, is never persisted behind
+    /// their back.
+    pub workspace_edit_carriers: std::collections::HashSet<crate::buffer::BufferId>,
     /// File-explorer rename waiting for its `willRenameFiles` round trip.
     pub pending_file_rename: Option<(std::path::PathBuf, String)>,
     /// Server `showMessageRequest`s waiting their turn, the one currently
@@ -487,6 +492,7 @@ impl LspState {
             active_lsp_servers: HashMap::new(),
             needs_lsp_init: false,
             pending_did_close_file: None,
+            workspace_edit_carriers: std::collections::HashSet::new(),
             pending_file_rename: None,
             hierarchy: None,
             queued_message_requests: Default::default(),

@@ -1829,15 +1829,17 @@ impl Editor {
         let path_str = path.as_ref().to_string_lossy().to_string();
 
         // Check if file is already open in a buffer
-        for (i, buf) in self.buffers.iter().enumerate() {
-            if buf.file_path() == Some(&path_str) {
-                // File already open - use the canonical switch path so every
-                // file-scoped UI/LSP cache is reset consistently.
-                self.switch_to_buffer(i);
-                // Point the current tab at the existing buffer
-                self.sync_current_tab_buffer();
-                return Ok(());
-            }
+        // (compared by canonical identity, not by spelling: `:e rel/path`
+        // must find the buffer that was opened as `/abs/rel/path`, otherwise
+        // a duplicate buffer for one file is created and LSP edits land in the
+        // wrong twin - OV-00450)
+        if let Some(i) = self.find_buffer_by_path(&path_str) {
+            // File already open - use the canonical switch path so every
+            // file-scoped UI/LSP cache is reset consistently.
+            self.switch_to_buffer(i);
+            // Point the current tab at the existing buffer
+            self.sync_current_tab_buffer();
+            return Ok(());
         }
 
         // Store old file path before loading new file

@@ -200,6 +200,10 @@ impl Editor {
         // through to disk below. Buffers the user has open (or has unrelated
         // unsaved changes in) stay in-memory modified; saving is their call.
         let was_clean = !self.buffer_index_is_modified(buffer_index);
+        // Only a buffer that exists solely to carry this edit (never viewed by
+        // the user) may be persisted here. A user-opened buffer keeps the
+        // edit in memory (undoable, `[+]`), never written behind their back.
+        let is_carrier = self.buffer_is_workspace_edit_carrier(buffer_index);
         Self::track_modified_file(uri, modified_files);
         let mut applied = self.apply_lsp_edits_to_buffer_index(buffer_index, text_edits);
         // Write through ONLY on full success: a partial apply (some edits
@@ -208,6 +212,7 @@ impl Editor {
         // is reported upstream (external review finding on OV-00331/332).
         if applied
             && was_clean
+            && is_carrier
             && self.buffer_index_is_modified(buffer_index)
             && !self.buffer_is_open_in_ui(buffer_index)
             && !self.write_through_workspace_edit_buffer(buffer_index)
@@ -215,6 +220,20 @@ impl Editor {
             applied = false;
         }
         applied
+    }
+
+    fn buffer_is_workspace_edit_carrier(&mut self, index: usize) -> bool {
+        // A carrier that has since become visible is the user's buffer now.
+        if self.buffer_is_open_in_ui(index) {
+            if let Some(buffer) = self.buffers.get(index) {
+                let id = buffer.id();
+                self.lsp.state.workspace_edit_carriers.remove(&id);
+            }
+            return false;
+        }
+        self.buffers
+            .get(index)
+            .is_some_and(|b| self.lsp.state.workspace_edit_carriers.contains(&b.id()))
     }
 
     /// Creates an empty file (and parent directories) so an edit addressed to
@@ -630,6 +649,141 @@ mod tests {
         assert!(editor.any_buffer_modified());
     }
 
+    // ---- OV-00450: path identity ---------------------------------------
+
+    /// Every spelling of one file's path: absolute, `dir/./f`, `dir/sub/../f`,
+    /// and through a symlinked directory.
+    fn path_spellings(dir: &std::path::Path, file_name: &str) -> Vec<PathBuf> {
+        let real = dir.canonicalize().unwrap();
+        let mut spellings = vec![
+            real.join(file_name),
+            real.join(".").join(file_name),
+            real.join("sub").join("..").join(file_name),
+        ];
+        #[cfg(unix)]
+        {
+            let link = real.join("linkdir");
+            let _ = std::os::unix::fs::symlink(&real, &link);
+            spellings.push(link.join(file_name));
+            spellings.push(link.join(".").join("linkdir").join(file_name));
+        }
+        spellings
+    }
+
+    fn raw_uri(path: &std::path::Path) -> lsp_types::Uri {
+        lsp_types::Uri::from_str(&format!("file://{}", path.to_string_lossy())).expect("uri")
+    }
+
+    /// Loading one file under any path spelling must never create a second
+    /// buffer (the root cause of the `:e rel/path` rename corruption).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn loading_any_spelling_of_open_file_reuses_buffer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        let file = dir.path().join("Service.java");
+        let other = dir.path().join("Controller.java");
+        fs::write(&file, "class Service {}\n").unwrap();
+        fs::write(&other, "class Controller {}\n").unwrap();
+
+        for spelling in path_spellings(dir.path(), "Service.java") {
+            let mut editor = Editor::default();
+            editor.open_file(&file).expect("open");
+            let count = editor.buffer_count();
+            editor.load_file(&other).expect("switch away");
+            editor.load_file(&spelling).unwrap_or_else(|e| {
+                panic!("load {}: {e}", spelling.display());
+            });
+            assert_eq!(
+                editor.buffer_count(),
+                count + 1,
+                "spelling {} duplicated the buffer",
+                spelling.display()
+            );
+            assert_eq!(
+                editor.buffer().file_path().map(std::path::Path::new),
+                Some(file.canonicalize().unwrap().as_path())
+            );
+        }
+    }
+
+    /// The reported corruption: same file reopened under another spelling,
+    /// unsaved edit in the visible buffer, rename arrives. The edit must land
+    /// in the visible buffer and the disk must stay untouched.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn workspace_edit_under_any_spelling_hits_visible_dirty_buffer_not_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        let file = dir.path().join("Service.java");
+        let other = dir.path().join("Controller.java");
+        fs::write(&file, "int old = 1;\n").unwrap();
+        fs::write(&other, "class C {}\n").unwrap();
+
+        for open_spelling in path_spellings(dir.path(), "Service.java") {
+            for uri_spelling in path_spellings(dir.path(), "Service.java") {
+                let mut editor = Editor::default();
+                editor.open_file(&file).expect("open");
+                editor.load_file(&other).expect("other");
+                editor.load_file(&open_spelling).expect("reopen");
+                editor.buffer_mut().insert_text_at(
+                    0,
+                    crate::unicode::CharCol(0),
+                    "// unsaved\n",
+                );
+                // Rename was computed against the text the server saw
+                // (the dirty text): `old` sits on line 1 now.
+                let edit = changes_edit(
+                    raw_uri(&uri_spelling),
+                    vec![lsp_types::TextEdit {
+                        range: lsp_types::Range::new(
+                            lsp_types::Position::new(1, 4),
+                            lsp_types::Position::new(1, 7),
+                        ),
+                        new_text: "renamed".into(),
+                    }],
+                );
+                assert!(editor.apply_workspace_edit(edit).unwrap());
+                assert_eq!(
+                    editor.buffer().rope().to_string(),
+                    "// unsaved\nint renamed = 1;\n",
+                    "open={} uri={}",
+                    open_spelling.display(),
+                    uri_spelling.display()
+                );
+                assert_eq!(
+                    fs::read_to_string(&file).unwrap(),
+                    "int old = 1;\n",
+                    "disk must be untouched (open={} uri={})",
+                    open_spelling.display(),
+                    uri_spelling.display()
+                );
+            }
+        }
+    }
+
+    /// A buffer the user opened (then switched away from) is not a carrier:
+    /// a workspace edit must not be persisted behind their back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn workspace_edit_never_writes_user_opened_hidden_buffer_to_disk() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let opened = dir.path().join("opened.rs");
+        let hidden = dir.path().join("hidden.rs");
+        fs::write(&opened, "fn main() {}\n").unwrap();
+        fs::write(&hidden, "fn helper() {}\n").unwrap();
+
+        let mut editor = Editor::default();
+        editor.open_file(&hidden).unwrap();
+        editor.open_file(&opened).unwrap(); // hidden is now switched away
+
+        let edit = changes_edit(file_uri(&hidden), vec![replace_edit(3, 9, "renamed")]);
+        assert!(editor.apply_workspace_edit(edit).unwrap());
+        assert_eq!(
+            fs::read_to_string(&hidden).unwrap(),
+            "fn helper() {}\n",
+            "user-opened buffer must not be written through"
+        );
+        assert!(editor.any_buffer_modified(), "edit stays in memory, `[+]`");
+    }
+
     /// OV-00330 (version-guard leg): a versioned document edit whose version
     /// no longer matches our view of the document is stale — the spec's
     /// staleness mechanism. It must be skipped, not spliced into newer text.
@@ -675,8 +829,11 @@ mod tests {
         fs::write(&target, "fn helper() {}\n").expect("write target");
 
         let mut editor = Editor::default();
-        editor.open_file(&target).expect("open target.rs");
-        editor.open_file(&opened).expect("open opened.rs"); // target now hidden
+        editor.open_file(&opened).expect("open opened.rs");
+        // target is a hidden edit-carrier buffer (loaded for the edit only)
+        editor
+            .find_or_load_buffer_index_by_uri(&file_uri(&target))
+            .expect("load target.rs");
 
         // External change lands after the buffer snapshot.
         fs::write(&target, "fn external_truth() {}\n").expect("external write");

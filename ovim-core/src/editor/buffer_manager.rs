@@ -16,6 +16,30 @@ pub(crate) fn is_scratch_path(path: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Canonical identity of a buffer/URI path: absolute, symlinks resolved for
+/// the part that exists, lexically normalised for the rest. Scratch names
+/// (`[Title]`) are kept verbatim.
+pub(crate) fn canonical_path_key(path: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(path);
+    if is_scratch_path(&path.to_string_lossy()) {
+        return path.to_path_buf();
+    }
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(path),
+            Err(_) => path.to_path_buf(),
+        }
+    };
+    crate::ai::path_policy::canonicalize_or_normalize(&absolute)
+}
+
+/// True when two path spellings denote the same file.
+pub(crate) fn paths_identify_same_file(a: &str, b: &str) -> bool {
+    a == b || canonical_path_key(a) == canonical_path_key(b)
+}
+
 /// Scratch identity for DATA-SAFETY decisions (quit protection, `:wa`).
 ///
 /// The bracket-name heuristic alone would misclassify a REAL file whose
@@ -190,6 +214,10 @@ impl Editor {
             }
 
             self.current_buffer_index = index;
+            // Once the user looks at a buffer it is theirs, not a hidden
+            // workspace-edit carrier.
+            let viewed = self.buffers[index].id();
+            self.lsp.state.workspace_edit_carriers.remove(&viewed);
             self.lsp.state.needs_lsp_init = true;
 
             // Clear buffer-local marks (a-z) when switching files
@@ -350,22 +378,25 @@ impl Editor {
         self.mark_dirty();
     }
 
-    /// Finds the index of a buffer with the given file path
-    /// Returns None if no buffer has that file path
+    /// Finds the index of a buffer with the given file path.
+    ///
+    /// This is THE identity check for "is this file already open": every
+    /// spelling of a path (relative, `./x`, `a/../x`, symlinked directory,
+    /// non-normalised URI path) resolves to the same buffer, and it also works
+    /// for files that no longer exist on disk. Returns None if no buffer has
+    /// that file path. If (legacy) duplicates exist the current buffer wins so
+    /// an edit can never land on a hidden twin of the visible buffer.
     pub(crate) fn find_buffer_by_path(&self, file_path: &str) -> Option<usize> {
-        // Normalize paths for comparison
-        let target_path = std::path::Path::new(file_path).canonicalize().ok()?;
-
-        for (index, buffer) in self.buffers.iter().enumerate() {
-            if let Some(buf_path) = buffer.file_path() {
-                if let Ok(buf_canonical) = std::path::Path::new(buf_path).canonicalize() {
-                    if target_path == buf_canonical {
-                        return Some(index);
-                    }
-                }
-            }
+        let same = |index: usize| {
+            self.buffers
+                .get(index)
+                .and_then(|buffer| buffer.file_path())
+                .is_some_and(|buf_path| paths_identify_same_file(buf_path, file_path))
+        };
+        if same(self.current_buffer_index) {
+            return Some(self.current_buffer_index);
         }
-        None
+        (0..self.buffers.len()).find(|&index| same(index))
     }
 
     /// Finds or loads a buffer by URI, returning its index
@@ -386,6 +417,7 @@ impl Editor {
 
         // Load the file into a new buffer (don't switch to it)
         let buffer = Buffer::load_file(&file_path).ok()?;
+        self.lsp.state.workspace_edit_carriers.insert(buffer.id());
         let index = self.push_buffer(buffer);
         // Note: We intentionally don't change current_buffer_index here
         // to avoid switching away from the user's current file
