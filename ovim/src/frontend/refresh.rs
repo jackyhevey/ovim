@@ -22,6 +22,13 @@ pub fn refresh_after_api_mutation(editor: &mut Editor, force_full_lsp_sync: bool
 /// edits. This is shared by focus events and periodic polling so headless
 /// sessions have the same file-change behavior as the TUI.
 pub fn process_external_file_change(editor: &mut Editor) {
+    // Buffers in other windows/tabs follow the same autoread rule.
+    if !editor
+        .reload_background_buffers_changed_on_disk()
+        .is_empty()
+    {
+        editor.mark_dirty();
+    }
     match editor.buffer().check_external_modification() {
         Ok(false) | Err(_) => {}
         Ok(true) if editor.is_modified() => {

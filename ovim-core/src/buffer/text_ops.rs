@@ -460,6 +460,17 @@ impl Buffer {
         }
     }
 
+    /// Pulls the cursor back inside the text after edits that did not move it
+    /// (LSP edits, external reloads). A cursor on a line that no longer exists
+    /// panics in scroll/render code, so this must follow any such edit.
+    pub fn clamp_cursor_to_content(&mut self) {
+        let last_line = self.line_count().saturating_sub(1);
+        if self.cursor().line() > last_line {
+            self.cursor_mut().set_line(last_line);
+        }
+        self.clamp_cursor_col();
+    }
+
     /// Clamp cursor column to valid range for current line (normal mode: last char).
     pub fn clamp_cursor_col(&mut self) {
         let line = self.cursor().line();

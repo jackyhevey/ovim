@@ -4,6 +4,14 @@ use crate::edit_log::EditLog;
 use ropey::Rope;
 use std::collections::BTreeMap;
 
+/// `Rope::line_to_char` panics past the last line. Decorations can outlive
+/// the text they were computed for (an LSP edit shrank the buffer, a cursor
+/// is stale), so lookups clamp to the end of the rope instead.
+fn line_start_char(rope: &Rope, line: usize) -> usize {
+    rope.try_line_to_char(line)
+        .unwrap_or_else(|_| rope.len_chars())
+}
+
 // Phase-05 Step F: `adjust_for_edits` has been removed. Decorations are now
 // immutable after placement — `char_offset` and `source_version` are frozen at
 // creation time. The renderer projects positions on demand by calling the
@@ -54,7 +62,7 @@ impl DecorationPlacement {
     pub fn char_idx(&self, rope: &Rope) -> usize {
         let offset = self.char_offset().min(rope.len_chars());
         let line = rope.char_to_line(offset);
-        offset - rope.line_to_char(line)
+        offset - line_start_char(rope, line)
     }
 }
 
@@ -271,7 +279,7 @@ impl DecorationMap {
     /// line, sorted by char_idx.  Used by WrapMap to account for decoration
     /// widths when computing wrap points.
     pub fn inline_decorations_for_line(&self, line: usize, rope: &Rope) -> Vec<(usize, usize)> {
-        let line_start = rope.line_to_char(line);
+        let line_start = line_start_char(rope, line);
         self.for_line(line)
             .iter()
             .filter_map(|d| match &d.placement {
@@ -297,7 +305,7 @@ impl DecorationMap {
     /// (the position `A` lands on) is to the *left* of that hint, and its width
     /// must not be counted. (OV-00260)
     pub fn inline_width_before(&self, line: usize, char_idx: usize, rope: &Rope) -> usize {
-        let line_start = rope.line_to_char(line);
+        let line_start = line_start_char(rope, line);
         let line_len = crate::display::line_content_len(rope, line);
         self.for_line(line)
             .iter()
@@ -405,7 +413,7 @@ impl DecorationMap {
         rope: &Rope,
         log: &EditLog,
     ) -> Vec<(usize, usize)> {
-        let line_start = rope.line_to_char(line);
+        let line_start = line_start_char(rope, line);
         self.for_line_projected(line, rope, log)
             .into_iter()
             .filter_map(|d| match d.placement {
@@ -426,7 +434,7 @@ impl DecorationMap {
         rope: &Rope,
         log: &EditLog,
     ) -> usize {
-        let line_start = rope.line_to_char(line);
+        let line_start = line_start_char(rope, line);
         let line_len = crate::display::line_content_len(rope, line);
         self.for_line_projected(line, rope, log)
             .into_iter()
@@ -577,7 +585,7 @@ impl ProjectedDecorations {
     /// the given projected line, sorted by char_idx (matches the storage order
     /// produced by `project_all`).
     pub fn inline_decorations_for_line(&self, line: usize, rope: &Rope) -> Vec<(usize, usize)> {
-        let line_start = rope.line_to_char(line);
+        let line_start = line_start_char(rope, line);
         self.for_line(line)
             .iter()
             .filter_map(|d| match d.placement {
@@ -593,7 +601,7 @@ impl ProjectedDecorations {
     /// left of `char_idx`. Mirrors `DecorationMap::inline_width_before` but
     /// operates on projected offsets.
     pub fn inline_width_before(&self, line: usize, char_idx: usize, rope: &Rope) -> usize {
-        let line_start = rope.line_to_char(line);
+        let line_start = line_start_char(rope, line);
         let line_len = crate::display::line_content_len(rope, line);
         self.for_line(line)
             .iter()
@@ -645,7 +653,7 @@ where
             let char_idx = crate::lsp::utf16_to_char_col(&text_for_line, utf16_col);
             // Convert to absolute rope char offset.
             let char_offset = if line < rope.len_lines() {
-                rope.line_to_char(line) + char_idx
+                line_start_char(rope, line) + char_idx
             } else {
                 rope.len_chars()
             };
@@ -778,7 +786,7 @@ pub fn decorations_from_diagnostics(
 
             // Anchor to the start of the line in the rope.
             let char_offset = if line < rope.len_lines() {
-                rope.line_to_char(line)
+                line_start_char(rope, line)
             } else {
                 rope.len_chars()
             };

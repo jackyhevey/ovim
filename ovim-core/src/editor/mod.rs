@@ -52,6 +52,7 @@ mod editing_state;
 mod execution;
 #[cfg(test)]
 mod execution_tests;
+mod file_rename;
 mod filetree;
 pub mod fuzzy;
 pub mod grep;
@@ -102,6 +103,7 @@ mod visual_context;
 mod visual_mode;
 mod window;
 mod window_viewport;
+mod workspace_watch;
 mod wrap_map;
 mod yank_flash;
 

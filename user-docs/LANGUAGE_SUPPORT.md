@@ -25,10 +25,6 @@ These languages have full LSP support and will auto-install the language server 
 | CSS | `.css`, `.scss`, `.sass` | vscode-css-language-server | npm |
 | TOML | `.toml` | taplo | cargo |
 | Ruby | `.rb`, `.rake`, `.rbw`, `.gemspec` | solargraph | gem |
-| Java | `.java` | hyperion-lsp | auto-download |
-| Kotlin | `.kt`, `.kts` | hyperion-lsp | auto-download |
-| Scala | `.scala`, `.sc` | hyperion-lsp | auto-download |
-| Groovy | `.groovy`, `.gradle` | hyperion-lsp | auto-download |
 | Zig | `.zig`, `.zon` | zls | GitHub release |
 | Lua | `.lua` | lua-language-server | GitHub release |
 | Terraform | `.tf`, `.tfvars` | terraform-ls | GitHub release |
@@ -36,11 +32,19 @@ These languages have full LSP support and will auto-install the language server 
 
 ### Languages with LSP (Manual Install Required)
 
+ovim never downloads `hyperion-lsp`: it only looks for it on `PATH` (`which hyperion-lsp`).
+If it is missing, opening a Java/Kotlin/Scala/Groovy file shows the build hint in the status line.
+
+
 | Language | Extensions | LSP Server | Install Command |
 |----------|------------|------------|-----------------|
 | C | `.c`, `.h` | clangd | `brew install llvm` / `pacman -S clang` |
 | C++ | `.cpp`, `.hpp` | clangd | `brew install llvm` / `pacman -S clang` |
 | XML | `.xml`, `.xsd`, `.xsl`, `.xslt`, `.svg`, `.plist` | Eclipse LemMinX | Install `lemminx` on `PATH` |
+| Java | `.java` | hyperion-lsp | Build from the hyperion-ls repo (`cargo build --release -p hyperion-lsp`) and put `hyperion-lsp` on `PATH` |
+| Kotlin | `.kt`, `.kts` | hyperion-lsp | same as Java |
+| Scala | `.scala`, `.sc` | hyperion-lsp | same as Java |
+| Groovy | `.groovy`, `.gradle` | hyperion-lsp | same as Java |
 
 ### Syntax Highlighting Only
 

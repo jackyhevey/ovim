@@ -1417,9 +1417,7 @@ async fn run_editor(
 
     editor.set_ai_conversation_resume_enabled(resume);
     editor.enable_lsp();
-    let (java_status_tx, java_status_rx) = mpsc::channel(64);
-    crate::lsp_init::init_java_status_sender(java_status_tx);
-    let mut channels = FrontendChannels::new(java_status_rx);
+    let mut channels = FrontendChannels::new();
     let mut tick = tokio::time::interval(TICK_RATE);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_external_check = Instant::now();

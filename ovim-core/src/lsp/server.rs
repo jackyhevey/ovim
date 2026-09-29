@@ -134,6 +134,22 @@ struct PendingRequest {
     method: String,
 }
 
+/// A JSON-RPC error response from the language server. `Display` is the
+/// server's message alone, so it reads naturally in the status line.
+#[derive(Debug, Clone)]
+pub struct LspServerError {
+    pub code: i32,
+    pub message: String,
+}
+
+impl std::fmt::Display for LspServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for LspServerError {}
+
 /// Server state for explicit state machine
 #[derive(Debug, Clone)]
 #[allow(clippy::large_enum_variant)]
@@ -271,7 +287,55 @@ struct LanguageServerInner {
     cap_flags: AtomicU32,
 }
 
+/// Human-readable description of how a child process ended.
+fn describe_exit_status(status: std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            let name = nix::sys::signal::Signal::try_from(signal)
+                .map(|s| format!(" ({})", s.as_str()))
+                .unwrap_or_default();
+            return format!("killed by signal {signal}{name}");
+        }
+    }
+    match status.code() {
+        Some(code) => format!("exited with code {code}"),
+        None => "exited".to_string(),
+    }
+}
+
 impl LanguageServerInner {
+    /// Reaps the child process (killing it first if its output pipe closed
+    /// while it is somehow still running) and moves a live server to
+    /// `Failed` with the exit reason. No-op during a deliberate shutdown.
+    async fn mark_process_exited(&self) {
+        let child = self.process.lock().await.take();
+        let description = match child {
+            Some(mut child) => {
+                let waited = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                match waited {
+                    Ok(Ok(status)) => describe_exit_status(status),
+                    Ok(Err(error)) => format!("wait failed: {error}"),
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        "closed its output and was killed".to_string()
+                    }
+                }
+            }
+            None => "exited".to_string(),
+        };
+        let mut state = self.state.lock().await;
+        if matches!(*state, ServerState::ShuttingDown | ServerState::Terminated) {
+            return;
+        }
+        *state = ServerState::Failed {
+            error: format!("LSP server process {description}"),
+            at: Instant::now(),
+        };
+    }
+
     /// Returns a log prefix with language and command context
     fn log_prefix(&self) -> String {
         format!("[LSP:{}:{}]", self.language, self.command)
@@ -554,11 +618,6 @@ impl LanguageServer {
                                 &inner_clone.log_prefix(),
                                 "Reader EOF: LSP server closed output (process likely exited)"
                             );
-                            let mut state = state_clone.lock().await;
-                            *state = ServerState::Failed {
-                                error: "LSP server process exited".to_string(),
-                                at: Instant::now(),
-                            };
                             got_eof = true;
                             break;
                         }
@@ -674,12 +733,12 @@ impl LanguageServer {
                                         } else {
                                             // Real LSP error - propagate to caller
                                             // Errors will be shown in status line by the editor
-                                            let error_msg =
-                                                format!("{} (code {})", error.message, error.code);
-                                            // Removed eprintln - leaks into TUI display
-                                            let _ = req
-                                                .sender
-                                                .send(Err(anyhow!("LSP error: {}", error_msg)));
+                                            let _ = req.sender.send(Err(anyhow::Error::new(
+                                                LspServerError {
+                                                    code: error.code,
+                                                    message: error.message.clone(),
+                                                },
+                                            )));
                                         }
                                     } else if let Some(result) = msg.result {
                                         let _ = req.sender.send(Ok(result));
@@ -730,7 +789,10 @@ impl LanguageServer {
                     }
                 }
             }
-            // Reader task exiting silently
+            // The stdout pipe is gone (or the stream is unusable): the server
+            // is dead for our purposes. Reap the child so it never lingers as a
+            // zombie and record why, unless a deliberate shutdown is underway.
+            inner_clone.mark_process_exited().await;
         });
 
         // Spawn task to capture stderr and log it for debugging
@@ -774,7 +836,12 @@ impl LanguageServer {
             }
         } else {
             drop(process_guard);
-            return Err(anyhow!("Language server process handle is missing"));
+            // The reader task already saw the pipe close and reaped the child.
+            return Err(anyhow!(
+                "Language server process failed to start or exited immediately: {} {:?}",
+                command,
+                args
+            ));
         }
 
         Ok(server)
@@ -897,6 +964,15 @@ impl LanguageServer {
                     honors_change_annotations: Some(true),
                 }),
                 rename: Some(Default::default()),
+                // Servers such as Hyperion only offer these through dynamic
+                // registration (`client/registerCapability`), and only when
+                // the client says it can handle that.
+                call_hierarchy: Some(lsp_types::CallHierarchyClientCapabilities {
+                    dynamic_registration: Some(true),
+                }),
+                type_hierarchy: Some(lsp_types::TypeHierarchyClientCapabilities {
+                    dynamic_registration: Some(true),
+                }),
                 formatting: Some(Default::default()),
                 range_formatting: Some(Default::default()),
                 publish_diagnostics: Some(lsp_types::PublishDiagnosticsClientCapabilities {
@@ -924,6 +1000,33 @@ impl LanguageServer {
             workspace: Some(lsp_types::WorkspaceClientCapabilities {
                 apply_edit: Some(true),
                 configuration: Some(true),
+                // `apply_workspace_edit` handles versioned documentChanges and
+                // Create/Rename/Delete resource operations (including buffers
+                // open on the affected files).
+                workspace_edit: Some(lsp_types::WorkspaceEditClientCapabilities {
+                    document_changes: Some(true),
+                    resource_operations: Some(vec![
+                        lsp_types::ResourceOperationKind::Create,
+                        lsp_types::ResourceOperationKind::Rename,
+                        lsp_types::ResourceOperationKind::Delete,
+                    ]),
+                    normalizes_line_endings: Some(true),
+                    ..Default::default()
+                }),
+                // The editor watches the workspace for changes made outside
+                // it and forwards them to servers that register watchers.
+                file_operations: Some(lsp_types::WorkspaceFileOperationsClientCapabilities {
+                    dynamic_registration: Some(false),
+                    will_rename: Some(true),
+                    did_rename: Some(true),
+                    ..Default::default()
+                }),
+                did_change_watched_files: Some(
+                    lsp_types::DidChangeWatchedFilesClientCapabilities {
+                        dynamic_registration: Some(true),
+                        relative_pattern_support: Some(true),
+                    },
+                ),
                 ..Default::default()
             }),
 
@@ -1094,6 +1197,13 @@ impl LanguageServer {
             .await
             .context("Failed to send initialize request")?;
 
+        // lsp-types has no typeHierarchyProvider field on ServerCapabilities,
+        // so static support has to be read from the raw response.
+        let static_type_hierarchy = result
+            .get("capabilities")
+            .and_then(|caps| caps.get("typeHierarchyProvider"))
+            .is_some_and(|provider| !provider.is_null() && *provider != json!(false));
+
         let init_result: InitializeResult =
             serde_json::from_value(result).context("Failed to parse initialize response")?;
 
@@ -1104,6 +1214,9 @@ impl LanguageServer {
 
         // Cache capability flags for lock-free access
         self.cache_capabilities(&init_result.capabilities);
+        if static_type_hierarchy {
+            self.inner.set_cap(LspCapFlags::TYPE_HIERARCHY, true);
+        }
 
         // Send initialized notification
         self.notify("initialized", serde_json::to_value(InitializedParams {})?)
@@ -1279,7 +1392,14 @@ impl LanguageServer {
                     request_id,
                     result_preview
                 );
-                result.context(format!("LSP request '{}' failed", method))
+                // Surface the server's own explanation (e.g. "Cannot rename:
+                // contains an unresolved refactoring candidate 'Circle'").
+                // Every caller shows `err.to_string()`, so the message must
+                // be the error itself, not hidden behind a generic context.
+                result.map_err(|e| match e.downcast::<LspServerError>() {
+                    Ok(server_error) => anyhow::Error::new(server_error),
+                    Err(other) => anyhow!("LSP request '{}' failed: {:#}", method, other),
+                })
             }
             Ok(Err(_)) => {
                 let _elapsed = start_time.elapsed();
@@ -1415,6 +1535,22 @@ impl LanguageServer {
     /// 4. SIGTERM (if Unix, 3s wait)
     /// 5. SIGKILL (last resort)
     pub async fn shutdown(&mut self) -> Result<()> {
+        let result = self.shutdown_process().await;
+        // Always stop the supervised background tasks and record the final
+        // state, whichever exit path the process teardown took — a crashed or
+        // gracefully exited server used to leave its cleanup task running.
+        if let Err(e) = self.inner.supervisor.shutdown_all().await {
+            crate::lsp_error!(
+                &self.log_prefix(),
+                "Shutdown: Error shutting down tasks: {}",
+                e
+            );
+        }
+        self.transition_to(ServerState::Terminated).await;
+        result
+    }
+
+    async fn shutdown_process(&mut self) -> Result<()> {
         let prefix = self.log_prefix();
 
         // Transition to ShuttingDown state
@@ -1501,15 +1637,34 @@ impl LanguageServer {
             }
         }
 
-        // Shutdown all supervised tasks
-        if let Err(e) = self.inner.supervisor.shutdown_all().await {
-            crate::lsp_error!(&prefix, "Shutdown: Error shutting down tasks: {}", e);
-        }
-
-        // Final transition to Terminated
-        self.transition_to(ServerState::Terminated).await;
-
         Ok(())
+    }
+
+    /// Non-blocking `(state description, process alive)` for UI that runs on
+    /// the synchronous command path. Falls back to "Busy" when a lock is held.
+    pub fn status_snapshot(&self) -> (String, bool) {
+        let state = match self.inner.state.try_lock() {
+            Ok(state) => match &*state {
+                ServerState::Spawning => "Spawning".to_string(),
+                ServerState::Initializing { .. } => "Initializing".to_string(),
+                ServerState::Ready { .. } => "Ready".to_string(),
+                ServerState::Failed { error, .. } => format!("Failed: {error}"),
+                ServerState::ShuttingDown => "ShuttingDown".to_string(),
+                ServerState::Terminated => "Terminated".to_string(),
+            },
+            Err(_) => "Busy".to_string(),
+        };
+        let alive = self
+            .inner
+            .process
+            .try_lock()
+            .map(|mut process| {
+                process
+                    .as_mut()
+                    .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+            })
+            .unwrap_or(true);
+        (state, alive)
     }
 
     /// Gets health information for this language server
@@ -1657,9 +1812,8 @@ impl LanguageServer {
             flags |= F::INCREMENTAL_SYNC;
         }
 
-        // TODO(OV-00132): type_hierarchy_provider requires lsp-types 0.96+
-        // Hardcoded off until we upgrade from 0.95.
-        // flags |= F::TYPE_HIERARCHY;
+        // Type hierarchy: read from the raw initialize response (see
+        // `do_initialize`) or enabled by dynamic registration.
 
         self.inner.cap_flags.store(flags.bits(), Ordering::Relaxed);
     }
@@ -1687,6 +1841,7 @@ impl LanguageServer {
             "textDocument/documentHighlight" => F::DOCUMENT_HIGHLIGHT,
             "textDocument/foldingRange" => F::FOLDING_RANGE,
             "textDocument/prepareCallHierarchy" => F::CALL_HIERARCHY,
+            "textDocument/prepareTypeHierarchy" | "textDocument/typeHierarchy" => F::TYPE_HIERARCHY,
             "workspace/executeCommand" => F::EXECUTE_COMMAND,
             "textDocument/inlayHint" => F::INLAY_HINT,
             "textDocument/semanticTokens"

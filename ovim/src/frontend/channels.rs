@@ -31,7 +31,12 @@ pub struct FrontendChannels {
     pub(super) file_list_cache_tx: mpsc::Sender<(PathBuf, PathBuf, Vec<editor::PickerResult>)>,
     pub(super) file_list_cache_rx: mpsc::Receiver<(PathBuf, PathBuf, Vec<editor::PickerResult>)>,
     pub(super) lsp_startup: crate::lsp_init::LspStartup,
-    pub(super) java_status_rx: mpsc::Receiver<String>,
+}
+
+impl Default for FrontendChannels {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FrontendChannels {
@@ -39,10 +44,7 @@ impl FrontendChannels {
     /// historically: 100 for preview loads, 1000 for file-finder results, 16
     /// for background syntax highlighting, and 4 for the file-list cache
     /// handoff (small because it only ever holds one pending batch).
-    ///
-    /// `java_status_rx` is caller-provided: the sender side is wired up via
-    /// `ovim::lsp_init::init_java_status_sender` in `main.rs`.
-    pub fn new(java_status_rx: mpsc::Receiver<String>) -> Self {
+    pub fn new() -> Self {
         let (preview_tx, preview_rx) = mpsc::channel(100);
         // Batches of files, not single files — capacity bounds memory while a
         // parallel walker streams a large repo faster than the UI drains it.
@@ -58,7 +60,6 @@ impl FrontendChannels {
             syntax_rx,
             file_list_cache_tx,
             file_list_cache_rx,
-            java_status_rx,
             lsp_startup: Default::default(),
         }
     }

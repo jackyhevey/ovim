@@ -343,6 +343,9 @@ impl Picker {
             PickerBackend::FuzzyList(FuzzyListKind::DebugConfig) => {
                 Some(PickerAction::SelectDebugConfig { index: result.line })
             }
+            PickerBackend::FuzzyList(FuzzyListKind::MessageAction) => {
+                Some(PickerAction::MessageRequestAction { index: result.line })
+            }
             PickerBackend::Nucleo(_) | PickerBackend::Grep(_) => Some(PickerAction::OpenFile {
                 path: result.location.clone(),
                 line: result.line,
@@ -377,7 +380,9 @@ impl Picker {
             PickerBackend::Nucleo(_) => &PickerMode::FindFiles,
             PickerBackend::Grep(_) => &PickerMode::LiveGrep,
             PickerBackend::FuzzyList(kind) => match kind {
-                FuzzyListKind::Custom | FuzzyListKind::DebugConfig => &PickerMode::Custom,
+                FuzzyListKind::Custom
+                | FuzzyListKind::DebugConfig
+                | FuzzyListKind::MessageAction => &PickerMode::Custom,
                 FuzzyListKind::Completion => &PickerMode::Completion,
                 FuzzyListKind::LspLocations => &PickerMode::LspLocations,
             },
@@ -392,6 +397,14 @@ impl Picker {
     /// Gets the preferred directory for ranking (typically the current file's folder)
     pub fn preferred_dir(&self) -> &Path {
         &self.preferred_dir
+    }
+
+    /// True for the action picker of a server `window/showMessageRequest`.
+    pub fn is_message_action_picker(&self) -> bool {
+        matches!(
+            self.backend,
+            PickerBackend::FuzzyList(FuzzyListKind::MessageAction)
+        )
     }
 
     /// Returns true if this picker mode supports the file filter field

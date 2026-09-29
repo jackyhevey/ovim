@@ -5,4 +5,6 @@ pub enum FuzzyListKind {
     Completion,
     LspLocations,
     DebugConfig,
+    /// Actions offered by a server's `window/showMessageRequest`.
+    MessageAction,
 }

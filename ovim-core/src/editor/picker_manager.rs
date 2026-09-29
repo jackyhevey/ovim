@@ -536,6 +536,9 @@ impl Editor {
             PickerAction::SelectDebugConfig { index } => {
                 self.select_debug_config(index);
             }
+            PickerAction::MessageRequestAction { index } => {
+                self.answer_active_message_request(Some(index));
+            }
         }
         Ok(())
     }

@@ -25,7 +25,14 @@ pub fn handle_picker_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         // Tab / BackTab - toggle between query and file filter fields
         KeyCode::Tab | KeyCode::BackTab => {
-            if let Some(picker) = editor.picker_mut() {
+            if editor.hierarchy_picker_active() {
+                // Call/type hierarchy: Tab drills down, Shift-Tab goes back.
+                if key_event.code == KeyCode::Tab {
+                    editor.expand_selected_hierarchy_entry();
+                } else {
+                    editor.hierarchy_go_back();
+                }
+            } else if let Some(picker) = editor.picker_mut() {
                 picker.toggle_field();
             }
         }

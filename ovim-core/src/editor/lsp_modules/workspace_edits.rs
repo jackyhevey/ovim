@@ -29,9 +29,11 @@ impl Editor {
     /// the LSP `TextEdit[]` application rules (OV-00332).
     pub(in crate::editor) fn apply_lsp_edits(&mut self, edits: Vec<lsp_types::TextEdit>) {
         let cursor_before = self.cursor_position();
-        let (_all_applied, recorded_edits) = self
-            .buffer_mut()
-            .record(|buf| Self::apply_text_edits_to_buffer(buf, &edits));
+        let (_all_applied, recorded_edits) = self.buffer_mut().record(|buf| {
+            let applied = Self::apply_text_edits_to_buffer(buf, &edits);
+            buf.clamp_cursor_to_content();
+            applied
+        });
 
         if !recorded_edits.is_empty() {
             let cursor_after = self.cursor_position();
@@ -81,12 +83,19 @@ impl Editor {
                             }
                             lsp_types::DocumentChangeOperation::Op(resource_op) => {
                                 let cursor_before = self.cursor_position();
+                                // Resolve open buffers BEFORE touching the disk:
+                                // lookup canonicalizes paths, which fails once
+                                // the file has moved or vanished.
+                                let affected = self.buffer_affected_by_resource_op(&resource_op);
                                 let (applied, undo_change) =
-                                    Self::apply_resource_op(resource_op, cursor_before);
+                                    Self::apply_resource_op(&resource_op, cursor_before);
                                 if !applied {
                                     all_applied = false;
-                                } else if let Some(change) = undo_change {
-                                    self.push_resource_undo_change(change);
+                                } else {
+                                    if let Some(change) = undo_change {
+                                        self.push_resource_undo_change(change);
+                                    }
+                                    self.retarget_buffer_after_resource_op(&resource_op, affected);
                                 }
                             }
                         }
@@ -175,6 +184,14 @@ impl Editor {
             }
         }
 
+        // Some servers (Hyperion's "Move to package") edit a file that does
+        // not exist yet without sending a CreateFile first. Treat that as an
+        // implicit create, as other clients do, instead of dropping the edit.
+        if let Some(path) = uri_to_file_path(uri) {
+            if !path.exists() && !self.create_missing_edit_target(&path) {
+                return false;
+            }
+        }
         let Some(buffer_index) = self.find_or_load_buffer_index_by_uri(uri) else {
             return false;
         };
@@ -198,6 +215,18 @@ impl Editor {
             applied = false;
         }
         applied
+    }
+
+    /// Creates an empty file (and parent directories) so an edit addressed to
+    /// a not-yet-existing document has somewhere to land. Returns false when
+    /// the path cannot be created.
+    fn create_missing_edit_target(&self, path: &std::path::Path) -> bool {
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return false;
+            }
+        }
+        std::fs::write(path, "").is_ok()
     }
 
     /// OV-00330 (version-guard leg): returns false when a versioned document
@@ -290,9 +319,86 @@ impl Editor {
             .push_undo_change_preserving_repeat(change);
     }
 
+    /// The open buffer (if any) whose file a resource operation renames or
+    /// deletes.
+    fn buffer_affected_by_resource_op(&self, op: &lsp_types::ResourceOp) -> Option<usize> {
+        let uri = match op {
+            lsp_types::ResourceOp::Rename(rename) => &rename.old_uri,
+            lsp_types::ResourceOp::Delete(delete) => &delete.uri,
+            lsp_types::ResourceOp::Create(_) => return None,
+        };
+        let path = uri_to_file_path(uri)?;
+        self.find_buffer_by_path(path.to_str()?)
+    }
+
+    /// Points the buffer at `new_path` after its file moved on disk. The
+    /// language server hears `didClose` for the old URI and `didOpen` for the
+    /// new one (through the normal sync tick).
+    pub(in crate::editor) fn retarget_buffer_path(&mut self, index: usize, new_path: PathBuf) {
+        let Some(old_path) = self
+            .buffers
+            .get(index)
+            .and_then(|b| b.file_path())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        let new_path = new_path.canonicalize().unwrap_or(new_path);
+        let new_path = new_path.to_string_lossy().to_string();
+        let is_current = index == self.current_buffer_index;
+        let mtime = std::fs::metadata(&new_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let buffer = &mut self.buffers[index];
+        buffer.set_file_path(new_path.clone());
+        if !buffer.is_modified() {
+            buffer.set_file_mtime(mtime);
+        }
+        if is_current {
+            self.registers.set_current_file(new_path.clone());
+        }
+        self.handle_file_path_transition_after_save(Some(old_path), Some(new_path));
+    }
+
+    /// Keeps an open buffer coherent with a file the server just renamed or
+    /// deleted: a renamed file's buffer follows it (and the language server
+    /// hears `didClose` for the old URI and `didOpen` for the new one); a
+    /// deleted file's document is closed on the server while the buffer stays
+    /// open so unsaved text is never discarded behind the user's back.
+    fn retarget_buffer_after_resource_op(
+        &mut self,
+        op: &lsp_types::ResourceOp,
+        affected: Option<usize>,
+    ) {
+        let Some(index) = affected else {
+            return;
+        };
+        let Some(old_path) = self
+            .buffers
+            .get(index)
+            .and_then(|b| b.file_path())
+            .map(str::to_string)
+        else {
+            return;
+        };
+        match op {
+            lsp_types::ResourceOp::Rename(rename) => {
+                let Some(new_path) = uri_to_file_path(&rename.new_uri) else {
+                    return;
+                };
+                self.retarget_buffer_path(index, new_path);
+            }
+            lsp_types::ResourceOp::Delete(_) => {
+                self.lsp.state.document_sync.remove(&old_path);
+                self.lsp.state.pending_did_close_file = Some(old_path);
+            }
+            lsp_types::ResourceOp::Create(_) => {}
+        }
+    }
+
     /// Apply a resource operation (create, rename, delete).
     fn apply_resource_op(
-        resource_op: lsp_types::ResourceOp,
+        resource_op: &lsp_types::ResourceOp,
         cursor: crate::change::CursorPos,
     ) -> (bool, Option<Change>) {
         match resource_op {
@@ -696,5 +802,215 @@ mod tests {
         let applied = editor.apply_workspace_edit(edit).expect("apply");
         assert!(applied);
         assert_eq!(editor.buffer().rope().to_string(), "fn newer() {}\n");
+    }
+
+    fn plain_uri(path: &std::path::Path) -> lsp_types::Uri {
+        lsp_types::Uri::from_str(&format!("file://{}", path.to_string_lossy())).expect("uri")
+    }
+
+    fn doc_edit(
+        uri: lsp_types::Uri,
+        start: (u32, u32),
+        end: (u32, u32),
+        text: &str,
+    ) -> lsp_types::DocumentChangeOperation {
+        lsp_types::DocumentChangeOperation::Edit(lsp_types::TextDocumentEdit {
+            text_document: lsp_types::OptionalVersionedTextDocumentIdentifier {
+                uri,
+                version: None,
+            },
+            edits: vec![lsp_types::OneOf::Left(lsp_types::TextEdit {
+                range: lsp_types::Range::new(
+                    lsp_types::Position::new(start.0, start.1),
+                    lsp_types::Position::new(end.0, end.1),
+                ),
+                new_text: text.to_string(),
+            })],
+        })
+    }
+
+    fn operations(ops: Vec<lsp_types::DocumentChangeOperation>) -> lsp_types::WorkspaceEdit {
+        lsp_types::WorkspaceEdit {
+            document_changes: Some(lsp_types::DocumentChanges::Operations(ops)),
+            ..Default::default()
+        }
+    }
+
+    /// OV-00403: Hyperion's "Move 'Probe' to package" blanks the original
+    /// through a range ending on the phantom line after the final newline and
+    /// writes the new class into a file that does not exist yet.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn move_class_edit_with_missing_target_and_eof_range_does_not_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let probe = dir.path().join("Probe.java");
+        let body: String = (0..19).map(|n| format!("line {n}\n")).collect();
+        fs::write(&probe, &body).expect("write probe");
+        let target = dir.path().join("util/Probe.java");
+
+        let mut editor = Editor::default();
+        editor.open_file(&probe).expect("open probe");
+        // Cursor on a line that the edit is about to delete (the observed
+        // crash: ropey "Line index out of bounds" in scroll/decoration code).
+        editor
+            .buffer_mut()
+            .cursor_mut()
+            .set_position(5, crate::unicode::GraphemeCol(4));
+        let edit = operations(vec![
+            doc_edit(file_uri(&probe), (0, 0), (19, 0), ""),
+            doc_edit(plain_uri(&target), (0, 0), (0, 0), "package util;\n"),
+        ]);
+        let applied = editor
+            .apply_workspace_edit(edit)
+            .expect("apply must not error");
+        // The edit to the not-yet-existing file has no CreateFile op, so
+        // it cannot be applied - but nothing may crash.
+        assert!(!applied || target.exists());
+        assert_eq!(
+            editor.buffer().cursor().line(),
+            0,
+            "cursor must follow the shrunken text"
+        );
+        editor.update_scroll_offset();
+    }
+
+    /// The decoration lookups themselves must survive a stale line index.
+    #[test]
+    fn decoration_lookups_tolerate_lines_past_the_end() {
+        let rope = ropey::Rope::from_str("one\n");
+        let map = crate::editor::decoration::DecorationMap::default();
+        let log = crate::edit_log::EditLog::default();
+        assert_eq!(map.inline_width_before_projected(7, 3, &rope, &log), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn out_of_range_edits_report_failure_instead_of_panicking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("A.java");
+        fs::write(&file, "one\ntwo\n").expect("write");
+        let mut editor = Editor::default();
+        editor.open_file(&file).expect("open");
+
+        for (start, end) in [
+            ((99, 0), (99, 5)),
+            ((0, 0), (99, 0)),
+            ((2, 0), (99, 99)),
+            ((3, 0), (3, 0)),
+            ((0, 500), (0, 900)),
+            ((1, 0), (0, 0)),
+        ] {
+            let edit = operations(vec![doc_edit(file_uri(&file), start, end, "X")]);
+            let _ = editor.apply_workspace_edit(edit);
+            editor.buffer().rope().to_string(); // buffer stays intact and readable
+        }
+    }
+
+    fn resource(op: lsp_types::ResourceOp) -> lsp_types::DocumentChangeOperation {
+        lsp_types::DocumentChangeOperation::Op(op)
+    }
+
+    /// OV-00403: an edit addressed to a file that does not exist and was not
+    /// announced by CreateFile still lands (implicit create).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn edit_to_missing_file_creates_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let open = dir.path().join("A.java");
+        fs::write(&open, "class A {}\n").unwrap();
+        let target = dir.path().join("pkg/deep/B.java");
+        let mut editor = Editor::default();
+        editor.open_file(&open).unwrap();
+
+        let edit = operations(vec![doc_edit(
+            plain_uri(&target),
+            (0, 0),
+            (0, 0),
+            "class B {}\n",
+        )]);
+        assert!(editor.apply_workspace_edit(edit).unwrap());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "class B {}\n");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn create_file_then_edit_writes_new_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let open = dir.path().join("A.java");
+        fs::write(&open, "class A {}\n").unwrap();
+        let target = dir.path().join("B.java");
+        let mut editor = Editor::default();
+        editor.open_file(&open).unwrap();
+
+        let edit = operations(vec![
+            resource(lsp_types::ResourceOp::Create(lsp_types::CreateFile {
+                uri: plain_uri(&target),
+                options: None,
+                annotation_id: None,
+            })),
+            doc_edit(plain_uri(&target), (0, 0), (0, 0), "class B {}\n"),
+        ]);
+        assert!(editor.apply_workspace_edit(edit).unwrap());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "class B {}\n");
+    }
+
+    /// OV-00403: renaming a file that is open in a buffer must move the
+    /// buffer with it, and a following edit to the new URI must reach it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn rename_file_retargets_the_open_buffer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = dir.path().join("Old.java");
+        fs::write(&old, "class Old {}\n").unwrap();
+        let new = dir.path().join("moved/New.java");
+        let mut editor = Editor::default();
+        editor.open_file(&old).unwrap();
+        let old_uri = file_uri(&old);
+
+        let edit = operations(vec![
+            resource(lsp_types::ResourceOp::Rename(lsp_types::RenameFile {
+                old_uri,
+                new_uri: plain_uri(&new),
+                options: None,
+                annotation_id: None,
+            })),
+            doc_edit(plain_uri(&new), (0, 6), (0, 9), "New"),
+        ]);
+        assert!(editor.apply_workspace_edit(edit).unwrap());
+        assert!(!old.exists());
+        assert!(new.exists());
+        let buffer_path = editor.buffer().file_path().unwrap().to_string();
+        assert!(buffer_path.ends_with("moved/New.java"), "{buffer_path}");
+        assert_eq!(editor.buffer().rope().to_string(), "class New {}\n");
+        assert_eq!(
+            editor
+                .buffers
+                .iter()
+                .filter(|b| b.file_path().is_some_and(|p| p.ends_with("New.java")))
+                .count(),
+            1,
+            "no duplicate buffer for the moved file"
+        );
+    }
+
+    /// Deleting a file that is open keeps the buffer (and its text) alive.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn delete_file_keeps_the_open_buffer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let doomed = dir.path().join("Doomed.java");
+        let other = dir.path().join("Other.java");
+        fs::write(&doomed, "class Doomed {}\n").unwrap();
+        fs::write(&other, "class Other {}\n").unwrap();
+        let mut editor = Editor::default();
+        editor.open_file(&doomed).unwrap();
+        editor.open_file(&other).unwrap();
+
+        let edit = operations(vec![resource(lsp_types::ResourceOp::Delete(
+            lsp_types::DeleteFile {
+                uri: file_uri(&doomed),
+                options: None,
+            },
+        ))]);
+        assert!(editor.apply_workspace_edit(edit).unwrap());
+        assert!(!doomed.exists());
+        assert!(editor
+            .buffers
+            .iter()
+            .any(|b| *b.rope() == "class Doomed {}\n"));
     }
 }

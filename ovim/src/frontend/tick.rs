@@ -1,5 +1,3 @@
-use tokio::sync::mpsc;
-
 use crate::buffer::{BufferId, LineHighlights};
 use crate::editor::Editor;
 use crate::mode::Mode;
@@ -9,14 +7,6 @@ use super::channels::FrontendChannels;
 use super::loading::{
     spawn_file_finder_loading, spawn_picker_preview_loading, update_file_list_cache_from_background,
 };
-
-fn apply_java_status(editor: &mut Editor, status: String) {
-    let ready = status.trim().ends_with(": Ready");
-    editor.set_lsp_status(status);
-    if ready {
-        editor.request_diagnostics_refresh();
-    }
-}
 
 /// Drives one round of background work: LSP, DAP, syntax highlighting,
 /// picker, and installs. Call on a periodic interval from any frontend.
@@ -32,7 +22,6 @@ pub async fn process_editor_tick(editor: &mut Editor, channels: &mut FrontendCha
     let defer_lsp_init = process_syntax_highlighting(editor, channels) || defer_lsp_for_yank_flash;
 
     // === LSP lifecycle ===
-    process_java_status(editor, &mut channels.java_status_rx);
     process_lsp_notifications(editor).await;
     channels.lsp_startup.poll(editor).await;
     if !defer_lsp_init {
@@ -105,13 +94,6 @@ fn tick_transient_ui(editor: &mut Editor) {
         | editor.poll_ai_subagent_repaint()
     {
         editor.mark_dirty();
-    }
-}
-
-/// Drain Java/Kotlin LSP status messages from the channel.
-fn process_java_status(editor: &mut Editor, java_status_rx: &mut mpsc::Receiver<String>) {
-    while let Ok(status) = java_status_rx.try_recv() {
-        apply_java_status(editor, status);
     }
 }
 
@@ -700,13 +682,10 @@ async fn spawn_gradle_and_wait(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        apply_java_status, process_syntax_highlighting, process_yank_flash, tick_transient_ui,
-    };
+    use super::{process_syntax_highlighting, process_yank_flash, tick_transient_ui};
     use crate::editor::Editor;
     use crate::frontend::FrontendChannels;
     use ovim_core::ai::chat_types::ChatOpts;
-    use tokio::sync::mpsc;
 
     #[test]
     fn working_animation_tick_invalidates_the_render_without_input() {
@@ -741,42 +720,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn java_ready_status_requests_diagnostics_refresh() {
-        let mut editor = Editor::with_content("class Test {}\n");
-
-        apply_java_status(&mut editor, "Java: Ready".to_string());
-
-        assert_eq!(editor.status_message(), "Java: Ready");
-        assert!(editor.take_diagnostics_refresh_request());
-    }
-
-    #[test]
-    fn kotlin_ready_status_requests_diagnostics_refresh() {
-        let mut editor = Editor::with_content("fun main() {}\n");
-
-        apply_java_status(&mut editor, "Kotlin: Ready".to_string());
-
-        assert_eq!(editor.status_message(), "Kotlin: Ready");
-        assert!(editor.take_diagnostics_refresh_request());
-    }
-
-    #[test]
-    fn java_non_ready_status_does_not_request_diagnostics_refresh() {
-        let mut editor = Editor::with_content("class Test {}\n");
-
-        apply_java_status(&mut editor, "Java: Starting Hyperion LSP...".to_string());
-
-        assert_eq!(editor.status_message(), "Java: Starting Hyperion LSP...");
-        assert!(!editor.take_diagnostics_refresh_request());
-    }
-
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn yaml_syntax_gets_a_paint_tick_before_lsp_initialization() {
         let mut editor = Editor::with_content("name: ovim\nenabled: true\n");
         editor.set_file_path("config.yaml".to_string());
-        let (_java_status_tx, java_status_rx) = mpsc::channel(1);
-        let mut channels = FrontendChannels::new(java_status_rx);
+        let mut channels = FrontendChannels::new();
 
         assert!(process_syntax_highlighting(&mut editor, &mut channels));
 

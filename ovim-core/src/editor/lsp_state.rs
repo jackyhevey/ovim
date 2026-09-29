@@ -31,6 +31,10 @@ pub struct DocumentSyncState {
     /// is not draining stdin refuses the notification instantly, and without
     /// this the tick would retry (and log) every 16 ms while it stays wedged.
     pub save_retry_after: Option<std::time::Instant>,
+    /// Earliest tick at which a failed didOpen may be retried by the
+    /// background open-document sync (same wedge-avoidance as
+    /// `save_retry_after`).
+    pub open_retry_after: Option<std::time::Instant>,
     /// The buffer content changed without the server hearing about it (e.g.
     /// reload after an external write). The next sync MUST send a full
     /// document update: reconcile seeding and the content-equality no-op
@@ -338,6 +342,47 @@ impl LspIntents {
     }
 }
 
+/// A call- or type-hierarchy item as returned by the server.
+#[derive(Debug, Clone)]
+pub enum HierarchyItem {
+    Call(lsp_types::CallHierarchyItem),
+    Type(lsp_types::TypeHierarchyItem),
+}
+
+/// What drilling into a hierarchy entry asks the server for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HierarchyExpand {
+    Incoming,
+    Outgoing,
+    Supertypes,
+    Subtypes,
+}
+
+/// One row of a hierarchy level.
+#[derive(Debug, Clone)]
+pub struct HierarchyEntry {
+    pub item: HierarchyItem,
+    pub expand: HierarchyExpand,
+    /// Direction marker shown before the name (type hierarchy only).
+    pub marker: &'static str,
+    pub location: lsp_types::Location,
+}
+
+/// One screen of the hierarchy browser. The browser is a stack of levels:
+/// drilling down pushes one, going back pops it.
+#[derive(Debug, Clone)]
+pub struct HierarchyLevel {
+    pub title: String,
+    pub entries: Vec<HierarchyEntry>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HierarchyState {
+    pub language_id: String,
+    pub levels: Vec<HierarchyLevel>,
+}
+
 /// Container for all LSP-related state in the editor
 pub struct LspState {
     /// LSP manager (optional, only if LSP is enabled)
@@ -364,6 +409,18 @@ pub struct LspState {
     pub needs_lsp_init: bool,
     /// File path that needs didClose notification (set when switching files)
     pub pending_did_close_file: Option<String>,
+    /// File-explorer rename waiting for its `willRenameFiles` round trip.
+    pub pending_file_rename: Option<(std::path::PathBuf, String)>,
+    /// Server `showMessageRequest`s waiting their turn, the one currently
+    /// offered to the user, and answers ready to be sent.
+    pub queued_message_requests: std::collections::VecDeque<crate::lsp::MessageRequest>,
+    pub active_message_request: Option<crate::lsp::MessageRequest>,
+    pub message_replies: Vec<(crate::lsp::MessageRequest, Option<String>)>,
+    /// Hierarchy browser stack while a call/type hierarchy picker is open.
+    pub hierarchy: Option<HierarchyState>,
+    /// Watches the workspace for changes made outside the editor (feeds
+    /// `workspace/didChangeWatchedFiles`).
+    pub workspace_watcher: super::workspace_watch::WorkspaceWatcher,
     /// Available code actions at current cursor position
     pub available_code_actions: Vec<AvailableCodeAction>,
     /// Available completion items at current cursor position
@@ -429,6 +486,12 @@ impl LspState {
             active_lsp_servers: HashMap::new(),
             needs_lsp_init: false,
             pending_did_close_file: None,
+            pending_file_rename: None,
+            hierarchy: None,
+            queued_message_requests: Default::default(),
+            active_message_request: None,
+            message_replies: Vec::new(),
+            workspace_watcher: Default::default(),
             available_code_actions: Vec::new(),
             available_completions: Vec::new(),
             available_references: Vec::new(),

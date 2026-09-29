@@ -106,21 +106,6 @@ impl LspStartup {
         let Some(manager) = editor.lsp_manager() else {
             return;
         };
-        if super::is_hyperion_language(&abs_path) {
-            let language_id = super::hyperion_language_id(&abs_path);
-            self.jobs.insert(
-                file_path.to_string(),
-                tokio::spawn(async move {
-                    super::java::initialize_hyperion_lsp_background(
-                        Some(manager),
-                        abs_path,
-                        &language_id,
-                    )
-                    .await;
-                }),
-            );
-            return;
-        }
         let Some(language) = editor.language_catalog().detect(&abs_path) else {
             return;
         };

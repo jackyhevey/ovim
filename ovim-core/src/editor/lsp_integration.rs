@@ -65,6 +65,7 @@ fn classify_status_toast(status: &str) -> Option<StatusToast> {
 
     if lower.contains("timed out")
         || lower.contains("timeout")
+        || lower.contains("crashed")
         || lower.contains("cancelled")
         || lower.contains("canceled")
     {
@@ -827,67 +828,8 @@ impl Editor {
             }
         }
 
-        // Call hierarchy
-        if let Some(result) = self.lsp.slots.call_hierarchy.poll_with_timeout(timeout) {
-            match result {
-                Ok(r) if !r.locations.is_empty() => {
-                    let count = r.locations.len();
-                    let direction_label = match r.direction {
-                        crate::editor::lsp_slot::CallHierarchyDirection::Incoming => {
-                            "Incoming Calls"
-                        }
-                        crate::editor::lsp_slot::CallHierarchyDirection::Outgoing => {
-                            "Outgoing Calls"
-                        }
-                    };
-                    self.store_call_hierarchy(&r.locations);
-                    let picker_items = self.locations_to_picker_items(&r.locations);
-                    self.open_location_picker(picker_items, direction_label);
-                    self.set_lsp_status(format!(
-                        "Found {} {}",
-                        count,
-                        direction_label.to_lowercase()
-                    ));
-                    changed = true;
-                }
-                Ok(r) => {
-                    let msg = match r.direction {
-                        crate::editor::lsp_slot::CallHierarchyDirection::Incoming => {
-                            "No incoming calls found"
-                        }
-                        crate::editor::lsp_slot::CallHierarchyDirection::Outgoing => {
-                            "No outgoing calls found"
-                        }
-                    };
-                    self.set_lsp_status(msg.to_string());
-                }
-                Err(e) => {
-                    self.set_lsp_status(format!("Call hierarchy request failed: {}", e));
-                }
-            }
-        }
-
-        // Type hierarchy
-        if let Some(result) = self.lsp.slots.type_hierarchy.poll_with_timeout(timeout) {
-            match result {
-                Ok(r) if !r.all_locations.is_empty() => {
-                    let count = r.all_locations.len();
-                    self.lsp.state.available_type_hierarchy = r.types;
-                    self.lsp.state.active_lsp_result_type =
-                        Some(crate::editor::LspResultType::TypeHierarchy);
-                    let picker_items = self.locations_to_picker_items(&r.all_locations);
-                    self.open_location_picker(picker_items, "Type Hierarchy");
-                    self.set_lsp_status(format!("Found {} types", count));
-                    changed = true;
-                }
-                Ok(_) => {
-                    self.set_lsp_status("No type hierarchy found".to_string());
-                }
-                Err(e) => {
-                    self.set_lsp_status(format!("Type hierarchy request failed: {}", e));
-                }
-            }
-        }
+        // Call hierarchy, type hierarchy, and drilling into either
+        changed |= self.poll_hierarchy_slots(timeout);
 
         // Semantic tokens
         if let Some(result) = self.lsp.slots.semantic_tokens.poll_with_timeout(timeout) {
@@ -1165,6 +1107,7 @@ impl Editor {
         self.lsp.state.available_workspace_symbols.clear();
         self.lsp.state.available_call_hierarchy.clear();
         self.lsp.state.available_type_hierarchy.clear();
+        self.lsp.state.hierarchy = None;
         self.lsp.state.active_lsp_result_type = None;
         self.lsp.state.inlay_hints.clear();
         // Drop the cached diagnostic vector too — it belongs to the file we're
@@ -1483,6 +1426,13 @@ impl Editor {
     /// Returns `true` if diagnostics changed and the UI should redraw.
     pub async fn sync_lsp_and_refresh_diagnostics(&mut self) -> bool {
         // Step 1: Push pending content to the server.
+        self.supervise_lsp_servers().await;
+        self.process_server_messages().await;
+        // Before streaming edits: a document a (re)started server has never
+        // seen must be opened first, never sent a bare didChange.
+        self.sync_open_documents().await;
+        self.process_workspace_file_events().await;
+        self.process_pending_file_rename().await;
         self.send_lsp_changes_if_modified().await;
         self.send_lsp_save_if_needed().await;
 
@@ -1798,6 +1748,279 @@ impl Editor {
         }
     }
 
+    /// Forwards on-disk changes made outside the editor to the servers that
+    /// registered `workspace/didChangeWatchedFiles`, and keeps the watcher's
+    /// roots in step with the registrations.
+    pub async fn process_workspace_file_events(&mut self) {
+        let Some(lsp) = self.lsp.state.lsp_manager.clone() else {
+            return;
+        };
+        let wanted = lsp.watched_file_roots();
+        self.lsp.state.workspace_watcher.sync_roots(&wanted);
+        if let Some(error) = self.lsp.state.workspace_watcher.take_error() {
+            self.set_lsp_status(format!("LSP: {error}"));
+        }
+        let matcher = lsp.clone();
+        let Some(events) = self
+            .lsp
+            .state
+            .workspace_watcher
+            .poll(std::time::Instant::now(), &move |path| {
+                matcher.watched_path_matches(path)
+            })
+        else {
+            return;
+        };
+        let sent = lsp.send_watched_file_changes(&events).await;
+        if sent > 0 {
+            // The server may publish new diagnostics for open documents in
+            // response; make sure we re-pull rather than trust stale ones.
+            self.lsp.slots.diagnostics.invalidate();
+            self.lsp.slots.inlay_hints.invalidate();
+        }
+    }
+
+    /// Shows `window/showMessage` notices (toast + status line), offers
+    /// `window/showMessageRequest` actions in a picker, and sends the answers.
+    pub async fn process_server_messages(&mut self) {
+        use super::toast::{ToastLevel, ToastRequest, ToastSource};
+        use crate::lsp::{MessageSeverity, ServerMessage};
+
+        let Some(lsp) = self.lsp.state.lsp_manager.clone() else {
+            return;
+        };
+        for message in lsp.take_server_messages() {
+            match message {
+                ServerMessage::Notice {
+                    server_id,
+                    severity,
+                    message,
+                } => {
+                    let level = match severity {
+                        MessageSeverity::Error => ToastLevel::Error,
+                        MessageSeverity::Warning => ToastLevel::Warning,
+                        MessageSeverity::Info | MessageSeverity::Log => ToastLevel::Info,
+                    };
+                    let text = message.lines().next().unwrap_or_default().to_string();
+                    self.set_status_message(format!("{server_id}: {text}"));
+                    self.push_toast(
+                        ToastRequest::new(ToastSource::Lsp, level, message)
+                            .with_title(server_id.clone())
+                            .with_dedupe_key(format!("lsp-message:{server_id}")),
+                    );
+                }
+                ServerMessage::Request(request) => {
+                    self.lsp.state.queued_message_requests.push_back(request);
+                }
+            }
+        }
+
+        // A request whose picker was dismissed (Esc) is answered "no action".
+        if self.lsp.state.active_message_request.is_some()
+            && !self
+                .picker()
+                .is_some_and(|picker| picker.is_message_action_picker())
+        {
+            self.answer_active_message_request(None);
+        }
+        // Offer the next request once the user is not in another picker.
+        if self.lsp.state.active_message_request.is_none()
+            && self.picker().is_none()
+            && self.mode() == crate::mode::Mode::Normal
+        {
+            if let Some(request) = self.lsp.state.queued_message_requests.pop_front() {
+                let base_dir =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let picker = crate::editor::picker::Picker::new_message_actions(
+                    base_dir,
+                    request.actions.clone(),
+                );
+                self.set_status_message(format!("{}: {}", request.server_id, request.message));
+                self.set_picker(picker);
+                self.set_mode(crate::mode::Mode::Picker);
+                self.mark_picker_selection_changed();
+                self.lsp.state.active_message_request = Some(request);
+                self.mark_dirty();
+            }
+        }
+
+        for (request, chosen) in std::mem::take(&mut self.lsp.state.message_replies) {
+            lsp.reply_message_request(&request, chosen.as_deref()).await;
+        }
+    }
+
+    /// Records the user's answer to the active `showMessageRequest`
+    /// (`None` = dismissed); the reply is sent on the next tick.
+    pub(in crate::editor) fn answer_active_message_request(&mut self, index: Option<usize>) {
+        let Some(request) = self.lsp.state.active_message_request.take() else {
+            return;
+        };
+        let chosen = index.and_then(|i| request.actions.get(i).cloned());
+        self.lsp.state.message_replies.push((request, chosen));
+    }
+
+    /// Runs crash recovery for language servers and surfaces its
+    /// announcements ("crashed, restarting in 1s", "restarted", ...).
+    pub async fn supervise_lsp_servers(&mut self) {
+        let Some(lsp) = self.lsp.state.lsp_manager.clone() else {
+            return;
+        };
+        lsp.supervise_servers().await;
+        let events = lsp.take_lifecycle_events();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            self.set_lsp_status(event);
+        }
+        self.mark_dirty();
+    }
+
+    /// Makes sure every document the user has open is known to its language
+    /// server: the current buffer plus every buffer visible in another window
+    /// or tab. Covers buffers opened before the server finished starting,
+    /// split/tab buffers, and buffers a restarted server has never seen.
+    ///
+    /// The current buffer's edits are streamed by `send_lsp_changes_if_modified`;
+    /// this only adds the missing `didOpen` for it, and both open and change
+    /// notifications for the other visible buffers.
+    pub async fn sync_open_documents(&mut self) {
+        const OPEN_RETRY_DELAY: Duration = Duration::from_secs(2);
+
+        let Some(lsp) = self.lsp.state.lsp_manager.clone() else {
+            return;
+        };
+        if lsp.active_server_languages().is_empty() {
+            return;
+        }
+
+        for index in 0..self.buffers.len() {
+            let is_current = index == self.current_buffer_index;
+            if !is_current && !self.buffer_is_open_in_ui(index) {
+                continue;
+            }
+            let buffer = &self.buffers[index];
+            if super::buffer_manager::is_scratch_buffer(buffer) {
+                continue;
+            }
+            let Some(file_path) = buffer.file_path().map(str::to_string) else {
+                continue;
+            };
+            let Some(uri) = uri_from_file_path(&file_path) else {
+                continue;
+            };
+            let Some(language_id) = self.language_id_for_path(&file_path) else {
+                continue;
+            };
+            if lsp.servers_for_document_uri(&language_id, &uri).is_empty() {
+                continue;
+            }
+
+            // The manager forgets a document's version when its server
+            // restarts; a "sent" document it no longer tracks was never
+            // opened on the replacement, so start its sync over.
+            if self
+                .lsp
+                .state
+                .document_sync
+                .get(&file_path)
+                .is_some_and(|state| state.did_open_sent)
+                && lsp.get_document_version(&uri).await == 0
+            {
+                self.lsp.state.document_sync.remove(&file_path);
+                self.lsp.slots.inlay_hints.invalidate();
+                self.lsp.slots.diagnostics.invalidate();
+            }
+
+            let state = self.lsp.state.document_sync.get(&file_path);
+            let opened = state.is_some_and(|state| state.did_open_sent);
+            if is_current {
+                let retry_ok = state.is_none_or(|state| {
+                    state
+                        .open_retry_after
+                        .is_none_or(|at| std::time::Instant::now() >= at)
+                });
+                if !opened && retry_ok {
+                    self.ensure_lsp_document_synced().await;
+                    if !self
+                        .lsp
+                        .state
+                        .document_sync
+                        .get(&file_path)
+                        .is_some_and(|state| state.did_open_sent)
+                    {
+                        self.lsp
+                            .state
+                            .document_sync
+                            .entry(file_path)
+                            .or_default()
+                            .open_retry_after = Some(std::time::Instant::now() + OPEN_RETRY_DELAY);
+                    }
+                }
+                continue;
+            }
+
+            let content: Arc<str> = Arc::from(self.buffers[index].rope().to_string());
+            if !opened {
+                if state.is_some_and(|state| {
+                    state
+                        .open_retry_after
+                        .is_some_and(|at| std::time::Instant::now() < at)
+                }) {
+                    continue;
+                }
+                match lsp
+                    .did_open_broadcast(uri.clone(), &language_id, 1, content.to_string())
+                    .await
+                {
+                    Ok(()) => {
+                        let flushed_version = lsp.get_last_sent_version(&uri).await;
+                        self.mark_document_flushed(&file_path, content, flushed_version);
+                        self.lsp.slots.diagnostics.invalidate();
+                    }
+                    Err(error) => {
+                        crate::lsp_warn!("LSP", "didOpen failed for {}: {}", file_path, error);
+                        self.lsp
+                            .state
+                            .document_sync
+                            .entry(file_path)
+                            .or_default()
+                            .open_retry_after = Some(std::time::Instant::now() + OPEN_RETRY_DELAY);
+                    }
+                }
+                continue;
+            }
+
+            let Some(state) = state.filter(|state| state.is_modified()) else {
+                continue;
+            };
+            let old_content = state.last_flushed_content.clone();
+            if old_content.as_deref() == Some(&*content) {
+                if let Some(state) = self.lsp.state.document_sync.get_mut(&file_path) {
+                    state.buffer_modified = false;
+                }
+                continue;
+            }
+            if lsp
+                .did_change_broadcast(uri.clone(), &language_id, content.clone(), old_content)
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            let queued_version = lsp.get_document_version(&uri).await;
+            if let Some(state) = self.lsp.state.document_sync.get_mut(&file_path) {
+                state.mark_change_queued(content, queued_version);
+            }
+            if let Ok(Some((text, version))) = lsp
+                .flush_pending_changes_broadcast(&uri, &language_id)
+                .await
+            {
+                self.mark_document_flushed(&file_path, Arc::from(text), version);
+            }
+        }
+    }
+
     /// Ensures the LSP server has the latest document content before making a request
     ///
     /// CRITICAL FIX: When we make a hover/goto request immediately after typing,
@@ -1939,6 +2162,15 @@ impl Editor {
             return;
         };
 
+        // Switching away from a buffer that is still shown in another window
+        // or tab must not close the document on the server.
+        let still_open = self.buffers.iter().enumerate().any(|(index, buffer)| {
+            buffer.file_path() == Some(file_path.as_str()) && self.buffer_is_open_in_ui(index)
+        });
+        if still_open {
+            return;
+        }
+
         let Some(ref lsp) = self.lsp.state.lsp_manager else {
             return;
         };
@@ -2003,10 +2235,10 @@ impl Editor {
             let _ = self.type_hierarchy_impl().await;
         }
         if std::mem::take(&mut self.lsp.intents.call_hierarchy_incoming) {
-            let _ = self.call_hierarchy_incoming_impl().await;
+            let _ = self.call_hierarchy_impl(true).await;
         }
         if std::mem::take(&mut self.lsp.intents.call_hierarchy_outgoing) {
-            let _ = self.call_hierarchy_outgoing_impl().await;
+            let _ = self.call_hierarchy_impl(false).await;
         }
         if std::mem::take(&mut self.lsp.intents.find_references) {
             let _ = self.find_references_impl().await;

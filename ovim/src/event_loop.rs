@@ -123,13 +123,12 @@ fn notify_new_agent_attention(editor: &Editor, observed_generation: &mut u64) {
 pub async fn run_headless_loop(
     editor: &mut Editor,
     mut api_rx: mpsc::Receiver<ApiRequest>,
-    java_status_rx: mpsc::Receiver<String>,
     start_time: SystemTime,
     session_info: Arc<Mutex<SessionInfo>>,
     initial_dimensions: (u16, u16),
     mut shutdown_rx: mpsc::Receiver<()>,
 ) -> Result<()> {
-    let mut channels = FrontendChannels::new(java_status_rx);
+    let mut channels = FrontendChannels::new();
     let mut lsp_interval = interval(Duration::from_millis(50));
     lsp_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Reused across `GetRender` requests so identical-dimension polls
@@ -373,13 +372,12 @@ pub async fn run_event_loop(
     ui: &mut UI,
     editor: &mut Editor,
     mut api_rx: Option<mpsc::Receiver<ApiRequest>>,
-    java_status_rx: mpsc::Receiver<String>,
     start_time: SystemTime,
 ) -> Result<()> {
     let mut last_edit = Instant::now();
     let debounce_delay = Duration::from_millis(200);
     let mut last_input_time: Option<Instant> = None;
-    let mut channels = FrontendChannels::new(java_status_rx);
+    let mut channels = FrontendChannels::new();
 
     let mut event_stream = EventStream::new();
     let mut tick_interval = interval(Duration::from_millis(16));

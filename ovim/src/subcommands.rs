@@ -1365,7 +1365,7 @@ fn cmd_list_languages(verbose: bool) -> Result<()> {
 /// detection agrees with what the editor itself does, not just the
 /// built-in set.
 fn cmd_check_lsp(file_path: &str, verbose: bool) -> Result<()> {
-    use crate::language_config::{find_lsp_command, find_project_root};
+    use crate::language_config::find_lsp_command;
     use std::path::Path;
 
     let path = Path::new(file_path);
@@ -1433,7 +1433,7 @@ fn cmd_check_lsp(file_path: &str, verbose: bool) -> Result<()> {
 
                 let root_markers = &lsp.root_markers;
                 if !root_markers.is_empty() {
-                    let project_root = find_project_root(&abs_path, root_markers);
+                    let project_root = lsp.find_root(&abs_path);
                     println!("Project Root: {}", project_root.display());
                     println!("  (detected using markers: {})", root_markers.join(", "));
                 }
