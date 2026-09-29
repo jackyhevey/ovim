@@ -996,3 +996,150 @@ fn jvm_local_plan_reports_missing_project_and_missing_tests() {
         .unwrap();
     assert_eq!(err, "No test found near cursor");
 }
+
+// ---------------------------------------------------------------------------
+// JVM roots: the local test plan and the language server must agree (OV-00481)
+// ---------------------------------------------------------------------------
+
+/// The root the language server is started with for `file` (Java's
+/// `root_markers` / `outermost_root_markers` from languages.toml).
+fn server_root(file: &Path) -> PathBuf {
+    let markers: Vec<String> = [
+        "settings.gradle",
+        "settings.gradle.kts",
+        "pom.xml",
+        "build.gradle",
+    ]
+    .map(String::from)
+    .into();
+    let outermost: Vec<String> = ["settings.gradle", "settings.gradle.kts", "pom.xml"]
+        .map(String::from)
+        .into();
+    crate::language_config::find_project_root_with_outermost(file, &markers, &outermost)
+}
+
+/// Lays out `files` (relative path, content) under a temp dir and returns
+/// the dir plus the test file's path.
+fn jvm_layout(files: &[(&str, &str)], test_file: &str) -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    for (path, content) in files {
+        let full = root.join(path);
+        fs::create_dir_all(full.parent().unwrap()).unwrap();
+        fs::write(full, content).unwrap();
+    }
+    (dir, root.join(test_file))
+}
+
+const ONE_TEST: &str = "package p;\nclass CalcTest {\n  @Test\n  void adds() {}\n}\n";
+
+#[test]
+fn jvm_root_layouts_local_plan_vs_language_server() {
+    use super::jvm::local_test_plan;
+    struct Row {
+        name: &'static str,
+        files: Vec<(&'static str, &'static str)>,
+        test_file: &'static str,
+        /// Directory (relative to the layout) the server is rooted at.
+        server: &'static str,
+        /// Directory the local plan is rooted at.
+        local: &'static str,
+    }
+    let test_file = "app/src/test/java/CalcTest.java";
+    let rows = vec![
+        Row {
+            name: "single gradle project",
+            files: vec![
+                ("build.gradle", ""),
+                ("src/test/java/CalcTest.java", ONE_TEST),
+            ],
+            test_file: "src/test/java/CalcTest.java",
+            server: "",
+            local: "",
+        },
+        Row {
+            name: "gradle multi-module with settings",
+            files: vec![("settings.gradle", ""), ("app/build.gradle", "")],
+            test_file,
+            server: "",
+            local: "",
+        },
+        Row {
+            name: "gradle build with its own settings inside another",
+            files: vec![
+                ("settings.gradle", ""),
+                ("app/settings.gradle", ""),
+                ("app/build.gradle", ""),
+            ],
+            test_file,
+            server: "",
+            local: "app",
+        },
+        Row {
+            name: "maven aggregator lists the module",
+            files: vec![
+                (
+                    "pom.xml",
+                    "<project><modules><module>app</module></modules></project>",
+                ),
+                ("app/pom.xml", "<project/>"),
+            ],
+            test_file,
+            server: "",
+            local: "",
+        },
+        Row {
+            name: "maven parent does not list the module",
+            files: vec![
+                (
+                    "pom.xml",
+                    "<project><modules><module>other</module></modules></project>",
+                ),
+                ("app/pom.xml", "<project/>"),
+            ],
+            test_file,
+            server: "app",
+            local: "",
+        },
+        Row {
+            name: "maven aggregator lists a nested module path",
+            files: vec![
+                (
+                    "pom.xml",
+                    "<project><modules><module>mid/app</module></modules></project>",
+                ),
+                ("mid/app/pom.xml", "<project/>"),
+            ],
+            test_file: "mid/app/src/test/java/CalcTest.java",
+            server: "mid/app",
+            local: "mid/app",
+        },
+    ];
+    for row in rows {
+        let mut files = row.files.clone();
+        files.push((row.test_file, ONE_TEST));
+        let (dir, file) = jvm_layout(&files, row.test_file);
+        let base = dir.path().canonicalize().unwrap();
+        let expect = |rel: &str| {
+            if rel.is_empty() {
+                base.clone()
+            } else {
+                base.join(rel)
+            }
+        };
+        assert_eq!(
+            server_root(&file),
+            expect(row.server),
+            "server root: {}",
+            row.name
+        );
+        let local = local_test_plan(TestScope::Nearest, &file, ONE_TEST, 3, Language::Java)
+            .unwrap_or_else(|e| panic!("{}: {e}", row.name));
+        assert_eq!(
+            local.plan.project_root,
+            expect(row.local),
+            "local root: {}",
+            row.name
+        );
+    }
+}
