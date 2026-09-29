@@ -755,21 +755,20 @@ impl Editor {
                 }
             }
         }
-        const MARKERS: &[&str] = &[
-            "settings.gradle.kts",
-            "settings.gradle",
-            "pom.xml",
-            "build.gradle.kts",
-            "build.gradle",
-            ".ovim",
-            ".git",
-        ];
-        let markers: Vec<String> = MARKERS.iter().map(|m| m.to_string()).collect();
-        let outermost: Vec<String> = ["settings.gradle.kts", "settings.gradle", "pom.xml"]
-            .map(String::from)
-            .into();
+        // The markers are the language's own (languages.toml), so this is the
+        // root the server would be started with; `.ovim` (project run
+        // configurations) and `.git` cover projects with no build tool.
+        let (mut markers, outermost) = self
+            .language_catalog
+            .detect(&file)
+            .and_then(|language| {
+                let lsp = language.config.lsp.as_ref()?;
+                Some((lsp.root_markers.clone(), lsp.outermost_root_markers.clone()))
+            })
+            .unwrap_or_default();
+        markers.extend([".ovim".to_string(), ".git".to_string()]);
         let root =
-            crate::language_config::find_project_root_with_outermost(&file, &markers, &outermost);
+            crate::project_root::find_project_root_with_outermost(&file, &markers, &outermost);
         if root.as_os_str().is_empty() {
             file.parent()
                 .map(Path::to_path_buf)

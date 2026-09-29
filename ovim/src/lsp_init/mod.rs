@@ -5,11 +5,12 @@ pub use background::LspStartup;
 
 use crate::editor::Editor;
 use crate::language_config::{
-    find_lsp_command, find_project_root, AutoInstallConfig, AutoInstallPolicy, CompanionLspConfig,
-    InstallMethod, LanguageRegistry,
+    find_lsp_command, AutoInstallConfig, AutoInstallPolicy, CompanionLspConfig, InstallMethod,
+    LanguageRegistry,
 };
 use crate::lsp::companion_server_id;
 use auto_install::{attempt_auto_install, InstallResult};
+use ovim_core::project_root::find_project_root;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

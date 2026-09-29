@@ -181,8 +181,9 @@ impl Editor {
         cursor_line: usize,
         language: Language,
     ) {
-        let local = jvm::local_test_plan(scope, &file, &source, cursor_line, language);
         let project_root = self.launch_project_root(Some(&file));
+        let local =
+            jvm::local_test_plan(scope, &file, &source, cursor_line, language, &project_root);
         let request_source = match (scope, local) {
             (TestScope::Suite, Ok(local)) => crate::editor::LaunchSource::Plan {
                 plan: Box::new(local.plan),

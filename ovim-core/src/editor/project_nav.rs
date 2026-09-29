@@ -8,6 +8,7 @@
 use super::picker::{Picker, PickerResult};
 use super::Editor;
 use crate::mode::Mode;
+use crate::project_root::vcs_root_or_dir;
 use crate::recent_files::RecentFiles;
 use std::path::{Path, PathBuf};
 
@@ -28,18 +29,6 @@ pub struct RecentTracker {
 
 /// The remembered cursor of the current file is refreshed at most this often.
 const CURSOR_FLUSH: std::time::Duration = std::time::Duration::from_secs(2);
-
-/// Git root of `path` (or its directory when it is not in a repository).
-pub fn project_root_of(path: &Path) -> PathBuf {
-    let mut current = path.parent();
-    while let Some(directory) = current {
-        if directory.join(".git").exists() {
-            return directory.to_path_buf();
-        }
-        current = directory.parent();
-    }
-    path.parent().map(Path::to_path_buf).unwrap_or_default()
-}
 
 /// The columns of one workspace-symbol row: the name is `PickerResult::display`,
 /// the rest is derived here so the TUI and GUI agree.
@@ -141,12 +130,12 @@ impl Editor {
                     .and_then(|index| self.buffers.get(index))
                     .map(|buffer| (buffer.cursor().line(), buffer.cursor().col().0));
                 if let Some(cursor) = cursor {
-                    store.update_cursor(&project_root_of(&previous), &previous, cursor);
+                    store.update_cursor(&vcs_root_or_dir(&previous), &previous, cursor);
                 }
             }
         }
         if let Some(store) = &self.ui_panels.recent.store {
-            store.record(&project_root_of(&current), &current, None);
+            store.record(&vcs_root_or_dir(&current), &current, None);
         }
         let visits = &mut self.ui_panels.recent.visits;
         visits.retain(|path| path != &current);
@@ -171,7 +160,7 @@ impl Editor {
             Some((flushed, _)) if flushed == cursor => {}
             Some((_, at)) if at.elapsed() < CURSOR_FLUSH => {}
             _ => {
-                store.update_cursor(&project_root_of(current), current, cursor);
+                store.update_cursor(&vcs_root_or_dir(current), current, cursor);
                 recent.flushed = Some((cursor, std::time::Instant::now()));
             }
         }

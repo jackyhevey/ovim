@@ -313,32 +313,8 @@ impl Editor {
     /// This prevents scanning the user's entire home directory (and triggering
     /// macOS iCloud Drive / TCC permission dialogs) when ovim is launched from ~.
     pub fn picker_base_dir(&self) -> std::path::PathBuf {
-        // Try to find git root from current file
         if let Some(file_path) = self.buffer().file_path() {
-            let path = std::path::Path::new(file_path);
-
-            // Make path absolute for reliable parent traversal
-            let abs_path = if path.is_absolute() {
-                path.to_path_buf()
-            } else {
-                std::env::current_dir()
-                    .map(|cwd| cwd.join(path))
-                    .unwrap_or_else(|_| path.to_path_buf())
-            };
-
-            // Walk up looking for .git
-            let mut current = abs_path.parent();
-            while let Some(dir) = current {
-                if dir.join(".git").exists() {
-                    return dir.to_path_buf();
-                }
-                current = dir.parent();
-            }
-
-            // No git root found — use file's parent directory
-            if let Some(parent) = abs_path.parent() {
-                return parent.to_path_buf();
-            }
+            return crate::project_root::vcs_root_or_dir(std::path::Path::new(file_path));
         }
 
         // An empty workspace still supplies the context for dashboard searches.

@@ -40,6 +40,7 @@ pub mod motion_range;
 pub mod native_diff;
 pub mod navigation_types;
 pub mod number_ops;
+pub mod project_root;
 pub mod project_search;
 pub mod pseudocode;
 pub mod recent_files;

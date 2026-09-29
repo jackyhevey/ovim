@@ -81,31 +81,18 @@ impl Editor {
 
     /// Opens the file tree explorer at the project root
     pub fn open_file_tree(&mut self) {
-        use crate::language_config::find_project_root;
-        use git2::Repository;
+        use crate::project_root::{find_project_root, vcs_root};
 
-        let file_path = self.buffer().file_path().map(|s| s.to_string());
-
-        let root = if let Some(ref file_path) = file_path {
-            let path = std::path::Path::new(file_path);
-
-            // Try git root first (most reliable for project boundary)
-            if let Ok(repo) = Repository::discover(path) {
-                if let Some(workdir) = repo.workdir() {
-                    workdir.to_path_buf()
-                } else {
-                    // Fallback: use language-specific markers
-                    find_project_root(
-                        path,
-                        &["Cargo.toml".into(), "package.json".into(), ".git".into()],
-                    )
-                }
-            } else {
-                // Not in git repo - use language markers or parent
-                find_project_root(path, &["Cargo.toml".into(), "package.json".into()])
+        let root = match self.buffer().file_path() {
+            Some(file_path) => {
+                let path = std::path::Path::new(file_path);
+                // The repository is the most reliable project boundary;
+                // outside one, the nearest language marker or the directory.
+                vcs_root(path).unwrap_or_else(|| {
+                    find_project_root(path, &["Cargo.toml".into(), "package.json".into()])
+                })
             }
-        } else {
-            std::env::current_dir().unwrap_or_default()
+            None => std::env::current_dir().unwrap_or_default(),
         };
 
         self.ui_panels.file_tree.open(&root);
