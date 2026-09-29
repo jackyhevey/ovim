@@ -8,7 +8,7 @@ use crate::ai::tools::{RuntimeServices, SideEffect, ToolResult};
 use crate::ai::{redact_high_risk_tokens, truncate_utf8_with_notice, ToolApprovalMode};
 use std::path::{Path, PathBuf};
 
-use super::ai_chat_state::{CodeExplanationContinuation, PendingToolApproval, ToolEventSummary};
+use super::ai_chat_state::{PendingToolApproval, ToolEventSummary};
 use super::ai_tool_path::{compact_tool_label, compact_tool_path, normalize_path};
 use super::Editor;
 
@@ -1031,7 +1031,7 @@ impl Editor {
             .ai_state
             .chat
             .as_mut()
-            .and_then(|c| c.pending_tool_approval.take());
+            .and_then(|c| c.take_parked_as::<PendingToolApproval>());
 
         let Some(pending) = pending else {
             return false;
@@ -1171,7 +1171,7 @@ impl Editor {
     }
 
     /// Resume an approved batch `bash` tool call by parking it on
-    /// `pending_shell_execution`, exactly like the unprompted batch path in
+    /// a parked shell execution, exactly like the unprompted batch path in
     /// `execute_tool_call_batch`. The user already approved, so no policy
     /// re-check happens here.
     fn resume_approved_batch_shell(&mut self, pending: PendingToolApproval) -> bool {
@@ -1391,19 +1391,14 @@ impl Editor {
                 None => None,
             };
 
-            let subagent_control_outcome = if matches!(
-                tc.name.as_str(),
-                crate::ai::tools::subagents::WAIT_AGENT_TOOL
-                    | crate::ai::tools::subagents::INTERRUPT_AGENT_TOOL
-                    | crate::ai::tools::subagents::FOLLOWUP_AGENT_TOOL
-            ) {
+            let parked_outcome = if self.parks_ai_tool_off_loop(&tc.name) {
                 let continuation = super::ai_chat_state::ToolExecutionContinuation::Batch {
                     runtime_tool: runtime_tool.as_ref().map(|(_, tool)| tool.clone()),
                     runtime_turn: runtime_tool.as_ref().map(|(turn, _)| turn.clone()),
                     remaining_tool_calls: tool_calls[idx + 1..].to_vec(),
                     model_name: model_name.clone(),
                 };
-                match self.begin_pending_ai_subagent_control(tc.clone(), continuation) {
+                match self.begin_parked_ai_tool(tc.clone(), continuation) {
                     Ok(()) => {
                         if let Some(chat) = self.ai_state.chat.as_mut() {
                             chat.tool_call_count =
@@ -1506,52 +1501,9 @@ impl Editor {
                 None
             };
 
-            let background_outcome = if self.is_background_ai_tool(&tc.name) {
-                let continuation = super::ai_chat_state::ToolExecutionContinuation::Batch {
-                    runtime_tool: runtime_tool.as_ref().map(|(_, tool)| tool.clone()),
-                    runtime_turn: runtime_tool.as_ref().map(|(turn, _)| turn.clone()),
-                    remaining_tool_calls: tool_calls[idx + 1..].to_vec(),
-                    model_name: model_name.clone(),
-                };
-                match self.begin_pending_background_tool(tc.clone(), continuation) {
-                    Ok(()) => {
-                        if let Some(chat) = self.ai_state.chat.as_mut() {
-                            chat.tool_call_count =
-                                chat.tool_call_count.saturating_add(executed_in_batch);
-                        }
-                        return true;
-                    }
-                    Err((result, _continuation)) => Some(ToolDispatchOutcome::Completed(result)),
-                }
-            } else {
-                None
-            };
-
-            let outcome = if let Some(outcome) = subagent_control_outcome {
-                outcome
-            } else if let Some(outcome) = shell_outcome {
-                outcome
-            } else if let Some(outcome) = background_outcome {
-                outcome
-            } else if tc.name == "explain_with_codebase" {
-                let continuation = CodeExplanationContinuation::Batch {
-                    runtime_tool: runtime_tool.as_ref().map(|(_, tool)| tool.clone()),
-                    runtime_turn: runtime_tool.as_ref().map(|(turn, _)| turn.clone()),
-                    remaining_tool_calls: tool_calls[idx + 1..].to_vec(),
-                    model_name: model_name.clone(),
-                };
-                match self.begin_code_explanation(tc.clone(), continuation) {
-                    Ok(()) => {
-                        if let Some(chat) = self.ai_state.chat.as_mut() {
-                            chat.tool_call_count =
-                                chat.tool_call_count.saturating_add(executed_in_batch);
-                        }
-                        return true;
-                    }
-                    Err((result, _continuation)) => ToolDispatchOutcome::Completed(result),
-                }
-            } else {
-                self.dispatch_tool_call_with_approval(tc, None)
+            let outcome = match parked_outcome.or(shell_outcome) {
+                Some(outcome) => outcome,
+                None => self.dispatch_tool_call_with_approval(tc, None),
             };
 
             match outcome {
@@ -1625,19 +1577,17 @@ impl Editor {
     }
 
     fn pause_for_tool_approval(&mut self, pending: PendingToolApproval) {
-        let mut installed = false;
+        if !self.park_ai_turn(pending) {
+            return;
+        }
         if let Some(chat) = self.ai_state.chat.as_mut() {
-            chat.pending_tool_approval = Some(pending);
             chat.waiting = false;
             chat.pending_job = None;
             chat.streaming_content = None;
             chat.streaming_thinking = None;
-            installed = true;
         }
-        if installed {
-            self.ai_state.ai_attention_generation =
-                self.ai_state.ai_attention_generation.saturating_add(1);
-        }
+        self.ai_state.ai_attention_generation =
+            self.ai_state.ai_attention_generation.saturating_add(1);
     }
 
     /// Close out tool calls that will never execute (cancelled, unknown

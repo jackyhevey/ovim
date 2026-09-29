@@ -3,10 +3,10 @@
 //! down (tool results, runtime records, response channels, background tasks).
 
 use super::ai_chat_state::{
-    CodeExplanationContinuation, CodeExplanationInteraction, PendingAutoModeClassification,
-    PendingBackgroundTool, PendingCodeExplanation, PendingShellExecution, PendingSubagentControl,
-    PendingToolApproval, ShellKillHandle, ShellTranscript, ShellTranscriptPhase,
-    ToolExecutionContinuation,
+    CodeExplanationContinuation, CodeExplanationInteraction, ParkedTurn,
+    PendingAutoModeClassification, PendingBackgroundTool, PendingCodeExplanation,
+    PendingShellExecution, PendingSubagentControl, PendingToolApproval, PendingWalkthroughCall,
+    ShellKillHandle, ShellTranscript, ShellTranscriptPhase, ToolExecutionContinuation,
 };
 use super::{AiChatActivity, Editor};
 use crate::agent_runtime::{PendingToolRef, PendingTurnRef};
@@ -16,6 +16,11 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 type DynamicResponse = oneshot::Receiver<Result<String, String>>;
+type DynamicCall = (
+    PendingTurnRef,
+    PendingToolRef,
+    oneshot::Sender<Result<String, String>>,
+);
 
 fn chat_editor() -> Editor {
     let mut editor = Editor::default();
@@ -95,27 +100,15 @@ fn dynamic(
 }
 
 fn walkthrough_batch(remaining: Vec<ToolCallInfo>) -> CodeExplanationContinuation {
-    CodeExplanationContinuation::Batch {
-        runtime_tool: None,
-        runtime_turn: None,
-        remaining_tool_calls: remaining,
-        model_name: "test".into(),
-    }
+    CodeExplanationContinuation::Tool(batch(remaining))
 }
 
 fn walkthrough_dynamic(
     editor: &mut Editor,
     call: &ToolCallInfo,
 ) -> (CodeExplanationContinuation, DynamicResponse) {
-    let (runtime_turn, runtime_tool, response, receiver) = dynamic_call(editor, call);
-    (
-        CodeExplanationContinuation::Dynamic {
-            runtime_tool,
-            runtime_turn,
-            response,
-        },
-        receiver,
-    )
+    let (continuation, receiver) = dynamic(editor, call);
+    (CodeExplanationContinuation::Tool(continuation), receiver)
 }
 
 /// A task that only finishes by being aborted.
@@ -128,11 +121,7 @@ fn parked_task() -> (tokio::task::JoinHandle<()>, tokio::task::AbortHandle) {
 fn approval(
     tool_call: ToolCallInfo,
     remaining: Vec<ToolCallInfo>,
-    dynamic: Option<(
-        PendingTurnRef,
-        PendingToolRef,
-        oneshot::Sender<Result<String, String>>,
-    )>,
+    dynamic: Option<DynamicCall>,
 ) -> PendingToolApproval {
     let (dynamic_turn, runtime_tool, dynamic_response) = match dynamic {
         Some((turn, tool, response)) => (Some(turn), Some(tool), Some(response)),
@@ -184,13 +173,22 @@ fn shell(
     )
 }
 
-fn walkthrough(
-    editor: &Editor,
+/// Open a walkthrough view; `continuation` is the call it blocks, if any.
+fn open_walkthrough(
+    editor: &mut Editor,
     tool_call: ToolCallInfo,
     continuation: Option<CodeExplanationContinuation>,
-) -> PendingCodeExplanation {
-    let buffer_id = editor.ai_state.chat.as_ref().unwrap().active_buffer_id;
-    PendingCodeExplanation {
+) {
+    let chat = editor.ai_state.chat.as_mut().unwrap();
+    if let Some(continuation) = continuation {
+        assert!(chat
+            .park(PendingWalkthroughCall {
+                tool_call: tool_call.clone(),
+                continuation,
+            })
+            .is_ok());
+    }
+    chat.pending_code_explanation = Some(PendingCodeExplanation {
         tool_call,
         steps: Vec::new(),
         current: 0,
@@ -198,53 +196,35 @@ fn walkthrough(
         visible_exchange: None,
         threads: Vec::new(),
         interaction: CodeExplanationInteraction::Navigating,
-        original_active_buffer_id: buffer_id,
+        original_active_buffer_id: chat.active_buffer_id,
         presentation_buffer_id: None,
-        continuation,
-    }
+        replay: false,
+    });
+    chat.waiting = false;
 }
 
-/// What a turn can be parked on, installed the way its producer installs it.
-enum Parked {
-    Approval(PendingToolApproval),
-    Classifying(PendingAutoModeClassification),
-    Shell(PendingShellExecution),
-    Background(PendingBackgroundTool),
-    SubagentControl(PendingSubagentControl),
-    CodeExplanation(PendingCodeExplanation),
-}
-
-fn park(editor: &mut Editor, parked: Parked) {
+/// Park the turn the way each kind's producer does.
+fn park(editor: &mut Editor, parked: ParkedTurn) {
     let chat = editor.ai_state.chat.as_mut().unwrap();
-    match parked {
-        Parked::Approval(pending) => {
-            chat.pending_tool_approval = Some(pending);
-            chat.waiting = false;
-        }
-        Parked::Classifying(pending) => chat.pending_auto_mode_classification = Some(pending),
-        Parked::Shell(pending) => {
-            chat.pending_shell_execution = Some(pending);
-            chat.waiting = true;
-        }
-        Parked::Background(pending) => {
-            chat.pending_background_tool = Some(pending);
-            chat.waiting = true;
-        }
-        Parked::SubagentControl(pending) => {
-            chat.pending_subagent_control = Some(pending);
-            chat.waiting = true;
-        }
-        Parked::CodeExplanation(pending) => {
-            chat.pending_code_explanation = Some(pending);
-            chat.waiting = false;
-        }
-    }
+    chat.waiting = matches!(
+        parked,
+        ParkedTurn::Shell(_) | ParkedTurn::Background(_) | ParkedTurn::SubagentControl(_)
+    );
+    let result = match parked {
+        ParkedTurn::Approval(pending) => chat.park(pending),
+        ParkedTurn::Classifying(pending) => chat.park(pending),
+        ParkedTurn::Shell(pending) => chat.park(pending),
+        ParkedTurn::Background(pending) => chat.park(pending),
+        ParkedTurn::SubagentControl(pending) => chat.park(pending),
+        ParkedTurn::CodeExplanation(pending) => chat.park(pending),
+    };
+    assert!(result.is_ok(), "the turn was already parked");
 }
 
-fn background(tool_call: ToolCallInfo, continuation: ToolExecutionContinuation) -> Parked {
+fn background(tool_call: ToolCallInfo, continuation: ToolExecutionContinuation) -> ParkedTurn {
     let (_tx, receiver) = oneshot::channel();
     let (task, _) = parked_task();
-    Parked::Background(PendingBackgroundTool {
+    ParkedTurn::Background(PendingBackgroundTool {
         tool_call,
         continuation,
         receiver,
@@ -255,11 +235,11 @@ fn background(tool_call: ToolCallInfo, continuation: ToolExecutionContinuation) 
 fn subagent(
     tool_call: ToolCallInfo,
     continuation: ToolExecutionContinuation,
-) -> (Parked, tokio::task::AbortHandle) {
+) -> (ParkedTurn, tokio::task::AbortHandle) {
     let (_tx, receiver) = oneshot::channel();
     let (task, abort) = parked_task();
     (
-        Parked::SubagentControl(PendingSubagentControl {
+        ParkedTurn::SubagentControl(PendingSubagentControl {
             tool_call,
             continuation,
             receiver,
@@ -269,12 +249,12 @@ fn subagent(
     )
 }
 
-fn classification(editor: &mut Editor) -> (Parked, DynamicResponse) {
+fn classification(editor: &mut Editor) -> (ParkedTurn, DynamicResponse) {
     let tool_call = call("classify", "bash");
     let (runtime_turn, runtime_tool, dynamic_response, receiver) = dynamic_call(editor, &tool_call);
     let (_tx, verdict) = oneshot::channel();
     (
-        Parked::Classifying(PendingAutoModeClassification {
+        ParkedTurn::Classifying(PendingAutoModeClassification {
             tool_call,
             runtime_tool,
             runtime_turn,
@@ -338,7 +318,7 @@ async fn activity_reports_tool_approval_over_the_live_provider_turn() {
     let (turn, tool, response, _receiver) = dynamic_call(&mut editor, &tool_call);
     park(
         &mut editor,
-        Parked::Approval(approval(
+        ParkedTurn::Approval(approval(
             tool_call,
             Vec::new(),
             Some((turn, tool, response)),
@@ -364,7 +344,7 @@ async fn activity_reports_auto_mode_classification() {
 async fn activity_reports_running_shell() {
     let mut editor = chat_editor();
     let (pending, _kill) = shell(&mut editor, call("shell", "bash"), batch(Vec::new()));
-    park(&mut editor, Parked::Shell(pending));
+    park(&mut editor, ParkedTurn::Shell(pending));
     assert_eq!(editor.ai_chat_activity(), AiChatActivity::RunningShell);
     assert_cancelled_to_idle(&mut editor);
 }
@@ -388,8 +368,7 @@ async fn activity_reports_a_blocking_walkthrough_over_the_live_provider_turn() {
     let mut editor = chat_editor();
     let tool_call = call("walk", "explain_with_codebase");
     let (continuation, _receiver) = walkthrough_dynamic(&mut editor, &tool_call);
-    let pending = walkthrough(&editor, tool_call, Some(continuation));
-    park(&mut editor, Parked::CodeExplanation(pending));
+    open_walkthrough(&mut editor, tool_call, Some(continuation));
     assert_eq!(
         editor.ai_chat_activity(),
         AiChatActivity::WaitingCodeExplanation
@@ -404,8 +383,7 @@ async fn activity_reports_inference_while_an_open_walkthrough_is_answered() {
     let mut editor = chat_editor();
     let turn = editor.begin_ai_runtime_turn("answer").unwrap();
     editor.ai_state.chat.as_mut().unwrap().runtime_turn = Some(Box::new(turn));
-    let pending = walkthrough(&editor, call("walk", "explain_with_codebase"), None);
-    park(&mut editor, Parked::CodeExplanation(pending));
+    open_walkthrough(&mut editor, call("walk", "explain_with_codebase"), None);
     assert_eq!(editor.ai_chat_activity(), AiChatActivity::Inference);
 
     editor.ai_runtime_interrupt_turn("answered");
@@ -421,7 +399,7 @@ async fn activity_reports_inference_while_an_open_walkthrough_is_answered() {
 async fn activity_reports_folder_approval_over_a_running_tool() {
     let mut editor = chat_editor();
     let (pending, _kill) = shell(&mut editor, call("shell", "bash"), batch(Vec::new()));
-    park(&mut editor, Parked::Shell(pending));
+    park(&mut editor, ParkedTurn::Shell(pending));
     editor
         .ai_state
         .chat
@@ -446,7 +424,7 @@ async fn cancelling_dynamic_approval_answers_the_provider() {
     let (turn, tool, response, receiver) = dynamic_call(&mut editor, &tool_call);
     park(
         &mut editor,
-        Parked::Approval(approval(
+        ParkedTurn::Approval(approval(
             tool_call,
             Vec::new(),
             Some((turn, tool, response)),
@@ -463,7 +441,7 @@ async fn cancelling_batch_approval_closes_the_committed_batch() {
     let (first, follow_up) = committed_batch(&mut editor, "bash");
     park(
         &mut editor,
-        Parked::Approval(approval(first, vec![follow_up], None)),
+        ParkedTurn::Approval(approval(first, vec![follow_up], None)),
     );
     assert_cancelled_to_idle(&mut editor);
     assert_batch_closed(&editor);
@@ -483,7 +461,7 @@ async fn cancelling_batch_shell_kills_retires_and_closes_the_batch() {
     let mut editor = chat_editor();
     let (first, follow_up) = committed_batch(&mut editor, "bash");
     let (pending, kill) = shell(&mut editor, first, batch(vec![follow_up]));
-    park(&mut editor, Parked::Shell(pending));
+    park(&mut editor, ParkedTurn::Shell(pending));
     assert_cancelled_to_idle(&mut editor);
     assert!(kill.is_cancelled(), "the command itself must be killed");
     assert_eq!(
@@ -499,7 +477,7 @@ async fn cancelling_dynamic_shell_answers_the_provider() {
     let tool_call = call("shell", "bash");
     let (continuation, receiver) = dynamic(&mut editor, &tool_call);
     let (pending, kill) = shell(&mut editor, tool_call, continuation);
-    park(&mut editor, Parked::Shell(pending));
+    park(&mut editor, ParkedTurn::Shell(pending));
     assert_cancelled_to_idle(&mut editor);
     assert!(kill.is_cancelled());
     assert_dynamic_cancelled(receiver);
@@ -545,8 +523,7 @@ async fn cancelling_dynamic_walkthrough_closes_it_and_answers_the_provider() {
     let mut editor = chat_editor();
     let tool_call = call("walk", "explain_with_codebase");
     let (continuation, receiver) = walkthrough_dynamic(&mut editor, &tool_call);
-    let pending = walkthrough(&editor, tool_call, Some(continuation));
-    park(&mut editor, Parked::CodeExplanation(pending));
+    open_walkthrough(&mut editor, tool_call, Some(continuation));
     assert_cancelled_to_idle(&mut editor);
     assert!(!editor.ai_chat_has_pending_code_explanation());
     assert_dynamic_cancelled(receiver);
@@ -556,8 +533,7 @@ async fn cancelling_dynamic_walkthrough_closes_it_and_answers_the_provider() {
 async fn cancelling_batch_walkthrough_closes_the_committed_batch() {
     let mut editor = chat_editor();
     let (first, follow_up) = committed_batch(&mut editor, "explain_with_codebase");
-    let pending = walkthrough(&editor, first, Some(walkthrough_batch(vec![follow_up])));
-    park(&mut editor, Parked::CodeExplanation(pending));
+    open_walkthrough(&mut editor, first, Some(walkthrough_batch(vec![follow_up])));
     assert_cancelled_to_idle(&mut editor);
     assert_batch_closed(&editor);
 }
@@ -567,8 +543,8 @@ async fn cancelling_editor_mcp_walkthrough_replies_to_the_external_agent() {
     let mut editor = chat_editor();
     editor.ai_state.chat.as_mut().unwrap().waiting = true;
     let (response, mut receiver) = oneshot::channel();
-    let pending = walkthrough(
-        &editor,
+    open_walkthrough(
+        &mut editor,
         call("walk", "explain_with_codebase"),
         Some(CodeExplanationContinuation::EditorMcp {
             request_id: "req".into(),
@@ -576,7 +552,6 @@ async fn cancelling_editor_mcp_walkthrough_replies_to_the_external_agent() {
             response,
         }),
     );
-    park(&mut editor, Parked::CodeExplanation(pending));
     assert_cancelled_to_idle(&mut editor);
     assert!(!editor.ai_chat_has_pending_code_explanation());
     let reply = receiver.try_recv().expect("external agent was answered");
@@ -586,4 +561,90 @@ async fn cancelling_editor_mcp_walkthrough_replies_to_the_external_agent() {
         reply["result"]["content"][0]["text"],
         "Walkthrough cancelled"
     );
+}
+
+/// Regression (OV-00485): a turn parked on a delegated-agent wait/interrupt
+/// was missing from the blocker list, so it was reported as inference.
+#[tokio::test(flavor = "current_thread")]
+async fn activity_reports_subagent_control_as_external_work() {
+    let mut editor = chat_editor();
+    let tool_call = call("wait", "wait_agent");
+    let (continuation, _receiver) = dynamic(&mut editor, &tool_call);
+    let (parked, _abort) = subagent(tool_call, continuation);
+    park(&mut editor, parked);
+    assert_eq!(
+        editor.ai_chat_activity(),
+        AiChatActivity::RunningExternalTool
+    );
+    assert_cancelled_to_idle(&mut editor);
+}
+
+// ---------------------------------------------------------------------------
+// the one-park invariant
+// ---------------------------------------------------------------------------
+
+/// Parking an occupied turn never overwrites the occupant (that would drop
+/// its response channel or orphan its task); the newcomer is cancelled.
+#[tokio::test(flavor = "current_thread")]
+async fn parking_an_occupied_turn_keeps_the_occupant_and_cancels_the_newcomer() {
+    let mut editor = chat_editor();
+    let (pending, kill) = shell(&mut editor, call("shell", "bash"), batch(Vec::new()));
+    park(&mut editor, ParkedTurn::Shell(pending));
+
+    let tool_call = call("web", "web_fetch");
+    let (continuation, receiver) = dynamic(&mut editor, &tool_call);
+    let ParkedTurn::Background(newcomer) = background(tool_call, continuation) else {
+        unreachable!()
+    };
+    assert!(!editor.park_ai_turn(newcomer));
+
+    assert_dynamic_cancelled(receiver);
+    assert!(!kill.is_cancelled());
+    assert_eq!(editor.ai_chat_activity(), AiChatActivity::RunningShell);
+}
+
+/// Tearing a turn down (provider error, stale branch) stops every kind of
+/// parked tool work, delegated-agent control included.
+#[tokio::test(flavor = "current_thread")]
+async fn clearing_streaming_state_aborts_parked_subagent_control() {
+    let mut editor = chat_editor();
+    let (parked, abort) = subagent(call("wait", "wait_agent"), batch(Vec::new()));
+    park(&mut editor, parked);
+
+    editor.clear_streaming_state();
+    tokio::task::yield_now().await;
+
+    assert!(
+        abort.is_finished(),
+        "the mailbox wait must not outlive its turn"
+    );
+    assert!(editor.ai_state.chat.as_ref().unwrap().parked().is_none());
+    assert_eq!(editor.ai_chat_activity(), AiChatActivity::Idle);
+}
+
+/// A walkthrough that outlived its turn is not replaced by a second one: the
+/// new call is refused and handed back so the caller can answer it.
+#[tokio::test(flavor = "current_thread")]
+async fn a_second_walkthrough_is_refused_while_one_is_open() {
+    let mut editor = chat_editor();
+    open_walkthrough(&mut editor, call("first", "explain_with_codebase"), None);
+    let second = ToolCallInfo {
+        id: "second".into(),
+        name: "explain_with_codebase".into(),
+        arguments: serde_json::json!({
+            "steps": [{ "type": "concept", "title": "Second", "body": "Body" }]
+        }),
+    };
+
+    let (_, continuation) = editor
+        .begin_code_explanation(second, Some(walkthrough_batch(Vec::new())))
+        .expect_err("the open walkthrough keeps the screen");
+
+    assert!(continuation.is_some(), "the refused call is handed back");
+    let chat = editor.ai_state.chat.as_ref().unwrap();
+    assert_eq!(
+        chat.pending_code_explanation.as_ref().unwrap().tool_call.id,
+        "first"
+    );
+    assert!(chat.parked().is_none());
 }

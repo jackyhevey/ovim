@@ -39,8 +39,10 @@ scroll, tab, split, file-tree, command/search, and status state. They include an
 `ai_chat` object whenever a chat is active. It reports focus, streaming/review
 state, current composer text and cursor, pending approval, scheduled inputs,
 and message history. The `activity` field is the authoritative lifecycle state:
-`idle`, `inference`, `classifying_tool`, `running_shell`, `running_web`,
-`waiting_tool_approval`, or `waiting_folder_approval`. Prefer it over inferring
+`idle`, `inference`, `classifying_tool`, `running_shell`,
+`running_external_tool` (web/browser tools and delegated-agent waits),
+`waiting_tool_approval`, `waiting_folder_approval`, or
+`waiting_code_explanation`. Prefer it over inferring
 ownership from compatibility booleans such as `waiting` and `streaming`. The
 `attention_generation` value increases for each new blocking agent approval,
 so a headless client can raise its own notification once per prompt. Completed

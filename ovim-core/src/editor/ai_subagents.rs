@@ -2197,19 +2197,17 @@ impl Editor {
         let task = tokio::spawn(async move {
             let _ = sender.send(prepared.execute().await);
         });
-        let chat = self
-            .ai_state
-            .chat
-            .as_mut()
-            .expect("active chat checked above");
-        chat.pending_subagent_control = Some(super::ai_chat_state::PendingSubagentControl {
+        if self.park_ai_turn(super::ai_chat_state::PendingSubagentControl {
             tool_call: call,
             continuation,
             receiver,
             task,
-        });
-        chat.waiting = true;
-        self.set_status_message("Waiting for delegated-agent activity");
+        }) {
+            if let Some(chat) = self.ai_state.chat.as_mut() {
+                chat.waiting = true;
+            }
+            self.set_status_message("Waiting for delegated-agent activity");
+        }
         Ok(())
     }
 
@@ -2217,8 +2215,7 @@ impl Editor {
         let user_steering = self.ai_state.chat.as_ref().is_some_and(|chat| {
             !chat.queued_inputs.is_empty()
                 && chat
-                    .pending_subagent_control
-                    .as_ref()
+                    .parked_as::<super::ai_chat_state::PendingSubagentControl>()
                     .is_some_and(|pending| pending.tool_call.name == WAIT_AGENT_TOOL)
         });
         let received = if user_steering {
@@ -2226,12 +2223,9 @@ impl Editor {
                 json!({ "outcome": "user_steering", "updates": [] }).to_string(),
             ))
         } else {
-            let Some(pending) = self
-                .ai_state
-                .chat
-                .as_mut()
-                .and_then(|chat| chat.pending_subagent_control.as_mut())
-            else {
+            let Some(pending) = self.ai_state.chat.as_mut().and_then(|chat| {
+                chat.parked_as_mut::<super::ai_chat_state::PendingSubagentControl>()
+            }) else {
                 return false;
             };
             match pending.receiver.try_recv() {
@@ -2246,7 +2240,7 @@ impl Editor {
             .ai_state
             .chat
             .as_mut()
-            .and_then(|chat| chat.pending_subagent_control.take())
+            .and_then(|chat| chat.take_parked_as::<super::ai_chat_state::PendingSubagentControl>())
             .expect("pending delegated-agent control exists");
         if user_steering {
             pending.task.abort();
@@ -2259,53 +2253,13 @@ impl Editor {
         {
             result = ToolResult::Error(error);
         }
-        match pending.continuation {
-            super::ai_chat_state::ToolExecutionContinuation::Dynamic {
-                runtime_tool,
-                runtime_turn,
-                response,
-            } => {
-                self.finish_dynamic_tool(
-                    &runtime_turn,
-                    &runtime_tool,
-                    &pending.tool_call,
-                    response,
-                    result,
-                );
-                self.set_status_message(String::new());
-                if let Some(chat) = self.ai_state.chat.as_mut() {
-                    chat.waiting = true;
-                }
-                true
-            }
-            super::ai_chat_state::ToolExecutionContinuation::Batch {
-                runtime_tool,
-                runtime_turn,
-                remaining_tool_calls,
-                model_name,
-            } => {
-                if let (Some(turn), Some(tool)) = (runtime_turn.as_ref(), runtime_tool.as_ref())
-                    && let Err(error) = self.ai_runtime_finish_tool(turn, tool, &result)
-                {
-                    self.ai_runtime_fail_turn(format!(
-                        "failed to record delegated-agent tool result: {error}"
-                    ));
-                    self.clear_streaming_state();
-                    return true;
-                }
-                self.record_tool_event_summary(&pending.tool_call, &result);
-                let result_content =
-                    self.format_tool_result_with_target(&pending.tool_call, &result);
-                if let Some(conversation) = self.conversation_mut() {
-                    conversation.append_tool_result(pending.tool_call.id, result_content);
-                }
-                if let Some(chat) = self.ai_state.chat.as_mut() {
-                    chat.tool_call_count = chat.tool_call_count.saturating_add(1);
-                }
-                self.set_status_message(String::new());
-                self.execute_tool_call_batch(remaining_tool_calls, model_name)
-            }
-        }
+        self.set_status_message(String::new());
+        self.resume_tool_continuation(
+            pending.tool_call,
+            pending.continuation,
+            result,
+            "delegated-agent tool",
+        )
     }
 
     fn consume_ai_subagent_updates(&self, payload: &str) -> Result<(), String> {

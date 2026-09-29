@@ -739,7 +739,7 @@ pub(super) mod tests {
             .chat
             .as_ref()
             .unwrap()
-            .pending_shell_execution
+            .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
             .is_none());
         let task = editor
             .ai_state

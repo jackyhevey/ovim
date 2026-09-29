@@ -129,7 +129,7 @@ impl Editor {
         chat.viewport.pinned_base_total_rows = None;
         chat.history.selected_node_id = None;
         chat.tool_call_count = 0;
-        chat.pending_tool_approval = None;
+        chat.take_parked_as::<super::ai_chat_state::PendingToolApproval>();
 
         // Spawn the streaming request
         if let Err(e) = self.spawn_streaming_request() {
@@ -389,109 +389,34 @@ impl Editor {
                         self.clear_streaming_state();
                         return true;
                     }
-                    if self.is_background_ai_tool(&call.name) {
+                    if self.parks_ai_tool_off_loop(&call.name) {
                         let continuation =
                             super::ai_chat_state::ToolExecutionContinuation::Dynamic {
                                 runtime_tool: tool.clone(),
                                 runtime_turn: turn.clone(),
                                 response,
                             };
-                        match self.begin_pending_background_tool(call.clone(), continuation) {
-                            Ok(()) => {
-                                changed = true;
-                                continue;
-                            }
-                            Err((result, continuation)) => {
-                                let super::ai_chat_state::ToolExecutionContinuation::Dynamic {
-                                    runtime_tool,
-                                    runtime_turn,
-                                    response,
-                                } = *continuation
-                                else {
-                                    unreachable!()
-                                };
-                                self.finish_dynamic_tool(
-                                    &runtime_turn,
-                                    &runtime_tool,
-                                    &call,
-                                    response,
-                                    result,
-                                );
-                                changed = true;
-                                continue;
-                            }
-                        }
-                    }
-                    if matches!(
-                        call.name.as_str(),
-                        crate::ai::tools::subagents::WAIT_AGENT_TOOL
-                            | crate::ai::tools::subagents::INTERRUPT_AGENT_TOOL
-                            | crate::ai::tools::subagents::FOLLOWUP_AGENT_TOOL
-                    ) {
-                        let continuation =
-                            super::ai_chat_state::ToolExecutionContinuation::Dynamic {
-                                runtime_tool: tool.clone(),
-                                runtime_turn: turn.clone(),
+                        if let Err((result, continuation)) =
+                            self.begin_parked_ai_tool(call.clone(), continuation)
+                        {
+                            let super::ai_chat_state::ToolExecutionContinuation::Dynamic {
+                                runtime_tool,
+                                runtime_turn,
                                 response,
+                            } = *continuation
+                            else {
+                                unreachable!("dynamic tool retained batch continuation")
                             };
-                        match self.begin_pending_ai_subagent_control(call.clone(), continuation) {
-                            Ok(()) => {
-                                changed = true;
-                                continue;
-                            }
-                            Err((result, continuation)) => {
-                                let super::ai_chat_state::ToolExecutionContinuation::Dynamic {
-                                    runtime_tool,
-                                    runtime_turn,
-                                    response,
-                                } = *continuation
-                                else {
-                                    unreachable!()
-                                };
-                                self.finish_dynamic_tool(
-                                    &runtime_turn,
-                                    &runtime_tool,
-                                    &call,
-                                    response,
-                                    result,
-                                );
-                                changed = true;
-                                continue;
-                            }
-                        }
-                    }
-                    if call.name == "explain_with_codebase" {
-                        let continuation =
-                            super::ai_chat_state::CodeExplanationContinuation::Dynamic {
-                                runtime_tool: tool.clone(),
-                                runtime_turn: turn.clone(),
+                            self.finish_dynamic_tool(
+                                &runtime_turn,
+                                &runtime_tool,
+                                &call,
                                 response,
-                            };
-                        match self.begin_code_explanation(call.clone(), continuation) {
-                            Ok(()) => {
-                                changed = true;
-                                continue;
-                            }
-                            Err((result, continuation)) => {
-                                let super::ai_chat_state::CodeExplanationContinuation::Dynamic {
-                                    runtime_tool,
-                                    runtime_turn,
-                                    response,
-                                } = *continuation
-                                else {
-                                    unreachable!("dynamic walkthrough retained batch continuation")
-                                };
-                                self.finish_dynamic_tool(
-                                    &runtime_turn,
-                                    &runtime_tool,
-                                    &call,
-                                    response,
-                                    result,
-                                );
-                                changed = true;
-                                continue;
-                            }
+                                result,
+                            );
                         }
+                        changed = true;
+                        continue;
                     }
                     let outcome = self.dispatch_tool_call_with_approval(&call, None);
                     let result = match outcome {
@@ -875,16 +800,13 @@ impl Editor {
                     .map_err(|error| format!("{error:#}"));
                 let _ = result_tx.send(result);
             });
-            if let Some(chat) = self.ai_state.chat.as_mut() {
-                chat.pending_auto_mode_classification =
-                    Some(super::ai_chat_state::PendingAutoModeClassification {
-                        tool_call: call,
-                        runtime_tool: tool,
-                        runtime_turn: turn,
-                        dynamic_response: response,
-                        receiver: result_rx,
-                    });
-            }
+            self.park_ai_turn(super::ai_chat_state::PendingAutoModeClassification {
+                tool_call: call,
+                runtime_tool: tool,
+                runtime_turn: turn,
+                dynamic_response: response,
+                receiver: result_rx,
+            });
             self.set_status_message("Terra is reviewing the proposed shell program");
         } else {
             debug_assert_eq!(
@@ -898,12 +820,9 @@ impl Editor {
     pub(super) fn poll_pending_auto_mode_classification(&mut self) -> bool {
         use crate::ai::auto_mode::ClassifierDecision;
         let received = {
-            let Some(pending) = self
-                .ai_state
-                .chat
-                .as_mut()
-                .and_then(|chat| chat.pending_auto_mode_classification.as_mut())
-            else {
+            let Some(pending) = self.ai_state.chat.as_mut().and_then(|chat| {
+                chat.parked_as_mut::<super::ai_chat_state::PendingAutoModeClassification>()
+            }) else {
                 return false;
             };
             match pending.receiver.try_recv() {
@@ -918,7 +837,9 @@ impl Editor {
             .ai_state
             .chat
             .as_mut()
-            .and_then(|chat| chat.pending_auto_mode_classification.take())
+            .and_then(|chat| {
+                chat.take_parked_as::<super::ai_chat_state::PendingAutoModeClassification>()
+            })
             .expect("pending classifier exists");
         let project_root = self.ai_effective_project_root();
         match received.expect("classifier result") {
@@ -1168,14 +1089,16 @@ impl Editor {
                 call.id.clone(),
                 super::ai_chat_state::ShellTranscript::new(call.clone(), command, workdir),
             );
-            chat.pending_shell_execution = Some(super::ai_chat_state::PendingShellExecution {
-                tool_call: call,
-                continuation,
-                receiver: result_rx,
-                progress: progress_rx,
-                task,
-                kill,
-            });
+        }
+        let parked = self.park_ai_turn(super::ai_chat_state::PendingShellExecution {
+            tool_call: call,
+            continuation,
+            receiver: result_rx,
+            progress: progress_rx,
+            task,
+            kill,
+        });
+        if parked && let Some(chat) = self.ai_state.chat.as_mut() {
             chat.waiting = true;
         }
         self.set_status_message("Agent shell program is running");
@@ -1186,35 +1109,39 @@ impl Editor {
             let Some(chat) = self.ai_state.chat.as_mut() else {
                 return false;
             };
-            let Some(pending) = chat.pending_shell_execution.as_mut() else {
+            let Some(pending) = chat.parked_as_mut::<super::ai_chat_state::PendingShellExecution>()
+            else {
                 return false;
             };
             let tool_call_id = pending.tool_call.id.clone();
-            let mut progress_changed = false;
-            while let Ok(event) = pending.progress.try_recv() {
-                progress_changed = true;
-                let Some(transcript) = chat.shell_transcripts.get_mut(&tool_call_id) else {
-                    continue;
-                };
-                match event {
-                    super::ai_chat_state::ShellProgressEvent::Spawned { pid } => {
-                        transcript.pid = Some(pid);
-                        if transcript.phase
-                            != super::ai_chat_state::ShellTranscriptPhase::InterruptRequested
-                        {
-                            transcript.phase = super::ai_chat_state::ShellTranscriptPhase::Running;
+            // Drain progress before the result: every event the task sent
+            // ahead of its result is then applied before the result is.
+            let events: Vec<_> = std::iter::from_fn(|| pending.progress.try_recv().ok()).collect();
+            let result = pending.receiver.try_recv();
+            let progress_changed = !events.is_empty();
+            if let Some(transcript) = chat.shell_transcripts.get_mut(&tool_call_id) {
+                for event in events {
+                    match event {
+                        super::ai_chat_state::ShellProgressEvent::Spawned { pid } => {
+                            transcript.pid = Some(pid);
+                            if transcript.phase
+                                != super::ai_chat_state::ShellTranscriptPhase::InterruptRequested
+                            {
+                                transcript.phase =
+                                    super::ai_chat_state::ShellTranscriptPhase::Running;
+                            }
                         }
-                    }
-                    super::ai_chat_state::ShellProgressEvent::Output { stream, bytes } => {
-                        transcript.append(stream, bytes);
-                    }
-                    super::ai_chat_state::ShellProgressEvent::CapturingChanges => {
-                        transcript.phase =
-                            super::ai_chat_state::ShellTranscriptPhase::CapturingChanges;
+                        super::ai_chat_state::ShellProgressEvent::Output { stream, bytes } => {
+                            transcript.append(stream, bytes);
+                        }
+                        super::ai_chat_state::ShellProgressEvent::CapturingChanges => {
+                            transcript.phase =
+                                super::ai_chat_state::ShellTranscriptPhase::CapturingChanges;
+                        }
                     }
                 }
             }
-            match pending.receiver.try_recv() {
+            match result {
                 Ok(result) => Some(result),
                 Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
                     return progress_changed;
@@ -1238,7 +1165,7 @@ impl Editor {
             .ai_state
             .chat
             .as_mut()
-            .and_then(|chat| chat.pending_shell_execution.take())
+            .and_then(|chat| chat.take_parked_as::<super::ai_chat_state::PendingShellExecution>())
             .expect("pending shell exists");
         let observation = received.expect("shell result");
         for path in &observation.created_temp_files {
@@ -1268,18 +1195,7 @@ impl Editor {
                 .push_back(pending.tool_call.id.clone());
             chat.evict_old_shell_transcripts();
         }
-        let (runtime_turn, runtime_tool) = match &pending.continuation {
-            super::ai_chat_state::ToolExecutionContinuation::Dynamic {
-                runtime_turn,
-                runtime_tool,
-                ..
-            } => (Some(runtime_turn), Some(runtime_tool)),
-            super::ai_chat_state::ToolExecutionContinuation::Batch {
-                runtime_turn,
-                runtime_tool,
-                ..
-            } => (runtime_turn.as_ref(), runtime_tool.as_ref()),
-        };
+        let (runtime_turn, runtime_tool) = pending.continuation.runtime_refs();
         if let Some(delta) = observation.delta {
             if let (Some(turn), Some(tool)) = (runtime_turn, runtime_tool) {
                 for mutation in delta.mutations {
@@ -1436,12 +1352,9 @@ impl Editor {
 
     fn poll_pending_background_tool(&mut self) -> bool {
         let received = {
-            let Some(pending) = self
-                .ai_state
-                .chat
-                .as_mut()
-                .and_then(|chat| chat.pending_background_tool.as_mut())
-            else {
+            let Some(pending) = self.ai_state.chat.as_mut().and_then(|chat| {
+                chat.parked_as_mut::<super::ai_chat_state::PendingBackgroundTool>()
+            }) else {
                 return false;
             };
             match pending.receiver.try_recv() {
@@ -1460,7 +1373,7 @@ impl Editor {
             .ai_state
             .chat
             .as_mut()
-            .and_then(|chat| chat.pending_background_tool.take())
+            .and_then(|chat| chat.take_parked_as::<super::ai_chat_state::PendingBackgroundTool>())
             .expect("pending background tool exists");
 
         if let super::ai_chat_state::BackgroundToolAftermath::Exa {
@@ -1476,7 +1389,70 @@ impl Editor {
             }
         }
         self.set_status_message(String::new());
-        match pending.continuation {
+        self.resume_tool_continuation(
+            pending.tool_call,
+            pending.continuation,
+            received.result,
+            "background tool",
+        )
+    }
+
+    /// Whether `name` runs off the editor loop, parking the turn until it
+    /// completes (background tools, delegated-agent control, walkthroughs).
+    pub(super) fn parks_ai_tool_off_loop(&self, name: &str) -> bool {
+        self.is_background_ai_tool(name)
+            || name == "explain_with_codebase"
+            || matches!(
+                name,
+                crate::ai::tools::subagents::WAIT_AGENT_TOOL
+                    | crate::ai::tools::subagents::INTERRUPT_AGENT_TOOL
+                    | crate::ai::tools::subagents::FOLLOWUP_AGENT_TOOL
+            )
+    }
+
+    /// Start a tool for which `parks_ai_tool_off_loop` holds. On failure the
+    /// unconsumed continuation is handed back with the error result.
+    pub(super) fn begin_parked_ai_tool(
+        &mut self,
+        call: ToolCallInfo,
+        continuation: super::ai_chat_state::ToolExecutionContinuation,
+    ) -> Result<
+        (),
+        (
+            crate::ai::tools::ToolResult,
+            Box<super::ai_chat_state::ToolExecutionContinuation>,
+        ),
+    > {
+        if self.is_background_ai_tool(&call.name) {
+            self.begin_pending_background_tool(call, continuation)
+        } else if call.name == "explain_with_codebase" {
+            self.begin_code_explanation(
+                call,
+                Some(super::ai_chat_state::CodeExplanationContinuation::Tool(
+                    continuation,
+                )),
+            )
+            .map_err(|(result, continuation)| match continuation.map(|c| *c) {
+                Some(super::ai_chat_state::CodeExplanationContinuation::Tool(continuation)) => {
+                    (result, Box::new(continuation))
+                }
+                _ => unreachable!("walkthrough handed back a different continuation"),
+            })
+        } else {
+            self.begin_pending_ai_subagent_control(call, continuation)
+        }
+    }
+
+    /// Deliver a parked tool's result: answer the provider for a dynamic
+    /// call, or record it and continue the committed local batch.
+    pub(super) fn resume_tool_continuation(
+        &mut self,
+        tool_call: ToolCallInfo,
+        continuation: super::ai_chat_state::ToolExecutionContinuation,
+        result: crate::ai::tools::ToolResult,
+        what: &str,
+    ) -> bool {
+        match continuation {
             super::ai_chat_state::ToolExecutionContinuation::Dynamic {
                 runtime_tool,
                 runtime_turn,
@@ -1485,9 +1461,9 @@ impl Editor {
                 self.finish_dynamic_tool(
                     &runtime_turn,
                     &runtime_tool,
-                    &pending.tool_call,
+                    &tool_call,
                     response,
-                    received.result,
+                    result,
                 );
                 if let Some(chat) = self.ai_state.chat.as_mut() {
                     chat.waiting = true;
@@ -1501,22 +1477,20 @@ impl Editor {
                 model_name,
             } => {
                 if let (Some(turn), Some(tool)) = (runtime_turn.as_ref(), runtime_tool.as_ref())
-                    && let Err(error) = self.ai_runtime_finish_tool(turn, tool, &received.result)
+                    && let Err(error) = self.ai_runtime_finish_tool(turn, tool, &result)
                 {
-                    self.ai_runtime_fail_turn(format!(
-                        "failed to record background tool result: {error}"
-                    ));
+                    self.ai_runtime_fail_turn(format!("failed to record {what} result: {error}"));
                     self.clear_streaming_state();
                     return true;
                 }
-                self.record_tool_event_summary(&pending.tool_call, &received.result);
-                let result_content =
-                    self.format_tool_result_with_target(&pending.tool_call, &received.result);
+                self.record_tool_event_summary(&tool_call, &result);
+                let result_content = self.format_tool_result_with_target(&tool_call, &result);
                 if let Some(conversation) = self.conversation_mut() {
-                    conversation.append_tool_result(pending.tool_call.id, result_content);
+                    conversation.append_tool_result(tool_call.id, result_content);
                 }
                 if let Some(chat) = self.ai_state.chat.as_mut() {
                     chat.tool_call_count = chat.tool_call_count.saturating_add(1);
+                    chat.waiting = true;
                 }
                 self.execute_tool_call_batch(remaining_tool_calls, model_name)
             }
@@ -1615,26 +1589,24 @@ impl Editor {
         request: super::ai_chat_tools::ToolApprovalRequest,
         runtime_tool_started: bool,
     ) {
-        let mut installed = false;
-        if let Some(chat) = self.ai_state.chat.as_mut() {
-            chat.pending_tool_approval = Some(super::ai_chat_state::PendingToolApproval {
-                tool_call: call,
-                reason: request.reason.clone(),
-                runtime_tool: Some(tool),
-                runtime_tool_started,
-                remaining_tool_calls: Vec::new(),
-                model_name: String::new(),
-                requested_path: request.requested_path,
-                approval_root: request.approval_root,
-                dynamic_response: Some(response),
-                dynamic_turn: Some(turn),
-            });
+        let installed = self.park_ai_turn(super::ai_chat_state::PendingToolApproval {
+            tool_call: call,
+            reason: request.reason.clone(),
+            runtime_tool: Some(tool),
+            runtime_tool_started,
+            remaining_tool_calls: Vec::new(),
+            model_name: String::new(),
+            requested_path: request.requested_path,
+            approval_root: request.approval_root,
+            dynamic_response: Some(response),
+            dynamic_turn: Some(turn),
+        });
+        if installed {
             // Keep pending_job alive: its app-server task is blocked on the
             // dynamic response and resumes exactly once after this UI decision.
-            chat.waiting = false;
-            installed = true;
-        }
-        if installed {
+            if let Some(chat) = self.ai_state.chat.as_mut() {
+                chat.waiting = false;
+            }
             self.ai_state.ai_attention_generation =
                 self.ai_state.ai_attention_generation.saturating_add(1);
         }

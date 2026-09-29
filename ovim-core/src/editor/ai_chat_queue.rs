@@ -399,7 +399,7 @@ mod tests {
             },
             original_active_buffer_id: chat.active_buffer_id,
             presentation_buffer_id: None,
-            continuation: None,
+            replay: false,
         });
 
         editor.reject_provider_ai_chat_steer(7, "unsupported");

@@ -592,7 +592,6 @@ impl Editor {
 mod tests {
     use super::*;
     use crate::ai::chat_types::{ChatOpts, ToolCallInfo};
-    use crate::editor::ai_chat_state::CodeExplanationContinuation;
     use crate::editor::ai_state::AiState;
     use crate::editor::code_explanation::CodeExplanationPageView;
     use crate::run_log::RunStorageLayout;
@@ -722,7 +721,7 @@ mod tests {
                 arguments: json!({"steps":[step]}),
             };
             assert!(editor
-                .begin_code_explanation(bad, CodeExplanationContinuation::Replay)
+                .begin_code_explanation(bad, None)
                 .is_err());
             assert!(!editor.ai_chat_has_pending_code_explanation());
         }
@@ -741,7 +740,7 @@ mod tests {
             ]}),
         };
         editor
-            .begin_code_explanation(call.clone(), CodeExplanationContinuation::Replay)
+            .begin_code_explanation(call.clone(), None)
             .unwrap_or_else(|(error, _)| panic!("walkthrough failed: {error:?}"));
         assert!(editor.move_code_explanation(true));
         assert!(matches!(editor.ai_code_explanation_view().unwrap().page,
@@ -773,7 +772,7 @@ mod tests {
         let mut oversized = call.clone();
         oversized.id = "too-tall-diff".into();
         let error = editor
-            .begin_code_explanation(oversized, CodeExplanationContinuation::Replay)
+            .begin_code_explanation(oversized, None)
             .expect_err("diff page must fit the viewport")
             .0;
         assert!(
@@ -798,7 +797,7 @@ mod tests {
                 chat.code_explanation_cache_bytes = 0;
             }
             editor
-                .begin_code_explanation(call.clone(), CodeExplanationContinuation::Replay)
+                .begin_code_explanation(call.clone(), None)
                 .unwrap_or_else(|(error, _)| panic!("replay failed: {error:?}"));
             assert!(editor.move_code_explanation(true));
             assert_eq!(editor.buffer().rope().to_string(), displayed);

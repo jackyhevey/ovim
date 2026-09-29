@@ -1,6 +1,9 @@
 //! Narrow MCP facade over canonical editor operations. Requests reach the editor
 //! only through the owning provider job, never through global session discovery.
-use super::{ai_chat_state::CodeExplanationContinuation, Editor};
+use super::{
+    ai_chat_state::{CodeExplanationContinuation, PendingWalkthroughCall},
+    Editor,
+};
 use crate::ai::{
     tools::{schema, EditorBridgeTool},
     ToolCallInfo, ToolResult,
@@ -215,11 +218,12 @@ impl Editor {
                     rpc_id,
                     response,
                 };
-                if let Err((error, continuation)) = self.begin_code_explanation(call, continuation)
+                if let Err((error, continuation)) =
+                    self.begin_code_explanation(call, Some(continuation))
                 {
-                    if let CodeExplanationContinuation::EditorMcp {
+                    if let Some(CodeExplanationContinuation::EditorMcp {
                         rpc_id, response, ..
-                    } = *continuation
+                    }) = continuation.map(|continuation| *continuation)
                     {
                         let _ = response.send(tool_reply(rpc_id, error));
                     }
@@ -293,23 +297,17 @@ impl Editor {
     }
 
     pub(crate) fn abort_editor_mcp_walkthrough(&mut self) {
-        let pending = self
-            .ai_state
-            .chat
-            .as_mut()
-            .and_then(|chat| chat.pending_code_explanation.as_mut());
-        let Some(pending) = pending else {
-            return;
-        };
-        if !matches!(
-            pending.continuation,
-            Some(CodeExplanationContinuation::EditorMcp { .. })
-        ) {
+        if self.editor_mcp_walkthrough_request().is_none() {
             return;
         }
         if let Some(CodeExplanationContinuation::EditorMcp {
             rpc_id, response, ..
-        }) = pending.continuation.take()
+        }) = self
+            .ai_state
+            .chat
+            .as_mut()
+            .and_then(|chat| chat.take_parked_as::<PendingWalkthroughCall>())
+            .map(|blocked| blocked.continuation)
         {
             let _ = response.send(tool_reply(
                 rpc_id,
@@ -321,11 +319,22 @@ impl Editor {
     }
 
     pub(crate) fn cancel_editor_mcp_request(&mut self, id: &str) {
-        let matches = self.ai_state.chat.as_ref().and_then(|chat| chat.pending_code_explanation.as_ref())
-            .and_then(|pending| pending.continuation.as_ref())
-            .is_some_and(|continuation| matches!(continuation, CodeExplanationContinuation::EditorMcp { request_id, .. } if request_id == id));
-        if matches {
+        if self.editor_mcp_walkthrough_request() == Some(id) {
             self.finish_code_explanation(true);
+        }
+    }
+
+    /// The editor-MCP request whose walkthrough call is parked, if any.
+    fn editor_mcp_walkthrough_request(&self) -> Option<&str> {
+        match &self
+            .ai_state
+            .chat
+            .as_ref()?
+            .parked_as::<PendingWalkthroughCall>()?
+            .continuation
+        {
+            CodeExplanationContinuation::EditorMcp { request_id, .. } => Some(request_id),
+            CodeExplanationContinuation::Tool(_) => None,
         }
     }
 }

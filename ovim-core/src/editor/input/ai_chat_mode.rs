@@ -1366,8 +1366,8 @@ mod tests {
             let mut editor = Editor::default();
             open_test_chat(&mut editor);
             if let Some(chat) = editor.ai_state.chat.as_mut() {
-                chat.pending_tool_approval =
-                    Some(crate::editor::ai_chat_state::PendingToolApproval {
+                assert!(chat
+                    .park(crate::editor::ai_chat_state::PendingToolApproval {
                         tool_call: ToolCallInfo {
                             id: "call1".to_string(),
                             name: "read_file".to_string(),
@@ -1382,7 +1382,8 @@ mod tests {
                         approval_root: PathBuf::from("/tmp"),
                         dynamic_response: None,
                         dynamic_turn: None,
-                    });
+                    })
+                    .is_ok());
             }
 
             handle_ai_chat_mode(&mut editor, KeyEvent::new(KeyCode::Enter, Modifiers::NONE))
@@ -1390,8 +1391,8 @@ mod tests {
             assert!(!editor.ai_chat_has_pending_tool_approval());
 
             if let Some(chat) = editor.ai_state.chat.as_mut() {
-                chat.pending_tool_approval =
-                    Some(crate::editor::ai_chat_state::PendingToolApproval {
+                assert!(chat
+                    .park(crate::editor::ai_chat_state::PendingToolApproval {
                         tool_call: ToolCallInfo {
                             id: "call2".to_string(),
                             name: "read_file".to_string(),
@@ -1406,7 +1407,8 @@ mod tests {
                         approval_root: PathBuf::from("/tmp"),
                         dynamic_response: None,
                         dynamic_turn: None,
-                    });
+                    })
+                    .is_ok());
             }
             handle_ai_chat_mode(&mut editor, KeyEvent::new(KeyCode::Esc, Modifiers::NONE))
                 .expect("esc");

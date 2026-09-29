@@ -72,31 +72,6 @@ pub struct PendingToolApproval {
     pub dynamic_turn: Option<crate::agent_runtime::PendingTurnRef>,
 }
 
-impl AiTurnBlocker {
-    fn activity(self) -> AiChatActivity {
-        match self {
-            Self::ToolApproval => AiChatActivity::WaitingToolApproval,
-            Self::AutoModeClassification => AiChatActivity::ClassifyingTool,
-            Self::ShellExecution => AiChatActivity::RunningShell,
-            Self::BackgroundToolExecution => AiChatActivity::RunningExternalTool,
-            Self::CodeExplanation => AiChatActivity::WaitingCodeExplanation,
-        }
-    }
-}
-
-/// Mutually exclusive reason an active provider turn is blocked or delegated.
-///
-/// `pending_job` is intentionally not part of this enum: app-server inference
-/// remains allocated while a dynamic tool waits for one of these interactions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AiTurnBlocker {
-    ToolApproval,
-    AutoModeClassification,
-    ShellExecution,
-    BackgroundToolExecution,
-    CodeExplanation,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AgentComposerActionKind {
     Message,
@@ -135,6 +110,29 @@ pub enum ToolExecutionContinuation {
         remaining_tool_calls: Vec<ToolCallInfo>,
         model_name: String,
     },
+}
+
+impl ToolExecutionContinuation {
+    /// The runtime turn and tool this call is recorded under, when both exist.
+    pub fn runtime_refs(
+        &self,
+    ) -> (
+        Option<&crate::agent_runtime::PendingTurnRef>,
+        Option<&crate::agent_runtime::PendingToolRef>,
+    ) {
+        match self {
+            Self::Dynamic {
+                runtime_turn,
+                runtime_tool,
+                ..
+            } => (Some(runtime_turn), Some(runtime_tool)),
+            Self::Batch {
+                runtime_turn,
+                runtime_tool,
+                ..
+            } => (runtime_turn.as_ref(), runtime_tool.as_ref()),
+        }
+    }
 }
 
 /// An authorized shell effect running off the editor/event-loop thread.
@@ -433,27 +431,100 @@ pub struct PendingSubagentControl {
     pub task: tokio::task::JoinHandle<()>,
 }
 
+/// How the provider resumes once the user finishes a walkthrough.
+// Always stored inside `ParkedTurn`, whose variants are all this large.
+#[allow(clippy::large_enum_variant)]
 pub enum CodeExplanationContinuation {
+    /// An external agent's editor-MCP request waiting on its JSON-RPC reply.
     EditorMcp {
         request_id: String,
         rpc_id: serde_json::Value,
         response: tokio::sync::oneshot::Sender<serde_json::Value>,
     },
-    Batch {
-        runtime_tool: Option<crate::agent_runtime::PendingToolRef>,
-        runtime_turn: Option<crate::agent_runtime::PendingTurnRef>,
-        remaining_tool_calls: Vec<ToolCallInfo>,
-        model_name: String,
-    },
-    Dynamic {
-        runtime_tool: crate::agent_runtime::PendingToolRef,
-        runtime_turn: crate::agent_runtime::PendingTurnRef,
-        response: tokio::sync::oneshot::Sender<Result<String, String>>,
-    },
-    /// A user-triggered replay of an already completed history item. It is
-    /// entirely local and must not write another tool result or resume inference.
-    Replay,
+    /// A provider tool call, resumed like any other parked tool.
+    Tool(ToolExecutionContinuation),
 }
+
+/// The `explain_with_codebase` call blocked until the user finishes the
+/// open walkthrough.
+pub struct PendingWalkthroughCall {
+    pub tool_call: ToolCallInfo,
+    pub continuation: CodeExplanationContinuation,
+}
+
+/// The one interaction an AI turn is parked on. A turn is parked on at most
+/// one of these at a time; `AiChatState::park` enforces it.
+///
+/// Not included: the no-repo folder prompt and an external agent's
+/// permission request (decision prompts owned elsewhere, folded into
+/// `activity()`), and the walkthrough view itself, which outlives the turn
+/// once a question consumes its continuation.
+pub enum ParkedTurn {
+    Approval(PendingToolApproval),
+    Classifying(PendingAutoModeClassification),
+    Shell(PendingShellExecution),
+    Background(PendingBackgroundTool),
+    SubagentControl(PendingSubagentControl),
+    CodeExplanation(PendingWalkthroughCall),
+}
+
+impl ParkedTurn {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Approval(_) => "a tool approval",
+            Self::Classifying(_) => "an auto-mode classification",
+            Self::Shell(_) => "a shell program",
+            Self::Background(_) => "a background tool",
+            Self::SubagentControl(_) => "a delegated-agent control",
+            Self::CodeExplanation(_) => "a walkthrough",
+        }
+    }
+}
+
+/// Typed access to one `ParkedTurn` variant.
+pub trait ParkedKind: Sized {
+    fn into_parked(self) -> ParkedTurn;
+    fn from_parked(parked: ParkedTurn) -> Option<Self>;
+    fn peek(parked: &ParkedTurn) -> Option<&Self>;
+    fn peek_mut(parked: &mut ParkedTurn) -> Option<&mut Self>;
+}
+
+macro_rules! parked_kind {
+    ($($variant:ident($ty:ty)),* $(,)?) => {$(
+        impl ParkedKind for $ty {
+            fn into_parked(self) -> ParkedTurn {
+                ParkedTurn::$variant(self)
+            }
+            fn from_parked(parked: ParkedTurn) -> Option<Self> {
+                match parked {
+                    ParkedTurn::$variant(inner) => Some(inner),
+                    _ => None,
+                }
+            }
+            fn peek(parked: &ParkedTurn) -> Option<&Self> {
+                match parked {
+                    ParkedTurn::$variant(inner) => Some(inner),
+                    _ => None,
+                }
+            }
+            fn peek_mut(parked: &mut ParkedTurn) -> Option<&mut Self> {
+                match parked {
+                    ParkedTurn::$variant(inner) => Some(inner),
+                    _ => None,
+                }
+            }
+        }
+    )*};
+}
+
+parked_kind!(
+    Approval(PendingToolApproval),
+    Classifying(PendingAutoModeClassification),
+    Shell(PendingShellExecution),
+    Background(PendingBackgroundTool),
+    SubagentControl(PendingSubagentControl),
+    CodeExplanation(PendingWalkthroughCall),
+);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodeExplanationInteraction {
@@ -493,9 +564,9 @@ pub struct PendingCodeExplanation {
     pub original_active_buffer_id: BufferId,
     /// Ephemeral read-only buffer rendering the current invocation-time snapshot.
     pub presentation_buffer_id: Option<BufferId>,
-    /// Present only while the original explain_with_codebase call is blocked.
-    /// A question consumes this continuation but leaves the walkthrough open.
-    pub continuation: Option<CodeExplanationContinuation>,
+    /// A user-triggered replay of an already completed history item. It is
+    /// entirely local: it never parks the turn or writes a tool result.
+    pub replay: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -760,10 +831,8 @@ pub struct AiChatState {
     pub streaming_provider_state: Vec<serde_json::Value>,
     /// Number of individual tool calls executed in current turn.
     pub tool_call_count: u64,
-    /// Paused tool call awaiting user approval for outside-project access.
-    pub pending_tool_approval: Option<PendingToolApproval>,
-    pub pending_auto_mode_classification: Option<PendingAutoModeClassification>,
-    pub pending_shell_execution: Option<PendingShellExecution>,
+    /// The interaction the active turn is parked on; see `park`.
+    parked: Option<ParkedTurn>,
     /// Bounded live/completed shell output keyed by tool-call id.
     pub shell_transcripts: HashMap<String, ShellTranscript>,
     /// Oldest completed shell transcript first; running transcripts are never
@@ -771,9 +840,8 @@ pub struct AiChatState {
     pub shell_transcript_lru: VecDeque<String>,
     /// Process Inspector overlay, if one shell transcript is being viewed.
     pub shell_inspector: Option<ShellInspectorState>,
-    pub pending_background_tool: Option<PendingBackgroundTool>,
-    pub pending_subagent_control: Option<PendingSubagentControl>,
-    /// Interactive code walkthrough currently blocking the invoking tool.
+    /// Interactive code walkthrough. Its tool call is blocked only while
+    /// `parked` holds `ParkedTurn::CodeExplanation`.
     pub pending_code_explanation: Option<PendingCodeExplanation>,
     /// Oldest retained completed walkthrough first. Entries hold only files
     /// below the large-file cutoff and share source text across repeated pages.
@@ -861,46 +929,101 @@ impl AiChatState {
         }
     }
 
-    pub(crate) fn turn_blocker(&self) -> Option<AiTurnBlocker> {
-        let blockers = [
-            self.external_agent
-                .as_ref()
-                .and_then(|state| state.permission.as_ref())
-                .map(|_| AiTurnBlocker::ToolApproval),
-            self.pending_tool_approval
-                .as_ref()
-                .map(|_| AiTurnBlocker::ToolApproval),
-            self.pending_auto_mode_classification
-                .as_ref()
-                .map(|_| AiTurnBlocker::AutoModeClassification),
-            self.pending_shell_execution
-                .as_ref()
-                .map(|_| AiTurnBlocker::ShellExecution),
-            self.pending_background_tool
-                .as_ref()
-                .map(|_| AiTurnBlocker::BackgroundToolExecution),
-            self.pending_code_explanation
-                .as_ref()
-                .and_then(|pending| pending.continuation.as_ref())
-                .map(|_| AiTurnBlocker::CodeExplanation),
-        ];
-        debug_assert!(
-            blockers.iter().flatten().count() <= 1,
-            "an AI turn cannot have multiple blockers"
-        );
-        blockers.into_iter().flatten().next()
+    /// Park the turn on `parked`.
+    ///
+    /// A turn waits on one interaction at a time: provider dynamic tools are
+    /// answered sequentially and local batches stop at the first parked call.
+    /// Parking while occupied therefore means an invariant broke. The slot is
+    /// never overwritten (that would silently drop a response channel or a
+    /// running task); the occupant keeps it, the error is logged in release
+    /// builds, and the rejected interaction is handed back for the caller to
+    /// tear down (`Editor::park_ai_turn` cancels it).
+    pub fn park(&mut self, parked: impl ParkedKind) -> Result<(), Box<ParkedTurn>> {
+        let parked = parked.into_parked();
+        if let Some(occupant) = &self.parked {
+            crate::log_error!(
+                "ai_chat",
+                "refusing to park {} while the turn is parked on {}",
+                parked.label(),
+                occupant.label()
+            );
+            return Err(Box::new(parked));
+        }
+        self.parked = Some(parked);
+        Ok(())
+    }
+
+    pub fn parked(&self) -> Option<&ParkedTurn> {
+        self.parked.as_ref()
+    }
+
+    pub fn take_parked(&mut self) -> Option<ParkedTurn> {
+        self.parked.take()
+    }
+
+    pub fn parked_as<T: ParkedKind>(&self) -> Option<&T> {
+        self.parked.as_ref().and_then(T::peek)
+    }
+
+    pub fn parked_as_mut<T: ParkedKind>(&mut self) -> Option<&mut T> {
+        self.parked.as_mut().and_then(T::peek_mut)
+    }
+
+    /// Take the parked interaction if it is a `T`; any other kind stays.
+    pub fn take_parked_as<T: ParkedKind>(&mut self) -> Option<T> {
+        self.parked_as::<T>()?;
+        self.parked.take().and_then(T::from_parked)
+    }
+
+    /// Stop tool work parked by a turn that is being replaced or torn down,
+    /// without answering it: the provider side is already gone or restarting.
+    /// A blocked walkthrough call stays parked with its walkthrough.
+    pub fn abandon_parked_tool(&mut self) {
+        match self.parked.take() {
+            Some(ParkedTurn::Shell(pending)) => {
+                // Aborting a started `spawn_blocking` task does not stop it; the
+                // command itself must be killed or it keeps mutating the
+                // workspace after the UI has moved on.
+                pending.kill.cancel();
+                pending.task.abort();
+                // Retire the transcript too, exactly as the user-cancel path
+                // does. Skipping this leaves the row rendering as `running` for
+                // the rest of the session and keeps its retained output out of
+                // the LRU, so eviction can never reclaim it.
+                self.retire_shell_transcript(
+                    &pending.tool_call.id,
+                    ShellTranscriptPhase::Interrupted,
+                );
+            }
+            Some(ParkedTurn::Background(pending)) => pending.task.abort(),
+            Some(ParkedTurn::SubagentControl(pending)) => pending.task.abort(),
+            Some(ParkedTurn::Approval(_) | ParkedTurn::Classifying(_)) | None => {}
+            Some(walkthrough @ ParkedTurn::CodeExplanation(_)) => self.parked = Some(walkthrough),
+        }
     }
 
     pub fn activity(&self) -> AiChatActivity {
+        let parked = self.parked.as_ref().map(|parked| match parked {
+            ParkedTurn::Approval(_) => AiChatActivity::WaitingToolApproval,
+            ParkedTurn::Classifying(_) => AiChatActivity::ClassifyingTool,
+            ParkedTurn::Shell(_) => AiChatActivity::RunningShell,
+            ParkedTurn::Background(_) | ParkedTurn::SubagentControl(_) => {
+                AiChatActivity::RunningExternalTool
+            }
+            ParkedTurn::CodeExplanation(_) => AiChatActivity::WaitingCodeExplanation,
+        });
+        let external_permission = self
+            .external_agent
+            .as_ref()
+            .is_some_and(|state| state.permission.is_some());
         // Blocking user decisions take precedence over the provider job that
         // may be intentionally retained behind them.
-        let blocker = self.turn_blocker();
-        if blocker == Some(AiTurnBlocker::ToolApproval) {
+        if external_permission || parked == Some(AiChatActivity::WaitingToolApproval) {
             AiChatActivity::WaitingToolApproval
         } else if self.pending_no_repo_folder_approval.is_some() {
             AiChatActivity::WaitingFolderApproval
-        } else if let Some(blocker) = blocker {
-            blocker.activity()
+        } else if let Some(parked) = parked {
+            parked
         } else if self
             .external_agent
             .as_ref()
@@ -981,14 +1104,10 @@ impl AiChatState {
             streaming_tool_calls: Vec::new(),
             streaming_provider_state: Vec::new(),
             tool_call_count: 0,
-            pending_tool_approval: None,
-            pending_auto_mode_classification: None,
-            pending_shell_execution: None,
+            parked: None,
             shell_transcripts: HashMap::new(),
             shell_transcript_lru: VecDeque::new(),
             shell_inspector: None,
-            pending_background_tool: None,
-            pending_subagent_control: None,
             pending_code_explanation: None,
             code_explanation_cache: VecDeque::new(),
             code_explanation_cache_bytes: 0,
