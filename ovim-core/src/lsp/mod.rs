@@ -20,6 +20,7 @@ pub mod logger;
 mod notifications;
 pub mod position;
 mod protocol;
+mod recovery;
 mod requests;
 mod server;
 mod supervisor;
@@ -31,6 +32,7 @@ pub use logger::{get_log_path, init_lsp_logging};
 pub use position::{char_col_to_utf16, utf16_to_char_col};
 
 pub use protocol::{JsonRpcMessage, RequestId};
+pub use recovery::{ServerStatusReport, MAX_AUTO_RESTARTS};
 pub use server::{LanguageServer, LanguageServerHealth};
 pub use supervisor::{RestartPolicy, TaskSupervisor};
 pub use trigger_chars::fallback_completion_trigger_characters;
@@ -251,6 +253,18 @@ pub struct LspManager {
 
     /// Maps server_id → root_path for root-based dedup
     server_roots: DashMap<String, std::path::PathBuf>,
+
+    /// How each live server was launched, for crash recovery.
+    server_specs: DashMap<String, recovery::ServerSpec>,
+
+    /// Restart bookkeeping per server id (see `recovery`).
+    restart_states: DashMap<String, recovery::RestartState>,
+
+    /// Crash/restart announcements waiting for the editor's status line.
+    lifecycle_events: std::sync::Mutex<Vec<String>>,
+
+    /// First crash-restart delay in milliseconds.
+    restart_base_backoff_ms: AtomicU64,
 }
 
 /// Builds a composite server ID for companion LSP servers.
@@ -300,6 +314,10 @@ impl LspManager {
             listener_handles: DashMap::new(),
             language_server_index: DashMap::new(),
             server_roots: DashMap::new(),
+            server_specs: DashMap::new(),
+            restart_states: DashMap::new(),
+            lifecycle_events: std::sync::Mutex::new(Vec::new()),
+            restart_base_backoff_ms: AtomicU64::new(500),
         }
     }
 
@@ -386,6 +404,7 @@ impl LspManager {
 
         let root_uri =
             uri_from_file_path(root_path).ok_or_else(|| anyhow::anyhow!("Invalid root path"))?;
+        let spawn_args = args.clone();
         let server = LanguageServer::spawn_initialized(language, command, args, root_uri).await?;
 
         // Insert into servers map
@@ -406,6 +425,16 @@ impl LspManager {
         // Track root path for this server
         self.server_roots
             .insert(server_id.clone(), root_path.to_path_buf());
+        self.record_server_spec(
+            &server_id,
+            recovery::ServerSpec {
+                language: language.to_string(),
+                command: command.to_string(),
+                args: spawn_args,
+                root: root_path.to_path_buf(),
+                companion: false,
+            },
+        );
 
         // Update reverse index (deduplicate for restart safety)
         let mut ids = self
@@ -453,6 +482,7 @@ impl LspManager {
         let language = server_id.split(':').next().unwrap_or(server_id);
         let root_uri =
             uri_from_file_path(root_path).ok_or_else(|| anyhow::anyhow!("Invalid root path"))?;
+        let spawn_args = args.clone();
         let server = LanguageServer::spawn_initialized(language, command, args, root_uri).await?;
 
         if let Some(mut existing) = self.servers.insert(server_id.to_string(), server) {
@@ -472,6 +502,16 @@ impl LspManager {
         // Track root path for this companion server
         self.server_roots
             .insert(server_id.to_string(), root_path.to_path_buf());
+        self.record_server_spec(
+            server_id,
+            recovery::ServerSpec {
+                language: language.to_string(),
+                command: command.to_string(),
+                args: spawn_args,
+                root: root_path.to_path_buf(),
+                companion: true,
+            },
+        );
 
         // Update reverse index (deduplicate for restart safety)
         let mut ids = self
@@ -575,15 +615,20 @@ impl LspManager {
             handle.abort();
         }
 
-        if let Some((_, mut server)) = self.servers.remove(language) {
-            server.shutdown().await?;
-        }
+        // A deliberate stop must not be "recovered" by the supervisor.
+        self.server_specs.remove(language);
+        self.restart_states.remove(language);
 
-        // The server process is gone: its recorded document baselines are
-        // meaningless. A replacement server gets fresh didOpen full text and
-        // re-records them (OV-00326).
-        self.server_texts
-            .retain(|(server_id, _), _| server_id != language);
+        let shutdown_result = match self.servers.remove(language) {
+            Some((_, mut server)) => server.shutdown().await,
+            None => Ok(()),
+        };
+
+        // The server process is gone: forget its document baselines,
+        // diagnostics and version claims so a replacement server gets fresh
+        // didOpen notifications (OV-00326). Documents still held by another
+        // server (companions) keep their claim.
+        self.forget_server_documents(language).await;
 
         // Clean up root tracking
         self.server_roots.remove(language);
@@ -599,38 +644,7 @@ impl LspManager {
             }
         }
 
-        // Clean up diagnostics from this server
-        {
-            let mut diags = self.diagnostics.lock().await;
-            for server_map in diags.values_mut() {
-                server_map.remove(language);
-            }
-        }
-        // Invalidate entire merge cache since we removed a server's diagnostics
-        {
-            let mut cache = self.merged_diagnostics_cache.lock().await;
-            cache.clear();
-        }
-        // Signal diagnostics changed so UI refreshes
-        self.diagnostics_changed.store(true, Ordering::SeqCst);
-
-        // Clear document version tracking so the restarted server gets fresh
-        // didOpen notifications. Without this, did_open() sees stale entries
-        // in document_versions and skips sending didOpen to the new server.
-        {
-            let mut versions = self.document_versions.lock().await;
-            versions.clear();
-        }
-        {
-            let mut sent = self.last_sent_versions.lock().await;
-            sent.clear();
-        }
-        {
-            let mut edits = self.last_local_edit.lock().await;
-            edits.clear();
-        }
-
-        Ok(())
+        shutdown_result
     }
 
     /// Merges diagnostics from all servers for a URI, deduplicating by range+message

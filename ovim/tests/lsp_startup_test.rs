@@ -272,3 +272,131 @@ async fn cancelled_startup_reaps_its_process_and_can_be_retried() {
     assert_eq!(session.events("initialize").len(), 2);
     session.stop().await;
 }
+
+#[cfg(unix)]
+fn sigkill(pid: i64) {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+    kill(Pid::from_raw(pid as i32), Signal::SIGKILL).unwrap();
+}
+
+#[cfg(unix)]
+impl StartupSession {
+    async fn wait_until(&mut self, what: &str, mut done: impl FnMut(&mut Self) -> bool) {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                self.tick().await;
+                if done(self) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "timed out waiting for {what}; status: {}",
+                self.test.editor.lsp_status()
+            )
+        });
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn killed_server_is_reaped_restarted_and_documents_reopened() {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let mut session = StartupSession::new();
+    session.ready();
+    let manager = session.test.editor.lsp_manager().unwrap();
+    manager.set_restart_base_backoff(Duration::from_millis(20));
+    let first_open = session.wait_for_event("textDocument/didOpen").await;
+    let pid = session.events("initialize")[0]["peerPid"].as_i64().unwrap();
+
+    sigkill(pid);
+    session
+        .wait_until("crash to be reported", |s| {
+            s.test.editor.lsp_status().contains("crashed")
+        })
+        .await;
+    let status = session.test.editor.lsp_status().to_string();
+    assert!(
+        status.contains("signal 9"),
+        "status should say why: {status}"
+    );
+    // A zombie still answers signal 0; a reaped process does not.
+    assert!(
+        kill(Pid::from_raw(pid as i32), None).is_err(),
+        "the killed server must be reaped, not left as a zombie"
+    );
+
+    session
+        .wait_until("second didOpen after restart", |s| {
+            s.events("textDocument/didOpen").len() >= 2
+        })
+        .await;
+    assert_eq!(session.events("initialize").len(), 2);
+    let reopened = session.events("textDocument/didOpen");
+    assert_eq!(
+        reopened[1]["params"]["textDocument"]["uri"],
+        first_open["params"]["textDocument"]["uri"]
+    );
+    assert_ne!(
+        reopened[1]["peerPid"].as_i64().unwrap(),
+        pid,
+        "didOpen must reach the replacement process"
+    );
+
+    // Explicit restart of a healthy server, through the ex command.
+    session.test.keys(":LspRestart<CR>");
+    session
+        .wait_until("third didOpen after :LspRestart", |s| {
+            s.events("textDocument/didOpen").len() >= 3
+        })
+        .await;
+    assert_eq!(session.events("initialize").len(), 3);
+    session.stop().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_attempts_are_bounded_until_lsp_restart() {
+    let mut session = StartupSession::new();
+    session.ready();
+    let manager = session.test.editor.lsp_manager().unwrap();
+    manager.set_restart_base_backoff(Duration::from_millis(5));
+    session.wait_for_event("textDocument/didOpen").await;
+    let pid = session.events("initialize")[0]["peerPid"].as_i64().unwrap();
+
+    // Every replacement fails its handshake.
+    session.initialize_response(json!({"error": {"code": -32603, "message": "boom"}}));
+    sigkill(pid);
+    session
+        .wait_until("giving up", |s| {
+            s.test.editor.lsp_status().contains("giving up")
+        })
+        .await;
+    let attempts = session.events("initialize").len();
+    assert_eq!(attempts, 1 + ovim::lsp::MAX_AUTO_RESTARTS as usize);
+    for _ in 0..30 {
+        session.tick().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        session.events("initialize").len(),
+        attempts,
+        "no further automatic restarts after giving up"
+    );
+
+    // :LspRestart resets the budget.
+    session.ready();
+    session.test.keys(":LspRestart<CR>");
+    session
+        .wait_until("manual restart", |s| {
+            s.events("initialize").len() > attempts
+        })
+        .await;
+    session.stop().await;
+}

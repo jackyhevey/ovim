@@ -65,6 +65,7 @@ fn classify_status_toast(status: &str) -> Option<StatusToast> {
 
     if lower.contains("timed out")
         || lower.contains("timeout")
+        || lower.contains("crashed")
         || lower.contains("cancelled")
         || lower.contains("canceled")
     {
@@ -1483,9 +1484,12 @@ impl Editor {
     /// Returns `true` if diagnostics changed and the UI should redraw.
     pub async fn sync_lsp_and_refresh_diagnostics(&mut self) -> bool {
         // Step 1: Push pending content to the server.
+        self.supervise_lsp_servers().await;
+        // Before streaming edits: a document a (re)started server has never
+        // seen must be opened first, never sent a bare didChange.
+        self.sync_open_documents().await;
         self.send_lsp_changes_if_modified().await;
         self.send_lsp_save_if_needed().await;
-        self.sync_open_documents().await;
 
         // Step 2: Now that the server is up-to-date, process diagnostics.
         let Some(lsp_manager) = self.lsp.state.lsp_manager.clone() else {
@@ -1799,6 +1803,23 @@ impl Editor {
         }
     }
 
+    /// Runs crash recovery for language servers and surfaces its
+    /// announcements ("crashed, restarting in 1s", "restarted", ...).
+    pub async fn supervise_lsp_servers(&mut self) {
+        let Some(lsp) = self.lsp.state.lsp_manager.clone() else {
+            return;
+        };
+        lsp.supervise_servers().await;
+        let events = lsp.take_lifecycle_events();
+        if events.is_empty() {
+            return;
+        }
+        for event in events {
+            self.set_lsp_status(event);
+        }
+        self.mark_dirty();
+    }
+
     /// Makes sure every document the user has open is known to its language
     /// server: the current buffer plus every buffer visible in another window
     /// or tab. Covers buffers opened before the server finished starting,
@@ -1837,6 +1858,22 @@ impl Editor {
             };
             if lsp.servers_for_document_uri(&language_id, &uri).is_empty() {
                 continue;
+            }
+
+            // The manager forgets a document's version when its server
+            // restarts; a "sent" document it no longer tracks was never
+            // opened on the replacement, so start its sync over.
+            if self
+                .lsp
+                .state
+                .document_sync
+                .get(&file_path)
+                .is_some_and(|state| state.did_open_sent)
+                && lsp.get_document_version(&uri).await == 0
+            {
+                self.lsp.state.document_sync.remove(&file_path);
+                self.lsp.slots.inlay_hints.invalidate();
+                self.lsp.slots.diagnostics.invalidate();
             }
 
             let state = self.lsp.state.document_sync.get(&file_path);

@@ -271,7 +271,55 @@ struct LanguageServerInner {
     cap_flags: AtomicU32,
 }
 
+/// Human-readable description of how a child process ended.
+fn describe_exit_status(status: std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            let name = nix::sys::signal::Signal::try_from(signal)
+                .map(|s| format!(" ({})", s.as_str()))
+                .unwrap_or_default();
+            return format!("killed by signal {signal}{name}");
+        }
+    }
+    match status.code() {
+        Some(code) => format!("exited with code {code}"),
+        None => "exited".to_string(),
+    }
+}
+
 impl LanguageServerInner {
+    /// Reaps the child process (killing it first if its output pipe closed
+    /// while it is somehow still running) and moves a live server to
+    /// `Failed` with the exit reason. No-op during a deliberate shutdown.
+    async fn mark_process_exited(&self) {
+        let child = self.process.lock().await.take();
+        let description = match child {
+            Some(mut child) => {
+                let waited = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
+                match waited {
+                    Ok(Ok(status)) => describe_exit_status(status),
+                    Ok(Err(error)) => format!("wait failed: {error}"),
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        let _ = child.wait().await;
+                        "closed its output and was killed".to_string()
+                    }
+                }
+            }
+            None => "exited".to_string(),
+        };
+        let mut state = self.state.lock().await;
+        if matches!(*state, ServerState::ShuttingDown | ServerState::Terminated) {
+            return;
+        }
+        *state = ServerState::Failed {
+            error: format!("LSP server process {description}"),
+            at: Instant::now(),
+        };
+    }
+
     /// Returns a log prefix with language and command context
     fn log_prefix(&self) -> String {
         format!("[LSP:{}:{}]", self.language, self.command)
@@ -554,11 +602,6 @@ impl LanguageServer {
                                 &inner_clone.log_prefix(),
                                 "Reader EOF: LSP server closed output (process likely exited)"
                             );
-                            let mut state = state_clone.lock().await;
-                            *state = ServerState::Failed {
-                                error: "LSP server process exited".to_string(),
-                                at: Instant::now(),
-                            };
                             got_eof = true;
                             break;
                         }
@@ -730,7 +773,10 @@ impl LanguageServer {
                     }
                 }
             }
-            // Reader task exiting silently
+            // The stdout pipe is gone (or the stream is unusable): the server
+            // is dead for our purposes. Reap the child so it never lingers as a
+            // zombie and record why, unless a deliberate shutdown is underway.
+            inner_clone.mark_process_exited().await;
         });
 
         // Spawn task to capture stderr and log it for debugging
@@ -774,7 +820,12 @@ impl LanguageServer {
             }
         } else {
             drop(process_guard);
-            return Err(anyhow!("Language server process handle is missing"));
+            // The reader task already saw the pipe close and reaped the child.
+            return Err(anyhow!(
+                "Language server process failed to start or exited immediately: {} {:?}",
+                command,
+                args
+            ));
         }
 
         Ok(server)
@@ -1415,6 +1466,22 @@ impl LanguageServer {
     /// 4. SIGTERM (if Unix, 3s wait)
     /// 5. SIGKILL (last resort)
     pub async fn shutdown(&mut self) -> Result<()> {
+        let result = self.shutdown_process().await;
+        // Always stop the supervised background tasks and record the final
+        // state, whichever exit path the process teardown took — a crashed or
+        // gracefully exited server used to leave its cleanup task running.
+        if let Err(e) = self.inner.supervisor.shutdown_all().await {
+            crate::lsp_error!(
+                &self.log_prefix(),
+                "Shutdown: Error shutting down tasks: {}",
+                e
+            );
+        }
+        self.transition_to(ServerState::Terminated).await;
+        result
+    }
+
+    async fn shutdown_process(&mut self) -> Result<()> {
         let prefix = self.log_prefix();
 
         // Transition to ShuttingDown state
@@ -1501,15 +1568,34 @@ impl LanguageServer {
             }
         }
 
-        // Shutdown all supervised tasks
-        if let Err(e) = self.inner.supervisor.shutdown_all().await {
-            crate::lsp_error!(&prefix, "Shutdown: Error shutting down tasks: {}", e);
-        }
-
-        // Final transition to Terminated
-        self.transition_to(ServerState::Terminated).await;
-
         Ok(())
+    }
+
+    /// Non-blocking `(state description, process alive)` for UI that runs on
+    /// the synchronous command path. Falls back to "Busy" when a lock is held.
+    pub fn status_snapshot(&self) -> (String, bool) {
+        let state = match self.inner.state.try_lock() {
+            Ok(state) => match &*state {
+                ServerState::Spawning => "Spawning".to_string(),
+                ServerState::Initializing { .. } => "Initializing".to_string(),
+                ServerState::Ready { .. } => "Ready".to_string(),
+                ServerState::Failed { error, .. } => format!("Failed: {error}"),
+                ServerState::ShuttingDown => "ShuttingDown".to_string(),
+                ServerState::Terminated => "Terminated".to_string(),
+            },
+            Err(_) => "Busy".to_string(),
+        };
+        let alive = self
+            .inner
+            .process
+            .try_lock()
+            .map(|mut process| {
+                process
+                    .as_mut()
+                    .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+            })
+            .unwrap_or(true);
+        (state, alive)
     }
 
     /// Gets health information for this language server

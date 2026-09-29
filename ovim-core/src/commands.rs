@@ -113,6 +113,21 @@ fn save_buffer(editor: &mut Editor, opts: SaveOpts<'_>) -> CommandResult {
 /// Vim semantics verified in `nvim --clean` (2026-08-14): every modified
 /// named buffer is written; a modified unnamed buffer reports
 /// "E141: No file name for buffer N" without stopping the other writes.
+/// `:LspRestart [server|language]` — restart language servers now, resetting
+/// their automatic-restart budget. Open documents are re-sent by the sync tick.
+fn restart_lsp_servers(editor: &mut Editor, target: Option<&str>) -> CommandResult {
+    let Some(lsp_manager) = editor.lsp_manager() else {
+        return err("LSP is not enabled");
+    };
+    match lsp_manager.request_restart(target) {
+        Ok(ids) => {
+            editor.set_lsp_status(format!("LSP: restarting {}...", ids.join(", ")));
+            ok_silent()
+        }
+        Err(message) => err(message),
+    }
+}
+
 fn write_all_buffers(editor: &mut Editor, force: bool) -> CommandResult {
     let (written, errors) = editor.write_all_modified_buffers(force);
     if !errors.is_empty() {
@@ -434,26 +449,44 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
             let mut info = String::new();
 
             if let Some(lsp_manager) = editor.lsp_manager() {
-                // Get active servers from lsp_manager (more reliable than editor's map)
-                let languages = lsp_manager.active_server_languages();
+                let reports = lsp_manager.server_status_reports();
 
-                if languages.is_empty() {
+                if reports.is_empty() {
                     info.push_str("No active LSP servers\n");
                     if !editor.lsp_status().is_empty() {
                         info.push_str(&format!("Status: {}\n", editor.lsp_status()));
                     }
                 } else {
                     info.push_str("Active LSP servers:\n\n");
-                    for lang_id in &languages {
-                        if let Some(cmd) = lsp_manager.server_command(lang_id) {
-                            // Extract just the binary name from the full path
-                            let binary_name = std::path::Path::new(&cmd)
-                                .file_name()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or(cmd);
-                            info.push_str(&format!("  {} -> {}\n", lang_id, binary_name));
-                        } else {
-                            info.push_str(&format!("  {}\n", lang_id));
+                    for report in &reports {
+                        // Extract just the binary name from the full path
+                        let binary_name = std::path::Path::new(&report.command)
+                            .file_name()
+                            .map(|s| s.to_string_lossy().to_string())
+                            .unwrap_or_else(|| report.command.clone());
+                        info.push_str(&format!(
+                            "  {} -> {}  [{}{}]\n",
+                            report.server_id,
+                            binary_name,
+                            report.state,
+                            if report.process_alive {
+                                ""
+                            } else {
+                                ", process not running"
+                            }
+                        ));
+                        if let Some(root) = &report.root {
+                            info.push_str(&format!("      root: {}\n", root.display()));
+                        }
+                        if report.total_restarts > 0 {
+                            info.push_str(&format!("      restarts: {}\n", report.total_restarts));
+                        }
+                        if report.gave_up {
+                            info.push_str(
+                                "      auto-restart gave up; run :LspRestart to try again\n",
+                            );
+                        } else if report.restarting {
+                            info.push_str("      restarting...\n");
                         }
                     }
 
@@ -470,6 +503,7 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
                     if let Some(file_path) = editor.buffer().file_path() {
                         info.push_str(&format!("\nCurrent file: {}\n", file_path));
                     }
+                    info.push_str("\nCommands: :LspRestart [server|language]\n");
                 }
             } else {
                 info.push_str("LSP is not enabled\n");
@@ -477,6 +511,11 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
 
             editor.open_scratch_buffer("LspInfo", &info);
             crate::command_result::ok_silent()
+        }
+        "LspRestart" => restart_lsp_servers(editor, None),
+        cmd if cmd.starts_with("LspRestart ") => {
+            let target = cmd.trim_start_matches("LspRestart ").trim();
+            restart_lsp_servers(editor, (!target.is_empty()).then_some(target))
         }
         "LspStatus" => {
             // Show detailed diagnostics list for current file

@@ -560,6 +560,7 @@ impl LspManager {
             ));
         }
 
+        let mut delivered = 0usize;
         let opened_text: Arc<str> = Arc::from(text.as_str());
         for sid in &server_ids {
             if let Some(server) = self
@@ -588,8 +589,19 @@ impl LspManager {
                     // baseline for future incremental diffs (OV-00326).
                     self.server_texts
                         .insert((sid.clone(), uri.clone()), opened_text.clone());
+                    delivered += 1;
                 }
             }
+        }
+
+        if delivered == 0 {
+            // Every server refused (dead, wedged, or gone): keeping the claim
+            // would make the document look open forever and mask the retry.
+            self.document_versions.lock().await.remove(&uri);
+            return Err(anyhow!(
+                "didOpen for {} was not delivered to any server",
+                uri.as_str()
+            ));
         }
 
         // Initialize version tracking (once, shared) — version was claimed above.
@@ -1749,12 +1761,12 @@ mod tests {
         let server = super::super::server::LanguageServer::spawn(
             "rust",
             "sh",
-            vec!["-c".to_string(), "exit 0".to_string()],
+            vec!["-c".to_string(), "sleep 0.3; exit 0".to_string()],
         )
         .await
         .expect("spawn short-lived server");
 
-        for _ in 0..100 {
+        for _ in 0..200 {
             if matches!(
                 server.state().await,
                 super::super::server::ServerState::Failed { .. }
