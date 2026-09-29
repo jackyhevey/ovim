@@ -383,6 +383,15 @@ impl DapManager {
         Ok(())
     }
 
+    /// The debuggee's threads.
+    pub async fn threads(&self) -> Result<Vec<DapThread>> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
+        client.threads().await
+    }
+
     /// What the stopped thread threw.
     pub async fn exception_info(&self, thread_id: u64) -> Result<DapExceptionInfo> {
         let client = self
@@ -488,6 +497,7 @@ impl DapManager {
                     description,
                 } => {
                     self.state.stopped_thread = *thread_id;
+                    self.state.event_thread = *thread_id;
                     self.state.stop_reason = Some(reason.clone());
                     self.state.exception = (reason == "exception")
                         .then(|| description.clone())
@@ -498,6 +508,8 @@ impl DapManager {
                 DapEvent::Continued { thread_id: _ } => {
                     self.state.is_running = true;
                     self.state.stopped_thread = None;
+                    self.state.event_thread = None;
+                    self.state.threads.clear();
                     self.state.stop_reason = None;
                     self.state.exception = None;
                     // Clear stale frame/variable data.

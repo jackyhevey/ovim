@@ -4055,6 +4055,8 @@ fn gui_debug_rows(editor: &Editor) -> Vec<GuiDebugRow> {
                 RowKind::Exception { enabled, .. } => {
                     ("exception", false, false, Some(*enabled), false)
                 }
+                // Listed as plain rows; switching threads is a TUI action.
+                RowKind::Thread { .. } => ("note", false, false, None, false),
             };
             Some(GuiDebugRow {
                 index,

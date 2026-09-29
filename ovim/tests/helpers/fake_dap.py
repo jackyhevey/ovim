@@ -9,6 +9,7 @@ argv[1] is a directory shared with the test:
       "on_configuration_done": list of DAP event/response bodies to emit
           each item: {"event": "output", "body": {...}, "delay": 0.1}
       "exception_filters": advertised exceptionBreakpointFilters
+      "threads": answer to threads; "frames_by_thread": {"<threadId>": [frame...]}
       "frames", "scopes": answers for stackTrace / scopes
       "variables": {"<variablesReference>": [variable, ...]}
       "exception_info": body answered to exceptionInfo (else it fails)
@@ -99,9 +100,11 @@ while True:
                 os._exit(item.get("code", 101))
             event(item["event"], item.get("body"))
     elif command == "threads":
-        respond(request, {"threads": [{"id": 1, "name": "main"}]})
+        respond(request, {"threads": scenario.get("threads", [{"id": 1, "name": "main"}])})
     elif command == "stackTrace":
-        respond(request, {"stackFrames": scenario.get("frames", [])})
+        by_thread = scenario.get("frames_by_thread", {})
+        thread = str(request["arguments"].get("threadId"))
+        respond(request, {"stackFrames": by_thread.get(thread, scenario.get("frames", []))})
     elif command == "scopes":
         respond(request, {"scopes": scenario.get("scopes", [])})
     elif command == "variables":

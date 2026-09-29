@@ -1874,3 +1874,68 @@ async fn function_keys_work_from_the_debug_panel_and_the_run_console() {
     d.inner.test.keys("q");
     d.inner.stop_lsp().await;
 }
+
+/// OV-00449: the panel lists the threads and Enter on one shows its stack.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_panel_lists_threads_and_switches_the_inspected_one() {
+    let mut d = stopped_session(|root| {
+        std::fs::write(root.join("Other.controlled"), "a\nb\nc\n").unwrap();
+        let mut scenario = stopped_scenario(root);
+        scenario["threads"] = json!([
+            {"id": 1, "name": "main"},
+            {"id": 2, "name": "worker-1"},
+            {"id": 3, "name": "Reference Handler"}
+        ]);
+        scenario["frames_by_thread"] = json!({
+            "2": [{"id": 7, "name": "runWorker", "line": 2, "column": 1,
+                   "source": {"name": "Other.controlled", "path": root.join("Other.controlled")}}]
+        });
+        scenario
+    })
+    .await;
+    d.inner
+        .until("the thread list", |s| {
+            panel_labels(s).contains(&"worker-1 (2)".to_string())
+        })
+        .await;
+    let labels = panel_labels(&d.inner);
+    assert!(labels.contains(&"main (1)".to_string()), "{labels:?}");
+    assert!(
+        !labels.iter().any(|l| l.contains("Reference Handler")),
+        "JVM housekeeping threads are hidden: {labels:?}"
+    );
+
+    d.inner.test.keys(" df");
+    for _ in 0..20 {
+        let cursor = d.inner.test.editor.debug_state().panel.cursor;
+        if d.inner.test.editor.debug_panel_rows()[cursor].label == "worker-1 (2)" {
+            break;
+        }
+        d.inner.test.keys("j");
+    }
+    d.inner.test.keys("<CR>");
+    d.inner
+        .until("the other thread's stack", |s| {
+            panel_labels(s).contains(&"runWorker Other.controlled:2".to_string())
+        })
+        .await;
+    assert_eq!(d.inner.test.editor.debug_state().stopped_thread, Some(2));
+    assert!(d
+        .inner
+        .test
+        .editor
+        .buffer()
+        .file_path()
+        .is_some_and(|p| p.ends_with("Other.controlled")));
+    // Stepping now steps the inspected thread.
+    d.inner.test.keys("n");
+    d.inner
+        .until("next on thread 2", |s| {
+            dap_requests(&s.root.join("dap"), "next")
+                .last()
+                .is_some_and(|r| r["arguments"]["threadId"] == 2)
+        })
+        .await;
+    d.inner.test.keys("q");
+    d.inner.stop_lsp().await;
+}

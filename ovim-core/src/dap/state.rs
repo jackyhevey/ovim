@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::types::{DapBreakpoint, DapScope, DapStackFrame, DapVariable};
+use super::types::{DapBreakpoint, DapScope, DapStackFrame, DapThread, DapVariable};
 
 /// Per-line breakpoint state.
 #[derive(Debug, Clone)]
@@ -65,6 +65,11 @@ pub struct DebugState {
     // ---- Stop state ----
     /// Thread that is currently stopped (if any).
     pub stopped_thread: Option<u64>,
+    /// The thread the adapter reported the stop on (`stopped_thread` is the
+    /// one being inspected, which the user can change).
+    pub event_thread: Option<u64>,
+    /// Threads of the debuggee as of the last stop.
+    pub threads: Vec<DapThread>,
     /// Reason for the stop (e.g., "breakpoint", "step", "exception").
     pub stop_reason: Option<String>,
     /// What was thrown (`Type: message`) when the stop reason is "exception".
@@ -125,6 +130,8 @@ impl DebugState {
             session_active: false,
             is_running: false,
             stopped_thread: None,
+            event_thread: None,
+            threads: Vec::new(),
             stop_reason: None,
             exception: None,
             breakpoints: HashMap::new(),
@@ -319,6 +326,8 @@ impl DebugState {
         self.session_active = false;
         self.is_running = false;
         self.stopped_thread = None;
+        self.event_thread = None;
+        self.threads.clear();
         self.stop_reason = None;
         self.exception = None;
         self.stack_frames.clear();

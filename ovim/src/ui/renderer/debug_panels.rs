@@ -148,6 +148,25 @@ fn row_line(row: &PanelRow, highlighted: bool, width: usize) -> Line<'static> {
                 ));
             }
         }
+        RowKind::Thread { selected, .. } => {
+            let style = if *selected {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                base
+            };
+            spans.push(Span::styled(
+                format!("{indent}{}{}", if *selected { "> " } else { "  " }, row.label),
+                style,
+            ));
+            if let Some(note) = &row.value {
+                spans.push(Span::styled(
+                    format!("  {note}"),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
         RowKind::Exception { enabled, .. } => {
             spans.push(Span::styled(
                 format!(

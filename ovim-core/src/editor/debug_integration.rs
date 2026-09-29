@@ -185,6 +185,17 @@ impl Editor {
         Ok(())
     }
 
+    /// Lists the debuggee's threads for the panel (best effort).
+    pub async fn debug_fetch_threads(&mut self) {
+        if let Ok(threads) = self.dap_manager.threads().await {
+            // Not if the debuggee resumed in the meantime.
+            if !self.dap_manager.state.is_running {
+                self.dap_manager.state.threads = threads;
+            }
+        }
+        self.mark_dirty();
+    }
+
     /// When the debuggee stopped on an exception: ask the adapter what was
     /// thrown and show it in the panel, the status line and the console.
     /// The stop event's own description is the fallback.
@@ -192,7 +203,10 @@ impl Editor {
         if self.dap_manager.state.stop_reason.as_deref() != Some("exception") {
             return;
         }
-        let thread_id = self.dap_manager.state.stopped_thread.unwrap_or(1);
+        let thread_id = self.dap_manager.state.event_thread.unwrap_or(1);
+        if self.dap_manager.state.stopped_thread.unwrap_or(thread_id) != thread_id {
+            return;
+        }
         let summary = match self.dap_manager.exception_info(thread_id).await {
             Ok(info) => Some(info.summary()),
             Err(_) => self.dap_manager.state.exception.clone(),
@@ -379,8 +393,24 @@ impl Editor {
             RowKind::Exception { index, .. } => {
                 self.toggle_exception_filter_at(index);
             }
+            RowKind::Thread { id, .. } => self.select_debug_thread(id),
             RowKind::Header | RowKind::Note => {}
         }
+        self.mark_dirty();
+    }
+
+    /// Inspects another thread: its stack and variables replace the shown ones.
+    pub fn select_debug_thread(&mut self, id: u64) {
+        let state = &mut self.dap_manager.state;
+        if state.is_running || state.stopped_thread == Some(id) {
+            return;
+        }
+        state.stopped_thread = Some(id);
+        state.stack_frames.clear();
+        state.scopes.clear();
+        state.variables.clear();
+        state.clear_watch_values();
+        self.dap_manager.pending_action = Some(crate::dap::PendingDebugAction::FetchState);
         self.mark_dirty();
     }
 
