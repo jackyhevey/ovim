@@ -178,11 +178,16 @@ impl Editor {
                 | 'E'
                 | 'j'
                 | 'k'
+                | 'r'
+                | 'm'
+                | 'x'
+                | 'X'
         ) {
             return false;
         }
         self.ensure_folds();
         let line = self.buffer().cursor().line();
+        let count = self.effective_count();
         let manager = self.buffer_mut().fold_manager_mut();
         match key {
             'o' => {
@@ -211,6 +216,20 @@ impl Editor {
             'v' => {
                 manager.reveal(line);
             }
+            'r' => manager.reduce_folding(count),
+            'm' => {
+                manager.set_enabled(true);
+                manager.fold_more(count);
+            }
+            'x' => {
+                manager.set_enabled(true);
+                manager.reapply_foldlevel();
+                manager.reveal(line);
+            }
+            'X' => {
+                manager.set_enabled(true);
+                manager.reapply_foldlevel();
+            }
             'n' => manager.set_enabled(false),
             'N' => manager.set_enabled(true),
             'i' => {
@@ -237,15 +256,25 @@ impl Editor {
         true
     }
 
-    /// `[z` / `]z`: start / end of the open fold containing the cursor.
+    /// `[z` / `]z`: start / end of the open fold containing the cursor; when
+    /// already there, of the fold around it. `count` repeats. Fails (stays)
+    /// when there is no such fold.
     pub fn fold_edge_motion(&mut self, to_end: bool) {
         self.ensure_folds();
-        let line = self.buffer().cursor().line();
-        if let Some((start, end)) = self.buffer().fold_manager().innermost_open_fold(line) {
-            let target = if to_end { end } else { start };
-            if target != line {
-                self.move_cursor_to_line_keeping_column(target);
+        let count = self.effective_count();
+        let mut line = self.buffer().cursor().line();
+        for _ in 0..count {
+            match self.buffer().fold_manager().fold_edge_target(line, to_end) {
+                Some(target) => line = target,
+                None => break,
             }
+        }
+        if line != self.buffer().cursor().line() {
+            // Vim lands in the first column.
+            self.buffer_mut()
+                .cursor_mut()
+                .set_position(line, GraphemeCol(0));
+            self.buffer_mut().validate_cursor_position();
         }
         self.clear_count();
         self.after_fold_change();
@@ -317,8 +346,16 @@ impl Editor {
                 }
             }
             Some((start, _)) if line == start && line == prev_line && col != prev_col => {
-                // Horizontal movement on a closed header opens it (`l`, `$`, ...).
-                if !insert_like {
+                // Horizontal movement on a closed header opens it (`l`, `$`,
+                // ...), except while selecting: a Visual selection keeps the
+                // fold closed and covers all of it (`v$d` in Vim).
+                let selecting = matches!(
+                    self.mode(),
+                    crate::mode::Mode::Visual
+                        | crate::mode::Mode::VisualLine
+                        | crate::mode::Mode::VisualBlock
+                );
+                if !insert_like && !selecting {
                     self.buffer_mut().fold_manager_mut().open_one(line);
                 }
             }
@@ -421,5 +458,65 @@ impl Editor {
             .closed_fold_at(last_visible)
             .map_or(last_visible, |(_, end)| end);
         end - start + 1
+    }
+
+    /// The closed fold whose header is the cursor line, as `(start, end)`.
+    /// Vim treats characterwise commands there (`x`, `D`, `C`, `s`, `dl`,
+    /// `cl`) as acting on the whole fold.
+    pub(crate) fn closed_fold_at_cursor(&self) -> Option<(usize, usize)> {
+        let line = self.buffer().cursor().line();
+        self.buffer()
+            .fold_manager()
+            .closed_fold_at(line)
+            .filter(|(start, _)| *start == line)
+    }
+
+    /// `count` for a `{op}j`-style command that must cover `count` visible
+    /// lines below the cursor line plus everything a closed fold hides:
+    /// returns the `count` that yields the same line span when applied as
+    /// "cursor line and `count` lines below" (Vim's `dj` over closed folds).
+    pub(crate) fn down_count_over_folds(&self, count: usize) -> usize {
+        let manager = self.buffer().fold_manager();
+        if manager.hidden_ranges().is_empty() {
+            return count;
+        }
+        let start = self.buffer().cursor().line();
+        let max_line = self.buffer().line_count().saturating_sub(1);
+        let last_visible = manager.step_down(start, count, max_line);
+        let end = manager
+            .closed_fold_at(last_visible)
+            .map_or(last_visible, |(_, end)| end);
+        end - start
+    }
+
+    /// `o` / linewise `p` on a closed fold act below the fold's last line.
+    pub(crate) fn cursor_to_closed_fold_end(&mut self) {
+        if let Some((_, end)) = self.closed_fold_at_cursor() {
+            self.buffer_mut()
+                .cursor_mut()
+                .set_position(end, GraphemeCol(0));
+            self.buffer_mut().validate_cursor_position();
+        }
+    }
+
+    /// Extends a selection over closed folds at either end (Vim does this
+    /// when a Visual selection or a motion starts or ends inside one).
+    /// `end_col_past_line` is the column just past the last character.
+    pub(crate) fn extend_selection_over_folds(
+        &self,
+        start: (usize, usize),
+        end: (usize, usize),
+        end_col: impl Fn(usize) -> usize,
+    ) -> ((usize, usize), (usize, usize)) {
+        let manager = self.buffer().fold_manager();
+        let start = match manager.closed_fold_at(start.0) {
+            Some((fold_start, _)) => (fold_start, 0),
+            None => start,
+        };
+        let end = match manager.closed_fold_at(end.0) {
+            Some((_, fold_end)) => (fold_end, end_col(fold_end)),
+            None => end,
+        };
+        (start, end)
     }
 }

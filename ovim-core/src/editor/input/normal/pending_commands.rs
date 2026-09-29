@@ -551,6 +551,8 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             editor.goto_conflict(false);
             editor.clear_count();
         }
+        ('[', KeyCode::Char('z')) => editor.fold_edge_motion(false),
+        (']', KeyCode::Char('z')) => editor.fold_edge_motion(true),
         ('[', KeyCode::Char('f')) => {
             // [f - previous file in the diff review
             editor.diff_review_goto_file(false);

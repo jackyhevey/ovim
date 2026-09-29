@@ -116,6 +116,11 @@ pub struct FoldManager {
     /// The automatic folds came from the language server (not the indentation
     /// fallback).
     lsp_backed: bool,
+    /// Vim's `foldlevel`: folds nested deeper than this are closed, the others
+    /// open. `None` is "everything open" (a fresh buffer): it counts as the
+    /// deepest nesting, so the first `zm` is useful (Vim under
+    /// `foldlevelstart=99` needs ~99 `zm` before anything happens).
+    foldlevel: Option<usize>,
 }
 
 impl FoldManager {
@@ -128,6 +133,7 @@ impl FoldManager {
             auto_version: None,
             active: false,
             lsp_backed: false,
+            foldlevel: None,
         }
     }
 
@@ -436,18 +442,75 @@ impl FoldManager {
         self.toggle_one(line);
     }
 
-    /// `zR`
-    pub fn open_all(&mut self) {
-        for fold in &mut self.folds {
-            fold.open();
+    /// Nesting level (1 = outermost) of every fold, in `folds` order.
+    fn nesting_levels(&self) -> Vec<usize> {
+        let mut ends: Vec<usize> = Vec::new();
+        self.folds
+            .iter()
+            .map(|fold| {
+                while ends.last().is_some_and(|&end| end < fold.start_line) {
+                    ends.pop();
+                }
+                ends.push(fold.end_line);
+                ends.len()
+            })
+            .collect()
+    }
+
+    /// Depth of the deepest fold nesting (`getDeepestNesting`).
+    pub fn deepest_nesting(&self) -> usize {
+        self.nesting_levels().into_iter().max().unwrap_or(0)
+    }
+
+    /// Vim's `foldlevel`.
+    pub fn foldlevel(&self) -> usize {
+        self.foldlevel.unwrap_or_else(|| self.deepest_nesting())
+    }
+
+    /// Forgets every manual open/close: folds deeper than `foldlevel` are
+    /// closed, the rest open (what changing 'foldlevel' does in Vim).
+    fn apply_foldlevel(&mut self) {
+        let level = self.foldlevel();
+        let levels = self.nesting_levels();
+        for (fold, depth) in self.folds.iter_mut().zip(levels) {
+            fold.open = depth <= level;
         }
     }
 
-    /// `zM`
+    /// `zR`: opens everything and sets `foldlevel` to the deepest nesting.
+    pub fn open_all(&mut self) {
+        self.foldlevel = Some(self.deepest_nesting());
+        self.apply_foldlevel();
+    }
+
+    /// `zM`: closes everything (`foldlevel` 0).
     pub fn close_all(&mut self) {
-        for fold in &mut self.folds {
-            fold.close();
+        self.foldlevel = Some(0);
+        self.apply_foldlevel();
+    }
+
+    /// `zr`: reduce folding, `foldlevel` += `count` (at most the deepest
+    /// nesting).
+    pub fn reduce_folding(&mut self, count: usize) {
+        let deepest = self.deepest_nesting();
+        self.foldlevel = Some((self.foldlevel() + count).min(deepest));
+        self.apply_foldlevel();
+    }
+
+    /// `zm`: fold more, `foldlevel` -= `count`. Like Vim, nothing happens
+    /// when `foldlevel` is already 0.
+    pub fn fold_more(&mut self, count: usize) {
+        let level = self.foldlevel();
+        if level > 0 {
+            self.foldlevel = Some(level.saturating_sub(count));
         }
+        self.apply_foldlevel();
+    }
+
+    /// `zX` (and the first half of `zx`): re-apply `foldlevel`, undoing
+    /// every manual `zo`/`zc`.
+    pub fn reapply_foldlevel(&mut self) {
+        self.apply_foldlevel();
     }
 
     // ----- deleting ----------------------------------------------------------
@@ -494,13 +557,27 @@ impl FoldManager {
             .max()
     }
 
-    /// `[z` / `]z`: the innermost open fold containing `line`.
-    pub fn innermost_open_fold(&self, line: usize) -> Option<(usize, usize)> {
-        self.chain(line)
-            .into_iter()
-            .map(|index| &self.folds[index])
-            .rfind(|f| f.is_open())
-            .map(|f| (f.start_line, f.end_line))
+    /// `[z` / `]z`: line the motion lands on. Only *open* folds count (the
+    /// chain of open folds around `line`, outermost first, ends at the first
+    /// closed one). `[z` goes to the start of the innermost fold that starts
+    /// above `line`, `]z` to the end of the innermost fold that ends below it;
+    /// `None` when there is none (the motion fails).
+    pub fn fold_edge_target(&self, line: usize, to_end: bool) -> Option<usize> {
+        let mut open_chain: Vec<&Fold> = Vec::new();
+        for index in self.chain(line) {
+            let fold = &self.folds[index];
+            if !fold.is_open() {
+                break;
+            }
+            open_chain.push(fold);
+        }
+        open_chain.iter().rev().find_map(|fold| {
+            if to_end {
+                (fold.end_line > line).then_some(fold.end_line)
+            } else {
+                (fold.start_line < line).then_some(fold.start_line)
+            }
+        })
     }
 
     // ----- automatic folds -----------------------------------------------------
@@ -533,6 +610,7 @@ impl FoldManager {
         incoming.dedup();
 
         let mut accepted: Vec<Fold> = Vec::new();
+        let mut fresh_starts: Vec<usize> = Vec::new();
         for (start, end) in incoming {
             let candidate = Fold::auto(start, end, true);
             let crosses = accepted.iter().chain(self.folds.iter()).any(|f| {
@@ -545,12 +623,24 @@ impl FoldManager {
                 .iter()
                 .find(|f| f.start_line == start && f.end_line == end)
                 .or_else(|| previous.iter().find(|f| f.start_line == start))
-                .map(|f| f.open)
-                .unwrap_or(true);
-            accepted.push(Fold::auto(start, end, open));
+                .map(|f| f.open);
+            accepted.push(Fold::auto(start, end, open.unwrap_or(true)));
+            if open.is_none() {
+                fresh_starts.push(start);
+            }
         }
         self.folds.extend(accepted);
         self.sort();
+        // A fold nobody has opened or closed follows `foldlevel`.
+        if self.foldlevel.is_some() {
+            let level = self.foldlevel();
+            let levels = self.nesting_levels();
+            for (fold, depth) in self.folds.iter_mut().zip(levels) {
+                if fold.origin == FoldOrigin::Auto && fresh_starts.contains(&fold.start_line) {
+                    fold.open = depth <= level;
+                }
+            }
+        }
         self.synced_line_count = line_count;
         self.auto_version = Some(buffer_version);
     }
@@ -689,6 +779,111 @@ mod tests {
         assert_eq!(m.hidden_ranges(), vec![(1, 9)]);
         m.open_all();
         assert!(m.hidden_ranges().is_empty());
+    }
+
+    /// The structure of the `nvim` experiments below (tabs as indentation):
+    /// 0 a / 1 b / 2 c / 3 d / 4 d2 / 5 c2 / 6 b2 / 7 e / 8 f / 9 a2, which
+    /// gives folds (0,8) L1, (1,5) L2, (2,4) L3, (6,8) L2, (7,8) L3.
+    fn three_levels() -> FoldManager {
+        let mut m = FoldManager::new();
+        m.set_auto_folds(&[(0, 8), (1, 5), (2, 4), (6, 8), (7, 8)], 10, 1, false);
+        m
+    }
+
+    /// `nvim -u NONE` with `foldmethod=indent`, same nesting: after `zM`,
+    /// `zr` opens one level at a time (`foldclosed()` per level), `2zr` from
+    /// 1 reaches the deepest, `zr` at the deepest changes nothing and `zm`
+    /// closes the deepest level first.
+    #[test]
+    fn zr_and_zm_walk_the_fold_levels_like_vim() {
+        let mut m = three_levels();
+        assert_eq!(m.deepest_nesting(), 3);
+        m.close_all();
+        assert_eq!(m.foldlevel(), 0);
+        assert_eq!(m.hidden_ranges(), vec![(1, 8)]);
+        m.reduce_folding(1);
+        assert_eq!(m.foldlevel(), 1);
+        assert_eq!(m.hidden_ranges(), vec![(2, 5), (7, 8)], "L2 folds closed");
+        m.reduce_folding(1);
+        assert_eq!(m.hidden_ranges(), vec![(3, 4), (8, 8)], "only L3 closed");
+        m.reduce_folding(5);
+        assert_eq!(m.foldlevel(), 3, "zr stops at the deepest nesting");
+        assert!(m.hidden_ranges().is_empty());
+        m.fold_more(1);
+        assert_eq!(m.hidden_ranges(), vec![(3, 4), (8, 8)]);
+        m.fold_more(9);
+        assert_eq!(m.foldlevel(), 0);
+        m.fold_more(1);
+        assert_eq!(m.foldlevel(), 0, "zm at foldlevel 0 does nothing");
+    }
+
+    /// A buffer that never used a fold level starts fully open with the
+    /// deepest nesting as its level: the first `zm` closes the deepest folds
+    /// (divergence from Vim, where `foldlevel=99` makes ~96 `zm` invisible).
+    #[test]
+    fn a_fresh_buffer_counts_as_fully_open_for_zm() {
+        let mut m = three_levels();
+        assert_eq!(m.foldlevel(), 3);
+        m.fold_more(1);
+        assert_eq!(m.hidden_ranges(), vec![(3, 4), (8, 8)]);
+    }
+
+    /// `nvim`: `zM`, cursor on a line in the nested fold, `zo` then `zx`
+    /// re-applies foldlevel 0 (manual `zo` forgotten) and reveals the cursor
+    /// line; `zX` re-applies without revealing.
+    #[test]
+    fn zx_forgets_manual_state_then_reveals_the_cursor_line() {
+        let mut m = three_levels();
+        m.close_all();
+        m.open_one(3);
+        assert!(!m.is_line_hidden(1));
+        m.reapply_foldlevel();
+        assert_eq!(m.hidden_ranges(), vec![(1, 8)], "zX: all closed again");
+        m.reveal(3);
+        assert!(!m.is_line_hidden(3));
+        assert!(m.is_line_hidden(8), "unrelated fold (7,8) stays closed");
+    }
+
+    /// A fold that appears after a recompute follows the current foldlevel.
+    #[test]
+    fn new_folds_follow_the_foldlevel() {
+        let mut m = FoldManager::new();
+        m.set_auto_folds(&[(0, 4), (1, 3)], 10, 1, false);
+        m.close_all();
+        m.set_auto_folds(&[(0, 4), (1, 3), (6, 9)], 10, 2, false);
+        assert_eq!(m.hidden_ranges(), vec![(1, 4), (7, 9)]);
+    }
+
+    /// `nvim`, folds 2-9 / 3-6 / 4-5 / 8-9 (1-based, all open): `[z` from 3 is
+    /// 2, from 4 is 3, from 5 is 4, from 6 is 3, from 8 is 2 (already at the
+    /// start: the enclosing fold), from 2 stays (no enclosing fold); `]z` from
+    /// 4 is 5, from 5 is 6, from 6 is 9, from 9 stays; a closed fold ends the
+    /// chain: with 4-5 closed, `[z` on 4 is 3 and with everything closed it
+    /// fails.
+    #[test]
+    fn fold_edge_motions_match_vim() {
+        let mut m = FoldManager::new();
+        // 0-based versions of the 1-based folds above.
+        m.set_auto_folds(&[(1, 8), (2, 5), (3, 4), (7, 8)], 10, 1, false);
+        let start = |m: &FoldManager, line1: usize| m.fold_edge_target(line1 - 1, false);
+        let end = |m: &FoldManager, line1: usize| m.fold_edge_target(line1 - 1, true);
+        assert_eq!(start(&m, 3), Some(1));
+        assert_eq!(start(&m, 4), Some(2));
+        assert_eq!(start(&m, 5), Some(3));
+        assert_eq!(start(&m, 6), Some(2));
+        assert_eq!(start(&m, 8), Some(1));
+        assert_eq!(start(&m, 2), None);
+        assert_eq!(start(&m, 1), None);
+        assert_eq!(end(&m, 4), Some(4));
+        assert_eq!(end(&m, 5), Some(5));
+        assert_eq!(end(&m, 6), Some(8));
+        assert_eq!(end(&m, 9), None);
+        m.close_one(3); // closes the innermost open fold (4-5) at line 4
+        assert_eq!(start(&m, 4), Some(2));
+        assert_eq!(end(&m, 4), Some(5));
+        m.close_all();
+        assert_eq!(start(&m, 4), None);
+        assert_eq!(end(&m, 4), None);
     }
 
     #[test]

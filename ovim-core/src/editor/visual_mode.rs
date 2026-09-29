@@ -146,6 +146,29 @@ impl Editor {
     /// Returns ((start_line, start_col), (end_line, end_col))
     /// Note: For VisualBlock, this returns the corners of the rectangle
     pub fn visual_selection(&self) -> Option<((usize, usize), (usize, usize))> {
+        let (start, end) = self.raw_visual_selection()?;
+        if self.mode == Mode::VisualBlock || self.buffer().fold_manager().is_empty() {
+            return Some((start, end));
+        }
+        // A selection that starts or ends inside a closed fold covers the
+        // whole fold (Vim, `:help fold-behavior`). A characterwise end lands
+        // on the newline cell so the fold's last line goes entirely.
+        let linewise = self.mode == Mode::VisualLine;
+        Some(self.extend_selection_over_folds(start, end, |line| {
+            let len = self
+                .buffer()
+                .line_text(line)
+                .map(|text| grapheme_count(&text))
+                .unwrap_or(0);
+            if linewise {
+                len.saturating_sub(1)
+            } else {
+                len
+            }
+        }))
+    }
+
+    fn raw_visual_selection(&self) -> Option<((usize, usize), (usize, usize))> {
         self.visual.visual_start.map(|start| {
             let cursor = self.buffer().cursor();
             let mut end = (cursor.line(), cursor.col().0);

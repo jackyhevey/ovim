@@ -154,3 +154,201 @@ fn lsp_folding_ranges_replace_indentation_folds_and_keep_state() {
         &[range(0, 1)]
     ));
 }
+
+// ---------------------------------------------------------------------------
+// Commands on a closed fold (`2Gzf3j`: lines 2-5 folded). Every expectation
+// below was produced by `nvim --headless -u NONE` on the same ten lines with
+// `shiftwidth=2 expandtab` (OV-00473): a linewise command, a characterwise
+// command on the fold header, and a Visual selection reaching into a closed
+// fold all cover the WHOLE fold.
+// ---------------------------------------------------------------------------
+
+fn folded(keys: &str) -> Vec<String> {
+    let mut test = ten_lines();
+    test.editor.options.shift_width = 2;
+    test.editor.options.tab_width = 2;
+    test.editor.options.expand_tab = true;
+    test.keys("2Gzf3j");
+    test.keys(keys);
+    test.buffer_content().lines().map(String::from).collect()
+}
+
+fn lines(spec: &str) -> Vec<String> {
+    spec.split('|').map(String::from).collect()
+}
+
+#[test]
+fn shift_operators_cover_the_whole_closed_fold() {
+    // vim: `>>` on the header shifts lines 2-5.
+    assert_eq!(
+        folded(">>"),
+        lines("line 1|  line 2|  line 3|  line 4|  line 5|line 6|line 7|line 8|line 9|line 10")
+    );
+    // vim: `V>` too.
+    assert_eq!(
+        folded("V>"),
+        lines("line 1|  line 2|  line 3|  line 4|  line 5|line 6|line 7|line 8|line 9|line 10")
+    );
+    // vim: `>j` from the header covers fold + the next visible line.
+    assert_eq!(
+        folded(">j"),
+        lines("line 1|  line 2|  line 3|  line 4|  line 5|  line 6|line 7|line 8|line 9|line 10")
+    );
+}
+
+#[test]
+fn case_and_yank_operators_cover_the_whole_closed_fold() {
+    // vim: `gUU`.
+    assert_eq!(
+        folded("gUU"),
+        lines("line 1|LINE 2|LINE 3|LINE 4|LINE 5|line 6|line 7|line 8|line 9|line 10")
+    );
+    // vim: `yyP` yanks all four lines.
+    assert_eq!(
+        folded("yyP"),
+        lines("line 1|line 2|line 3|line 4|line 5|line 2|line 3|line 4|line 5|line 6|line 7|line 8|line 9|line 10")
+    );
+    // vim: `yyp` pastes below the fold, not inside it.
+    assert_eq!(
+        folded("yyp"),
+        lines("line 1|line 2|line 3|line 4|line 5|line 2|line 3|line 4|line 5|line 6|line 7|line 8|line 9|line 10")
+    );
+}
+
+#[test]
+fn change_commands_replace_the_whole_closed_fold_with_one_line() {
+    let expected = lines("line 1|X|line 6|line 7|line 8|line 9|line 10");
+    for keys in [
+        "ccX<Esc>", "CX<Esc>", "SX<Esc>", "VcX<Esc>", "clX<Esc>", "sX<Esc>",
+    ] {
+        assert_eq!(folded(keys), expected, "{keys}");
+    }
+    // vim: `cj` covers the fold and the next visible line.
+    assert_eq!(
+        folded("cjX<Esc>"),
+        lines("line 1|X|line 7|line 8|line 9|line 10")
+    );
+}
+
+#[test]
+fn deleting_characterwise_on_a_closed_fold_deletes_the_fold() {
+    let expected = lines("line 1|line 6|line 7|line 8|line 9|line 10");
+    for keys in ["x", "dl", "D", "d$", "Vd", "vd", "v$d"] {
+        assert_eq!(folded(keys), expected, "{keys}");
+    }
+    assert_eq!(
+        folded("dj"),
+        lines("line 1|line 7|line 8|line 9|line 10"),
+        "vim: dj covers fold + next line"
+    );
+    assert_eq!(folded("Vjd"), lines("line 1|line 7|line 8|line 9|line 10"));
+    // vim: `vjd` starts at the fold's first column and ends on line 6's
+    // first character (inclusive).
+    assert_eq!(
+        folded("vjd"),
+        lines("line 1|ine 6|line 7|line 8|line 9|line 10")
+    );
+}
+
+#[test]
+fn open_line_and_commands_that_are_not_fold_aware_in_vim() {
+    // vim: `o` opens the line below the whole fold.
+    assert_eq!(
+        folded("oX<Esc>"),
+        lines("line 1|line 2|line 3|line 4|line 5|X|line 6|line 7|line 8|line 9|line 10")
+    );
+    // vim: `O` opens above the header.
+    assert_eq!(
+        folded("OX<Esc>"),
+        lines("line 1|X|line 2|line 3|line 4|line 5|line 6|line 7|line 8|line 9|line 10")
+    );
+    // vim: `J` joins only the header line and the next physical line.
+    assert_eq!(
+        folded("J"),
+        lines("line 1|line 2 line 3|line 4|line 5|line 6|line 7|line 8|line 9|line 10")
+    );
+    // vim: `~` and `r` touch the header character only.
+    assert_eq!(
+        folded("~"),
+        lines("line 1|Line 2|line 3|line 4|line 5|line 6|line 7|line 8|line 9|line 10")
+    );
+    assert_eq!(
+        folded("rx"),
+        lines("line 1|xine 2|line 3|line 4|line 5|line 6|line 7|line 8|line 9|line 10")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// zr / zm / zx / zX and [z ]z (OV-00473), expectations from nvim.
+// ---------------------------------------------------------------------------
+
+/// 0 a / 1 b / 2 c / 3 d / 4 d2 / 5 c2 / 6 b2 / 7 e / 8 f / 9 a2 with
+/// tab indentation: three nesting levels.
+fn nested() -> EditorTest {
+    let mut test =
+        EditorTest::new("a\n\tb\n\t\tc\n\t\t\td\n\t\t\td2\n\t\tc2\n\tb2\n\t\te\n\t\t\tf\na2\n");
+    test.editor.options.tab_width = 8;
+    test
+}
+
+#[test]
+fn zm_and_zr_change_the_fold_level_one_step_at_a_time() {
+    let mut test = nested();
+    test.keys("zM");
+    assert_eq!(hidden(&test), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+    test.keys("zr");
+    // foldlevel 1: only the outermost fold is open.
+    assert_eq!(hidden(&test), vec![2, 3, 4, 5, 7, 8]);
+    test.keys("zr");
+    assert_eq!(hidden(&test), vec![3, 4, 8]);
+    test.keys("zr");
+    assert!(hidden(&test).is_empty());
+    test.keys("zm");
+    assert_eq!(hidden(&test), vec![3, 4, 8], "zm closes the deepest level");
+    test.keys("2zm");
+    assert_eq!(hidden(&test), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[test]
+fn zx_reapplies_the_fold_level_and_reveals_the_cursor_line() {
+    let mut test = nested();
+    test.keys("zM");
+    test.keys("4Gzo");
+    assert!(!hidden(&test).is_empty());
+    // vim: zx forgets the manual zo, then opens what hides line 4.
+    test.keys("zx");
+    assert!(!test.editor.buffer().is_line_folded(3), "cursor line shown");
+    assert!(
+        test.editor.buffer().is_line_folded(8),
+        "unrelated fold closed"
+    );
+    test.keys("zX");
+    assert_eq!(hidden(&test), vec![1, 2, 3, 4, 5, 6, 7, 8]);
+}
+
+#[test]
+fn bracket_z_moves_to_the_edges_of_the_open_fold() {
+    // nvim: [z from `c` (3rd line) goes to the enclosing fold's start; from
+    // the fold start it goes to the fold around it; ]z mirrors that; counts
+    // repeat; the cursor lands in the first column.
+    let mut test = nested();
+    test.keys("zR");
+    // (ovim folds start at the header line, so the line numbers are those of
+    // its own fold ranges: (0,8) (1,5) (2,4) (6,8) (7,8), 0-based.)
+    test.keys("5G[z");
+    test.assert_cursor(2, 0);
+    test.keys("[z");
+    test.assert_cursor(1, 0);
+    test.keys("[z");
+    test.assert_cursor(0, 0);
+    test.keys("[z");
+    test.assert_cursor(0, 0); // no enclosing fold: stays
+    test.keys("4G]z");
+    test.assert_cursor(4, 0);
+    test.keys("]z");
+    test.assert_cursor(5, 0);
+    test.keys("4G2]z");
+    test.assert_cursor(5, 0);
+    test.keys("5G3[z");
+    test.assert_cursor(0, 0);
+}

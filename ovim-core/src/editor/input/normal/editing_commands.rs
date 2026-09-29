@@ -49,6 +49,10 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // p - paste after cursor
         KeyCode::Char('p') => {
             let count = editor.effective_count();
+            if editor.get_from_register_with_type().1 == RegisterType::Line {
+                // A linewise paste lands below a closed fold, not inside it.
+                editor.cursor_to_closed_fold_end();
+            }
             helpers::paste_after(editor, count)?;
             editor.clear_count();
             Ok(true)
@@ -102,6 +106,19 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
 /// x - delete character(s) under cursor
 fn delete_char_forward(editor: &mut Editor) -> Result<()> {
     let count = editor.effective_count();
+    if editor.closed_fold_at_cursor().is_some() {
+        // `x` is `dl`: on a closed fold it deletes the whole fold (Vim).
+        let lines = editor.linewise_count_over_folds(1);
+        let deleted = editor.record_operation(
+            |buf| buf.delete_lines(lines),
+            Some(RepeatAction::DeleteLines { count: lines }),
+        );
+        if !deleted.is_empty() {
+            editor.delete_to_register_with_type(deleted, RegisterType::Line);
+        }
+        editor.clear_count();
+        return Ok(());
+    }
     let deleted = editor.record_operation(
         |buf| buf.delete_chars_forward(count),
         Some(RepeatAction::DeleteCharForward { count }),
@@ -129,6 +146,18 @@ fn delete_char_backward(editor: &mut Editor) -> Result<()> {
 
 /// D - delete to end of line
 fn delete_to_end_of_line(editor: &mut Editor) -> Result<()> {
+    if editor.closed_fold_at_cursor().is_some() {
+        let lines = editor.linewise_count_over_folds(1);
+        let deleted = editor.record_operation(
+            |buf| buf.delete_lines(lines),
+            Some(RepeatAction::DeleteLines { count: lines }),
+        );
+        if !deleted.is_empty() {
+            editor.delete_to_register_with_type(deleted, RegisterType::Line);
+        }
+        editor.clear_count();
+        return Ok(());
+    }
     let deleted = editor.record_operation(
         |buf| buf.delete_to_end_of_line(),
         Some(RepeatAction::DeleteToEndOfLine),
@@ -142,6 +171,9 @@ fn delete_to_end_of_line(editor: &mut Editor) -> Result<()> {
 
 /// C - change to end of line
 pub(super) fn change_to_end_of_line(editor: &mut Editor) -> Result<()> {
+    if editor.closed_fold_at_cursor().is_some() {
+        return substitute_line(editor);
+    }
     super::operators::change_with(editor, RepeatAction::DeleteToEndOfLine, |buf| {
         let line = buf.cursor().line();
         let col = buf.cursor().col();
@@ -153,6 +185,9 @@ pub(super) fn change_to_end_of_line(editor: &mut Editor) -> Result<()> {
 
 /// s - substitute character(s) under cursor
 fn substitute_chars(editor: &mut Editor) -> Result<()> {
+    if editor.closed_fold_at_cursor().is_some() {
+        return substitute_line(editor);
+    }
     let count = editor.effective_count();
     super::operators::change_with(editor, RepeatAction::DeleteCharForward { count }, |buf| {
         buf.change_chars_forward(count)
@@ -161,7 +196,7 @@ fn substitute_chars(editor: &mut Editor) -> Result<()> {
 
 /// S - substitute entire line
 fn substitute_line(editor: &mut Editor) -> Result<()> {
-    let count = editor.effective_count();
+    let count = editor.linewise_count_over_folds(editor.effective_count());
     let start = editor.buffer().cursor().line();
     let end = (start + count).min(editor.buffer().line_count());
     super::operators::change_lines(editor, start, end, RepeatAction::DeleteLines { count })
@@ -169,7 +204,7 @@ fn substitute_line(editor: &mut Editor) -> Result<()> {
 
 /// Y - yank line
 fn yank_line(editor: &mut Editor) -> Result<()> {
-    let count = editor.effective_count();
+    let count = editor.linewise_count_over_folds(editor.effective_count());
     let start_line = editor.buffer().cursor().line();
     let end_line = (start_line + count).min(editor.buffer().line_count()) - 1;
     let yanked = helpers::yank_line(editor.buffer(), count)?;

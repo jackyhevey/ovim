@@ -104,6 +104,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
                 editor.buffer().cursor().line(),
                 editor.buffer().cursor().col(),
             );
+            editor.cursor_to_closed_fold_end();
             editor.start_change_building(cursor_before);
             editor.set_change_entry_mode(InsertEntryMode::OpenBelow);
             if helpers::insert_line_below(editor)? {
