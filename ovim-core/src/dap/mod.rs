@@ -51,6 +51,9 @@ pub enum DapEvent {
     Exited { exit_code: Option<i32> },
     /// Debug session terminated.
     Terminated,
+    /// The adapter process went away without saying goodbye: it crashed or
+    /// was killed. `detail` is its exit status and last stderr lines.
+    AdapterExited { detail: String },
     /// Debug adapter initialized (ready for configuration).
     Initialized,
 }
@@ -130,9 +133,11 @@ pub struct DapManager {
 }
 
 /// How a debug session ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEnd {
     pub exit_code: Option<i32>,
+    /// Set when the adapter died mid-session (what it left behind).
+    pub adapter_crash: Option<String>,
 }
 
 impl Default for DapManager {
@@ -435,6 +440,7 @@ impl DapManager {
         if had_session && self.session_end.is_none() {
             self.session_end = Some(SessionEnd {
                 exit_code: self.exit_code,
+                adapter_crash: None,
             });
         }
         result
@@ -453,6 +459,7 @@ impl DapManager {
         if self.session_end.is_none() {
             self.session_end = Some(SessionEnd {
                 exit_code: self.exit_code,
+                adapter_crash: None,
             });
         }
     }
@@ -509,6 +516,18 @@ impl DapManager {
                     self.end_session();
                 }
                 DapEvent::Terminated => self.end_session(),
+                DapEvent::AdapterExited { detail } => {
+                    if self.state.session_active || self.client.is_some() {
+                        self.end_session();
+                        if let Some(end) = self.session_end.as_mut() {
+                            end.adapter_crash = Some(detail.clone());
+                        }
+                        self.console_output.push((
+                            "console".to_string(),
+                            format!("Debug adapter crashed ({detail})\n"),
+                        ));
+                    }
+                }
                 DapEvent::Initialized => {
                     // The adapter is ready: send launch/attach first, then
                     // breakpoints and configurationDone.

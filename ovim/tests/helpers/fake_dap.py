@@ -93,6 +93,10 @@ while True:
         respond(request)
         for item in scenario.get("on_configuration_done", []):
             time.sleep(item.get("delay", 0))
+            if item["event"] == "crash":
+                sys.stderr.write(item.get("message", "boom") + "\n")
+                sys.stderr.flush()
+                os._exit(item.get("code", 101))
             event(item["event"], item.get("body"))
     elif command == "threads":
         respond(request, {"threads": [{"id": 1, "name": "main"}]})

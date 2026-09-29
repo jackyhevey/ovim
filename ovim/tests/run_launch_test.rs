@@ -1810,3 +1810,35 @@ async fn an_exception_stop_shows_the_exception_type_and_message() {
         .await;
     d.inner.stop_lsp().await;
 }
+
+/// OV-00446: an adapter that dies mid-session is a failure with its exit
+/// status and last words, not a successful "exit 0" ending; the JVM it was
+/// driving is stopped too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crashing_adapter_is_reported_as_a_crash_and_takes_the_jvm_down() {
+    let mut d = DebugSession::new(&resolve_commands()).await;
+    let adapter = d.adapter(json!({
+        "on_configuration_done": [
+            {"event": "crash", "message": "thread 'main' panicked at jdwp.rs:1", "code": 101, "delay": 0.2}
+        ]
+    }));
+    d.inner.script_resolve(d.inner.main_plan(None));
+    d.inner
+        .test
+        .editor
+        .launch_at_cursor_with(ovim_core::launch::LaunchMode::Debug, Some(adapter));
+    d.inner
+        .until("the session to end", |s| s.run_finished())
+        .await;
+    match d.inner.outcome() {
+        RunOutcome::Error(message) => {
+            assert!(message.contains("crashed"), "{message}");
+            assert!(message.contains("101"), "{message}");
+            assert!(message.contains("panicked at jdwp.rs:1"), "{message}");
+        }
+        other => panic!("expected an error outcome, got {other:?}"),
+    }
+    assert!(d.inner.test.editor.status_message().contains("crashed"));
+    assert!(!d.inner.test.editor.is_debug_active());
+    d.inner.stop_lsp().await;
+}

@@ -1862,15 +1862,27 @@ impl Editor {
         } = job.stage
         {
             let child_running = job.proc.is_some();
-            if child_running && at.elapsed() > POST_SESSION_GRACE {
+            let crashed = job
+                .session_end
+                .as_ref()
+                .is_some_and(|end| end.adapter_crash.is_some());
+            // A JVM that lost its debugger to a crash has nobody left to
+            // drive it (it would run on, suspended or unobserved).
+            if child_running && (crashed || at.elapsed() > POST_SESSION_GRACE) {
                 if let Some(proc) = job.proc.as_mut() {
                     proc.kill();
                 }
             }
             if !child_running {
-                let end = job
-                    .session_end
-                    .unwrap_or(crate::dap::SessionEnd { exit_code: None });
+                let end = job.session_end.clone().unwrap_or(crate::dap::SessionEnd {
+                    exit_code: None,
+                    adapter_crash: None,
+                });
+                if let (Some(detail), false) = (&end.adapter_crash, job.stopping) {
+                    let message = format!("The debug adapter crashed ({detail})");
+                    self.fail_job(job, message);
+                    return true;
+                }
                 let exit = end.exit_code.or(job.proc_exit.and_then(|p| p.code));
                 let outcome = if job.stopping {
                     RunOutcome::Stopped
