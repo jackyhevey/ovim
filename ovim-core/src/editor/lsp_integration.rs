@@ -1980,7 +1980,18 @@ impl Editor {
         for index in 0..self.buffers.len() {
             let is_current = index == self.current_buffer_index;
             if !is_current && !self.buffer_is_open_in_ui(index) {
-                continue;
+                // A hidden buffer the server already has open (its text was
+                // changed by a workspace edit, an autoread...) must not leave
+                // the server with a stale copy: later versioned edits are
+                // checked against what the server last received (OV-00475).
+                // Never `didOpen` a hidden buffer here.
+                let opened_on_server = self.buffers[index]
+                    .file_path()
+                    .and_then(|path| self.lsp.state.document_sync.get(path))
+                    .is_some_and(|state| state.did_open_sent);
+                if !opened_on_server {
+                    continue;
+                }
             }
             let buffer = &self.buffers[index];
             if super::buffer_manager::is_scratch_buffer(buffer) {
@@ -3306,7 +3317,6 @@ mod tests {
             "stale textEdit range must not leave orphaned typed characters"
         );
     }
-}
 
     /// OV-00474: accepting a method completion whose snippet leaves the cursor
     /// inside `name(|)` brings the parameter popup up at once; a completion
@@ -3352,3 +3362,4 @@ mod tests {
             "the cursor is after `size()`, not inside a call"
         );
     }
+}
