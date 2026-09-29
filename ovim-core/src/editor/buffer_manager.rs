@@ -303,6 +303,11 @@ impl Editor {
         // Remove current buffer (track sync state)
         if let Some(path) = self.buffer().file_path().map(|s| s.to_string()) {
             self.lsp.state.document_sync.remove(&path);
+            // The server keeps documents open while their buffers are loaded;
+            // deleting the buffer is what closes it.
+            if !is_scratch_path(&path) {
+                self.lsp.state.pending_did_close_file = Some(path);
+            }
         }
 
         // Remove current buffer
