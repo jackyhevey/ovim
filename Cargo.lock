@@ -4423,6 +4423,7 @@ dependencies = [
  "nix 0.29.0",
  "notify",
  "nucleo",
+ "open",
  "prometheus",
  "rand 0.8.7",
  "regex",

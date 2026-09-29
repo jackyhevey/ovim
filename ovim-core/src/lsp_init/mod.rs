@@ -730,3 +730,46 @@ async fn install_approved(request: &InitRequest) {
         }
     }
 }
+
+/// Spawn background tasks for pending LSP install requests.
+pub(crate) fn spawn_pending_installs(editor: &mut Editor) {
+    use crate::editor::lsp_manager_panel::{InstallProgress, InstallStatus};
+
+    let pending = editor.take_pending_installs();
+    if pending.is_empty() {
+        return;
+    }
+
+    let tx = editor.install_progress_tx().cloned();
+    let Some(tx) = tx else { return };
+
+    for request in pending {
+        let tx = tx.clone();
+        let lang_name = request.language_name.clone();
+        let lang_id = request.language_id.clone();
+        let config = request.auto_install_config.clone();
+        let command = request.lsp_command.clone();
+
+        tokio::spawn(async move {
+            let _ = tx.send(InstallProgress {
+                language_id: lang_id.clone(),
+                status: InstallStatus::Installing(format!("Installing {lang_name}...")),
+            });
+
+            let result = auto_install::attempt_auto_install(&lang_name, &command, &config).await;
+
+            let status = match result {
+                auto_install::InstallResult::Success(_) => InstallStatus::Success,
+                auto_install::InstallResult::Failed(msg) => InstallStatus::Failed(msg),
+                auto_install::InstallResult::PrerequisitesMissing(msg) => {
+                    InstallStatus::Failed(msg)
+                }
+            };
+
+            let _ = tx.send(InstallProgress {
+                language_id: lang_id,
+                status,
+            });
+        });
+    }
+}

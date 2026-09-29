@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::channels::FrontendChannels;
+use super::state::TickState;
 use crate::editor::{self, Editor};
 use crate::syntax::{LanguageRegistry, SyntaxHighlighter};
 
@@ -262,10 +262,10 @@ pub(super) fn spawn_file_finder_loading(
 }
 
 /// Helper to process preview and file picker results
-pub fn process_picker_results(editor: &mut Editor, channels: &mut FrontendChannels) {
+pub(super) fn process_picker_results(editor: &mut Editor, state: &mut TickState) {
     // Try to drain pending preview loads (single mark_dirty after batch)
     let mut previews_loaded = false;
-    while let Ok((path, cache)) = channels.preview_rx.try_recv() {
+    while let Ok((path, cache)) = state.preview_rx.try_recv() {
         editor.insert_preview(path, cache);
         previews_loaded = true;
     }
@@ -281,7 +281,7 @@ pub fn process_picker_results(editor: &mut Editor, channels: &mut FrontendChanne
         if drain_start.elapsed() >= drain_budget {
             break;
         }
-        match channels.file_rx.try_recv() {
+        match state.file_rx.try_recv() {
             Ok((walk_id, batch)) => {
                 if let Some(picker) = editor.picker_mut() {
                     // Drop batches from a previous picker's walk.
@@ -303,18 +303,15 @@ pub fn process_picker_results(editor: &mut Editor, channels: &mut FrontendChanne
         editor.mark_dirty();
     }
     // Update file list cache from background task (if completed)
-    update_file_list_cache_from_background(editor, channels);
+    update_file_list_cache_from_background(editor, state);
 }
 
 /// Drains completed file-list results from the background finder task and
-/// updates the Editor's cache. Owned by a channel on [`FrontendChannels`]
+/// updates the Editor's cache. Owned by a channel on [`TickState`]
 /// rather than a process-global slot, since more than one `Editor` (e.g. GUI
 /// tabs/splits) can exist in the same process.
-pub(super) fn update_file_list_cache_from_background(
-    editor: &mut Editor,
-    channels: &mut FrontendChannels,
-) {
-    while let Ok((base_dir, preferred_dir, files)) = channels.file_list_cache_rx.try_recv() {
+fn update_file_list_cache_from_background(editor: &mut Editor, state: &mut TickState) {
+    while let Ok((base_dir, preferred_dir, files)) = state.file_list_cache_rx.try_recv() {
         editor.update_file_list_cache(base_dir, preferred_dir, files);
     }
 }

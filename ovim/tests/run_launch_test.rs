@@ -7,7 +7,7 @@
 mod helpers;
 
 use helpers::EditorTest;
-use ovim::frontend::{process_editor_tick, FrontendChannels};
+use ovim::frontend::TickState;
 use ovim::mode::Mode;
 use ovim_core::language_catalog::{DynamicLanguageSpec, DynamicLspSpec, RegistrationOwner};
 use ovim_core::launch::{LineKind, RunOutcome, RunStatus};
@@ -20,7 +20,7 @@ static JDK_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 struct Session {
     test: EditorTest,
-    channels: FrontendChannels,
+    channels: TickState,
     _dir: tempfile::TempDir,
     root: PathBuf,
 }
@@ -79,7 +79,7 @@ impl Session {
         test.editor.request_lsp_init();
         let mut session = Self {
             test,
-            channels: FrontendChannels::new(),
+            channels: TickState::new(),
             _dir: dir,
             root,
         };
@@ -88,9 +88,9 @@ impl Session {
     }
 
     async fn tick(&mut self) {
-        tokio::time::timeout(
+        let _report = tokio::time::timeout(
             Duration::from_secs(1),
-            process_editor_tick(&mut self.test.editor, &mut self.channels),
+            self.test.editor.tick(&mut self.channels),
         )
         .await
         .expect("the launch flow blocked the input/render tick");

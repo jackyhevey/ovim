@@ -54,6 +54,7 @@ pub mod snippet;
 pub mod syntax;
 pub mod text_index;
 pub mod textobjects;
+pub mod tick;
 pub mod unicode;
 pub mod wrap;
 
