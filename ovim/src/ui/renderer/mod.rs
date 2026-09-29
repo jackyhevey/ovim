@@ -23,6 +23,7 @@ mod markdown;
 mod markdown_conceal;
 mod overlays;
 mod picker_widget;
+mod run_console;
 mod status_widgets;
 mod styles;
 mod terminal_images;

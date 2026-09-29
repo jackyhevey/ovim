@@ -91,6 +91,10 @@ fn handle_first_leader_key(editor: &mut Editor, key: char) -> Result<()> {
             // <Space>d... - Debug prefix
             editor.set_input_state(InputState::Leader { keys: vec!['d'] });
         }
+        'r' => {
+            // <Space>r... - Run prefix (rr run, rd debug, rl rerun, rc configs, rs stop, rt/rf console)
+            editor.set_input_state(InputState::Leader { keys: vec!['r'] });
+        }
         'l' => {
             // <Space>l... - LSP manager prefix
             editor.set_input_state(InputState::Leader { keys: vec!['l'] });
@@ -131,32 +135,24 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
             editor.reset_input_state();
         }
         (&['d'], 'c') => {
-            // <Space>dc - Continue (if active) or auto-start debug session
+            // <Space>dc - Continue (if a session is active) or debug whatever
+            // is at the cursor (same path as F5).
             if editor.is_debug_active() {
                 editor.dap_manager_mut().pending_action =
                     Some(crate::dap::PendingDebugAction::Continue);
             } else {
-                let dap_start = editor
-                    .buffer()
-                    .file_path()
-                    .and_then(|fp| {
-                        crate::language_config::LanguageRegistry::try_get()
-                            .and_then(|reg| reg.detect(fp))
-                    })
-                    .and_then(|lang| lang.dap.as_ref())
-                    .and_then(|config| {
-                        crate::language_config::find_dap_command(config)
-                            .map(|cmd| (cmd, config.args.clone()))
-                    });
-                if let Some((command, args)) = dap_start {
-                    editor.dap_manager_mut().pending_action =
-                        Some(crate::dap::PendingDebugAction::Start {
-                            command,
-                            args,
-                            run_config: None,
-                        });
-                }
+                editor.launch_at_cursor(crate::launch::LaunchMode::Debug);
             }
+            editor.reset_input_state();
+        }
+        (&['d'], 'C') => {
+            // <Space>dC - Pick a run configuration to debug
+            editor.launch_pick_config(crate::launch::LaunchMode::Debug);
+            editor.reset_input_state();
+        }
+        (&['d'], 'r') => {
+            // <Space>dr - Restart: rerun the last run/debug
+            editor.launch_last();
             editor.reset_input_state();
         }
         (&['d'], 'n') => {
@@ -184,11 +180,8 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
             editor.reset_input_state();
         }
         (&['d'], 's') => {
-            // <Space>ds - Stop debug session
-            if editor.is_debug_active() {
-                editor.dap_manager_mut().pending_action =
-                    Some(crate::dap::PendingDebugAction::Stop);
-            }
+            // <Space>ds - Stop the run / debug session
+            editor.launch_stop();
             editor.reset_input_state();
         }
         (&['d'], 'v') => {
@@ -208,6 +201,53 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
             if editor.is_debug_active() {
                 editor.select_frame_down();
             }
+            editor.reset_input_state();
+        }
+
+        // <Space>r... sequences (run)
+        (&['r'], 'r') => {
+            // <Space>rr - Run whatever is at the cursor (no debugger)
+            editor.launch_at_cursor(crate::launch::LaunchMode::Run);
+            editor.reset_input_state();
+        }
+        (&['r'], 'd') => {
+            // <Space>rd - Debug whatever is at the cursor
+            editor.launch_at_cursor(crate::launch::LaunchMode::Debug);
+            editor.reset_input_state();
+        }
+        (&['r'], 'l') => {
+            // <Space>rl - Rerun the last run/debug
+            editor.launch_last();
+            editor.reset_input_state();
+        }
+        (&['r'], 'c') => {
+            // <Space>rc - Pick a run configuration to run
+            editor.launch_pick_config(crate::launch::LaunchMode::Run);
+            editor.reset_input_state();
+        }
+        (&['r'], 'C') => {
+            // <Space>rC - Pick a run configuration to debug
+            editor.launch_pick_config(crate::launch::LaunchMode::Debug);
+            editor.reset_input_state();
+        }
+        (&['r'], 's') => {
+            // <Space>rs - Stop
+            editor.launch_stop();
+            editor.reset_input_state();
+        }
+        (&['r'], 't') => {
+            // <Space>rt - Toggle the run console
+            editor.toggle_run_console();
+            editor.reset_input_state();
+        }
+        (&['r'], 'f') => {
+            // <Space>rf - Focus the run console (scroll, jump to source)
+            editor.focus_run_console();
+            editor.reset_input_state();
+        }
+        (&['r'], 'x') => {
+            // <Space>rx - Clear finished runs from the console
+            editor.clear_run_console();
             editor.reset_input_state();
         }
 
@@ -274,6 +314,16 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
         (&['c'], 'o') => {
             // <Space>co - Outgoing calls (call hierarchy)
             editor.request_call_hierarchy_outgoing();
+            editor.reset_input_state();
+        }
+        (&['c'], 'l') => {
+            // <Space>cl - Run the code lens on this line
+            editor.run_code_lens_at_cursor(crate::launch::LaunchMode::Run);
+            editor.reset_input_state();
+        }
+        (&['c'], 'L') => {
+            // <Space>cL - Debug the code lens on this line
+            editor.run_code_lens_at_cursor(crate::launch::LaunchMode::Debug);
             editor.reset_input_state();
         }
 

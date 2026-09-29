@@ -2167,6 +2167,43 @@ button:focus-visible {
 .run-status.running {
     color: var(--info);
 }
+.run-status.succeeded {
+    color: var(--success);
+}
+.run-status.stopped {
+    color: var(--text-secondary);
+}
+.run-status.error {
+    color: var(--error);
+}
+.run-panel {
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+.run-output .run-line {
+    display: block;
+    min-height: 1.5em;
+}
+.run-output .run-line.stderr {
+    color: var(--error);
+}
+.run-output .run-line.build {
+    color: var(--info);
+}
+.run-output .run-line.system {
+    color: var(--text-secondary);
+    font-style: italic;
+}
+.run-output .run-line.debugger {
+    color: var(--accent);
+}
+.run-output .run-line.jumpable {
+    cursor: pointer;
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+}
+.run-output .run-line.jumpable:hover {
+    text-decoration-color: currentColor;
+}
 .run-status.passed {
     color: var(--success);
 }

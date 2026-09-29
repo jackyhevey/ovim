@@ -15,7 +15,7 @@ use dashmap::DashMap;
 use serde_json::Value;
 use tokio::io::BufReader;
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot};
 
 use super::protocol::{read_message, write_request, DapIncoming, DapRequest};
 use super::types::*;
@@ -23,8 +23,8 @@ use super::DapEvent;
 
 /// A running debug adapter process.
 pub struct DebugAdapterClient {
-    /// The spawned process (held for lifetime management).
-    _process: Mutex<Child>,
+    /// The spawned process (held for lifetime management and `kill`).
+    process: std::sync::Mutex<Child>,
     /// Stdin writer channel.
     writer_tx: mpsc::Sender<DapRequest>,
     /// Monotonically increasing sequence number.
@@ -49,6 +49,7 @@ impl DebugAdapterClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            .kill_on_drop(true)
             .spawn()
             .map_err(|e| anyhow!("failed to spawn debug adapter '{}': {}", command, e))?;
 
@@ -116,7 +117,7 @@ impl DebugAdapterClient {
         });
 
         Ok(Self {
-            _process: Mutex::new(child),
+            process: std::sync::Mutex::new(child),
             writer_tx,
             next_seq: AtomicU64::new(1),
             pending,
@@ -301,13 +302,26 @@ impl DebugAdapterClient {
         Ok((eval_result, type_, variables_reference))
     }
 
+    /// Asks the adapter to end the session. The adapter may exit without
+    /// answering, so this waits at most two seconds; the caller follows up
+    /// with [`kill`](Self::kill).
     pub async fn disconnect(&self, terminate_debuggee: bool) -> Result<()> {
         let args = serde_json::json!({
             "terminateDebuggee": terminate_debuggee,
         });
-        // Don't wait for response — the adapter may exit immediately.
-        let _ = self.request("disconnect", Some(args)).await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.request("disconnect", Some(args)),
+        )
+        .await;
         Ok(())
+    }
+
+    /// Kills the adapter process. Never blocks.
+    pub fn kill(&self) {
+        if let Ok(mut child) = self.process.lock() {
+            let _ = child.start_kill();
+        }
     }
 }
 
@@ -368,7 +382,13 @@ fn parse_dap_event(msg: &DapIncoming) -> Option<DapEvent> {
                 .to_owned();
             Some(DapEvent::Output { category, output })
         }
-        "terminated" | "exited" => Some(DapEvent::Terminated),
+        "exited" => Some(DapEvent::Exited {
+            exit_code: body
+                .and_then(|b| b.get("exitCode"))
+                .and_then(|v| v.as_i64())
+                .map(|c| c as i32),
+        }),
+        "terminated" => Some(DapEvent::Terminated),
         "initialized" => Some(DapEvent::Initialized),
         _ => None,
     }

@@ -1200,6 +1200,21 @@ impl LspManager {
                     _ => {}
                 }
             }
+            "workspace/codeLens/refresh" => {
+                self.code_lens_refresh
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                if let Some(id) = request_id {
+                    if let Some(server) = self
+                        .servers
+                        .get(server_id)
+                        .map(|entry| entry.value().clone())
+                    {
+                        let _ = server
+                            .send_response(JsonRpcMessage::response(id, serde_json::Value::Null))
+                            .await;
+                    }
+                }
+            }
             "window/workDoneProgress/create" => {
                 // Server wants to create a progress token — acknowledge with success
                 // Responding with an error crashes some LSP servers (e.g. typescript-language-server)

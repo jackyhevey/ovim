@@ -36,6 +36,8 @@ pub enum Mode {
     RenameInput,
     /// AiChat mode - multi-turn AI chat panel
     AiChat,
+    /// RunConsole mode - focused, scrollable run/debug output
+    RunConsole,
 }
 
 impl Mode {
@@ -59,6 +61,7 @@ impl Mode {
             Mode::LspManager => "LSP MANAGER",
             Mode::RenameInput => "RENAME",
             Mode::AiChat => "AI CHAT",
+            Mode::RunConsole => "CONSOLE",
         }
     }
 

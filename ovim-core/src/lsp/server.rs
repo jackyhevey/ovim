@@ -91,6 +91,7 @@ bitflags::bitflags! {
         const EXECUTE_COMMAND    = 1 << 21;
         const INLAY_HINT         = 1 << 22;
         const SEMANTIC_TOKENS    = 1 << 23;
+        const CODE_LENS          = 1 << 24;
     }
 }
 
@@ -993,6 +994,9 @@ impl LanguageServer {
                     dynamic_registration: Some(true),
                     resolve_support: None,
                 }),
+                code_lens: Some(lsp_types::CodeLensClientCapabilities {
+                    dynamic_registration: Some(false),
+                }),
                 ..Default::default()
             }),
 
@@ -1027,6 +1031,11 @@ impl LanguageServer {
                         relative_pattern_support: Some(true),
                     },
                 ),
+                // The editor re-requests code lenses when the server says
+                // they changed (`workspace/codeLens/refresh`).
+                code_lens: Some(lsp_types::CodeLensWorkspaceClientCapabilities {
+                    refresh_support: Some(true),
+                }),
                 ..Default::default()
             }),
 
@@ -1790,6 +1799,9 @@ impl LanguageServer {
         if caps.semantic_tokens_provider.is_some() {
             flags |= F::SEMANTIC_TOKENS;
         }
+        if caps.code_lens_provider.is_some() {
+            flags |= F::CODE_LENS;
+        }
 
         // Prepare rename: needs deeper inspection
         if let Some(lsp_types::OneOf::Right(options)) = &caps.rename_provider {
@@ -1993,6 +2005,11 @@ impl LanguageServer {
     /// Checks if the server supports execute command (lock-free)
     pub async fn supports_execute_command(&self) -> bool {
         self.inner.has_cap(LspCapFlags::EXECUTE_COMMAND)
+    }
+
+    /// Checks if the server supports code lenses (lock-free)
+    pub async fn supports_code_lens(&self) -> bool {
+        self.inner.has_cap(LspCapFlags::CODE_LENS)
     }
 
     /// Checks if the server supports inlay hints (lock-free)

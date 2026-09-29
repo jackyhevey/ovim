@@ -1377,24 +1377,60 @@ impl LspManager {
         Ok(Some(result))
     }
 
-    /// Request run configurations from the Java LSP server via `workspace/executeCommand`.
-    ///
-    /// Sends `hyperion.runConfigurations` and parses the response as a JSON array.
-    /// Returns an empty vec on error or if no Java server is available.
-    pub async fn run_configurations(&self) -> Vec<serde_json::Value> {
-        let result = self
-            .execute_command("hyperion.runConfigurations".to_owned(), None, "java")
-            .await;
-        match result {
-            Ok(Some(value)) => {
-                if let Some(arr) = value.as_array() {
-                    arr.clone()
-                } else {
-                    Vec::new()
-                }
+    /// Requests code lenses for a document from every capable server that
+    /// owns it. Lenses the server left unresolved (no `command`) are resolved
+    /// with `codeLens/resolve` (best effort, capped). Each lens is paired with
+    /// the id of the server that produced it, so a later command runs there.
+    pub async fn code_lenses(
+        &self,
+        uri: &Uri,
+        file: &std::path::Path,
+        language_id: &str,
+    ) -> Result<Vec<(String, lsp_types::CodeLens)>> {
+        use lsp_types::{CodeLens, CodeLensParams, TextDocumentIdentifier};
+
+        let mut all = Vec::new();
+        for server_id in self.servers_for_document(language_id, file) {
+            let Some(server) = self
+                .servers
+                .get(server_id.as_str())
+                .map(|entry| entry.value().clone())
+            else {
+                continue;
+            };
+            if !server.supports_code_lens().await {
+                continue;
             }
-            _ => Vec::new(),
+            let params = CodeLensParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+            let result = server
+                .request("textDocument/codeLens", serde_json::to_value(params)?)
+                .await?;
+            let lenses: Vec<CodeLens> =
+                parse_lsp_response::<Option<Vec<CodeLens>>>(result, "textDocument/codeLens")
+                    .flatten()
+                    .unwrap_or_default();
+            for (index, lens) in lenses.into_iter().enumerate() {
+                let lens = if lens.command.is_none() && index < 100 {
+                    match server
+                        .request("codeLens/resolve", serde_json::to_value(&lens)?)
+                        .await
+                        .ok()
+                        .and_then(|v| serde_json::from_value::<CodeLens>(v).ok())
+                    {
+                        Some(resolved) => resolved,
+                        None => lens,
+                    }
+                } else {
+                    lens
+                };
+                all.push((server_id.clone(), lens));
+            }
         }
+        Ok(all)
     }
 
     /// Requests inlay hints for a document range

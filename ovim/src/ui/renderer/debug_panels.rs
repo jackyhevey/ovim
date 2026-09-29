@@ -1,4 +1,4 @@
-//! Debug panel rendering — stack trace, variables, and output.
+//! Debug panel rendering — stack trace and variables (output lives in the run console).
 //!
 //! Shown when `debug_state.panels_visible` is true and a debug session is active.
 
@@ -21,31 +21,6 @@ pub fn render_debug_side_panel(frame: &mut Frame, editor: &Editor, area: Rect) {
 
     render_stack_trace(frame, editor, chunks[0]);
     render_variables(frame, editor, chunks[1]);
-}
-
-/// Render the debug output panel (bottom).
-pub fn render_debug_output(frame: &mut Frame, editor: &Editor, area: Rect) {
-    let state = editor.debug_state();
-
-    let title = format!(" Output ({}) ", state.output_lines.len());
-    let block = Block::default()
-        .borders(Borders::TOP)
-        .title(title)
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Show the last N lines that fit
-    let visible_height = inner.height as usize;
-    let start = state.output_lines.len().saturating_sub(visible_height);
-    let lines: Vec<Line> = state.output_lines[start..]
-        .iter()
-        .map(|l| Line::from(l.as_str().to_owned()))
-        .collect();
-
-    let paragraph = Paragraph::new(lines).style(Style::default().fg(Color::White));
-    frame.render_widget(paragraph, inner);
 }
 
 /// Render the stack trace section.

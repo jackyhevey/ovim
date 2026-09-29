@@ -10,7 +10,7 @@ import { Dynamic } from "solid-js/web";
 import { Icon } from "./Icon";
 import type { IconName } from "./icons.generated";
 
-export type ContextPanelId = "ai" | "tests" | "debug" | "terminal";
+export type ContextPanelId = "ai" | "tests" | "debug" | "run" | "terminal";
 
 export interface ContextPanelDefinition {
     id: ContextPanelId;

@@ -1355,12 +1355,15 @@ function App() {
         compactDockQuery?.matches ?? false,
     );
     const [activeDock, setActiveDock] = createSignal<"explorer" | "context">(
-        mockSnapshot.aiChat || mockSnapshot.testPanel || mockSnapshot.debug
+        mockSnapshot.aiChat ||
+            mockSnapshot.testPanel ||
+            mockSnapshot.debug ||
+            mockSnapshot.runConsole
             ? "context"
             : "explorer",
     );
     const [activeContextPanel, setActiveContextPanel] = createSignal<
-        "ai" | "tests" | "debug" | "terminal"
+        "ai" | "tests" | "debug" | "run" | "terminal"
     >("ai");
     const [terminalDockOpen, setTerminalDockOpen] = createSignal(false);
     let editorBody!: HTMLDivElement;
@@ -1377,7 +1380,10 @@ function App() {
     const hasContextDock = createMemo(() =>
         Boolean(
             (!walkthrough() &&
-                (view().aiChat || view().testPanel || view().debug)) ||
+                (view().aiChat ||
+                    view().testPanel ||
+                    view().debug ||
+                    view().runConsole)) ||
             terminalDockOpen(),
         ),
     );
@@ -1386,6 +1392,7 @@ function App() {
         ai: Boolean(view().aiChat),
         tests: Boolean(view().testPanel),
         debug: Boolean(view().debug),
+        run: Boolean(view().runConsole),
         terminal: terminalDockOpen(),
     };
     let layoutWorkspace = "";
@@ -1551,6 +1558,7 @@ function App() {
             ai: Boolean(view().aiChat),
             tests: Boolean(view().testPanel),
             debug: Boolean(view().debug),
+            run: Boolean(view().runConsole),
             terminal: terminalDockOpen(),
         };
         if (next.ai && !previousContextAvailability.ai)
@@ -1559,6 +1567,8 @@ function App() {
             setActiveContextPanel("tests");
         if (next.debug && !previousContextAvailability.debug)
             setActiveContextPanel("debug");
+        if (next.run && !previousContextAvailability.run)
+            setActiveContextPanel("run");
         if (next.terminal && !previousContextAvailability.terminal)
             setActiveContextPanel("terminal");
         previousContextAvailability = next;
@@ -2871,6 +2881,159 @@ function App() {
         </Show>
     );
 
+    const RunPanel = () => {
+        // Follow live output unless the user scrolled up to read.
+        let output: HTMLPreElement | undefined;
+        let following = true;
+        createEffect(() => {
+            const run = view().runConsole;
+            if (!run) return;
+            void run.lines.length;
+            void run.lines[run.lines.length - 1]?.text;
+            queueMicrotask(() => {
+                if (output && following) output.scrollTop = output.scrollHeight;
+            });
+        });
+        return (
+            <Show when={view().runConsole}>
+                {(run) => (
+                    <section
+                        class="side-panel run-panel"
+                        aria-label="Run console"
+                        aria-busy={run().active}
+                    >
+                        <header class="side-panel-header">
+                            <div>
+                                <b>
+                                    {run().mode === "debug" ? "Debug" : "Run"}:{" "}
+                                    {run().title}
+                                </b>
+                                <small>
+                                    {run().runCount > 1
+                                        ? `run ${run().runIndex} of ${run().runCount}`
+                                        : "run console"}
+                                </small>
+                            </div>
+                            <span
+                                class={`run-status ${run().status}`}
+                                role="status"
+                                aria-live="polite"
+                            >
+                                {run().statusText}
+                            </span>
+                        </header>
+                        <div class="run-command">
+                            $ {run().command || "(resolving…)"}
+                        </div>
+                        <pre
+                            class="output-lines run-output"
+                            role="log"
+                            ref={output}
+                            onScroll={(event) => {
+                                const el = event.currentTarget;
+                                following =
+                                    el.scrollHeight -
+                                        el.scrollTop -
+                                        el.clientHeight <
+                                    24;
+                            }}
+                        >
+                            <Show when={run().truncated}>
+                                <i>… {run().truncated} earlier lines</i>
+                            </Show>
+                            <For
+                                each={run().lines}
+                                fallback={
+                                    <span class="output-empty">
+                                        No output yet
+                                    </span>
+                                }
+                            >
+                                {(line, index) => (
+                                    <span
+                                        class={`run-line ${line.kind}`}
+                                        classList={{ jumpable: line.jumpable }}
+                                        title={
+                                            line.jumpable
+                                                ? "Open source location"
+                                                : undefined
+                                        }
+                                        onClick={() => {
+                                            if (!line.jumpable) return;
+                                            void editorCommand(
+                                                `RunJump ${run().firstIndex + index()}`,
+                                            );
+                                        }}
+                                    >
+                                        {line.text}
+                                    </span>
+                                )}
+                            </For>
+                        </pre>
+                        <footer class="panel-summary">
+                            <span>
+                                {run().exitCode === undefined
+                                    ? "Output updates live"
+                                    : `exit code ${run().exitCode}`}
+                            </span>
+                            <div>
+                                <Show when={run().runCount > 1}>
+                                    <button
+                                        type="button"
+                                        title="Previous run"
+                                        onClick={() =>
+                                            void editorCommand("RunPrev")
+                                        }
+                                    >
+                                        ◀
+                                    </button>
+                                    <button
+                                        type="button"
+                                        title="Next run"
+                                        onClick={() =>
+                                            void editorCommand("RunNext")
+                                        }
+                                    >
+                                        ▶
+                                    </button>
+                                </Show>
+                                <button
+                                    type="button"
+                                    disabled={!run().active}
+                                    title="Stop · Space R S"
+                                    onClick={() =>
+                                        void editorCommand("RunStop")
+                                    }
+                                >
+                                    Stop
+                                </button>
+                                <button
+                                    type="button"
+                                    title="Rerun · Space R L"
+                                    onClick={() =>
+                                        void editorCommand("RunLast")
+                                    }
+                                >
+                                    Rerun
+                                </button>
+                                <button
+                                    type="button"
+                                    disabled={run().active}
+                                    title="Clear finished runs · Space R X"
+                                    onClick={() =>
+                                        void editorCommand("RunClear")
+                                    }
+                                >
+                                    Clear
+                                </button>
+                            </div>
+                        </footer>
+                    </section>
+                )}
+            </Show>
+        );
+    };
+
     const DebugPanel = () => (
         <Show when={view().debug}>
             {(debug) => (
@@ -3073,6 +3236,16 @@ function App() {
                     state: debug.running ? "running" : "paused",
                     icon: "debug",
                     component: DebugPanel,
+                });
+            }
+            const runConsole = view().runConsole;
+            if (runConsole && !walkthrough()) {
+                panels.push({
+                    id: "run",
+                    label: "Run",
+                    state: runConsole.status,
+                    icon: "debug",
+                    component: RunPanel,
                 });
             }
             return retainProjection(previous, panels);

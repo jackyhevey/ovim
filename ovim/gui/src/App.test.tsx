@@ -1444,6 +1444,63 @@ describe("Ovim Solid workbench", () => {
         }
     });
 
+    it("keeps run output visible after the process exits, with exit code and jumpable frames", () => {
+        mockSnapshot.runConsole = {
+            title: "Main (app)",
+            mode: "run",
+            status: "failed",
+            statusText: "failed (exit 1) in 2.3s",
+            active: false,
+            command: "java -cp out com.example.Main",
+            exitCode: 1,
+            elapsedMs: 2300,
+            runIndex: 2,
+            runCount: 3,
+            truncated: 0,
+            firstIndex: 0,
+            lines: [
+                { kind: "stdout", text: "hello", jumpable: false },
+                {
+                    kind: "stderr",
+                    text: "\tat com.example.Main.main(Main.java:5)",
+                    jumpable: true,
+                },
+                { kind: "system", text: "Process finished", jumpable: false },
+            ],
+        };
+
+        try {
+            render(() => <App />);
+            expect(screen.getByText("failed (exit 1) in 2.3s")).toBeTruthy();
+            expect(screen.getByText("exit code 1")).toBeTruthy();
+            expect(screen.getByText("run 2 of 3")).toBeTruthy();
+            const frame = screen.getByText(/Main\.main\(Main\.java:5\)/);
+            expect(frame.classList.contains("stderr")).toBe(true);
+            expect(frame.classList.contains("jumpable")).toBe(true);
+            expect(
+                screen.getByText("hello").classList.contains("jumpable"),
+            ).toBe(false);
+            // A finished run cannot be stopped, but can be rerun and cleared.
+            expect(
+                screen
+                    .getByRole("button", { name: "Stop" })
+                    .hasAttribute("disabled"),
+            ).toBe(true);
+            expect(
+                screen
+                    .getByRole("button", { name: "Rerun" })
+                    .hasAttribute("disabled"),
+            ).toBe(false);
+            expect(
+                screen
+                    .getByRole("button", { name: "Clear" })
+                    .hasAttribute("disabled"),
+            ).toBe(false);
+        } finally {
+            delete mockSnapshot.runConsole;
+        }
+    });
+
     it("shows blocking chat setup inline with masked input and working actions", () => {
         const onKey = vi.fn();
         render(() => (

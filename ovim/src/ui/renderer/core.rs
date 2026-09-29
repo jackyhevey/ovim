@@ -44,7 +44,7 @@ struct FrameAreas {
     chat_area: Option<Rect>,
     test_panel_area: Option<Rect>,
     debug_side_area: Option<Rect>,
-    debug_output_area: Option<Rect>,
+    run_console_area: Option<Rect>,
 }
 
 // ---------------------------------------------------------------------------
@@ -127,18 +127,21 @@ fn compute_frame_layout(frame: &Frame, editor: &Editor) -> Option<FrameAreas> {
         (content_area, None)
     };
 
-    // Debug output panel (bottom) — split from content area
-    let (content_area, debug_output_area) =
-        if debug_panels_visible && !editor.debug_state().output_lines.is_empty() {
-            let height = 6u16.min(content_area.height / 4);
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Min(1), Constraint::Length(height)])
-                .split(content_area);
-            (chunks[0], Some(chunks[1]))
-        } else {
-            (content_area, None)
-        };
+    // Run console (bottom) — build / run / debug output, kept after exit
+    let console_height = if editor.run_console().open {
+        super::run_console::panel_height(content_area.height)
+    } else {
+        0
+    };
+    let (content_area, run_console_area) = if console_height > 0 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(console_height)])
+            .split(content_area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (content_area, None)
+    };
 
     // Buffer + optional progress line + status line + command/prompt area
     let has_progress = editor.lsp_progress_message().is_some();
@@ -200,7 +203,7 @@ fn compute_frame_layout(frame: &Frame, editor: &Editor) -> Option<FrameAreas> {
         chat_area,
         test_panel_area,
         debug_side_area,
-        debug_output_area,
+        run_console_area,
     })
 }
 
@@ -880,6 +883,16 @@ impl Renderer {
             }
         };
 
+        // The console needs to know how many rows it has to keep the
+        // highlighted line in view.
+        let console_rows = areas
+            .run_console_area
+            .map(|a| a.height.saturating_sub(1) as usize)
+            .unwrap_or(0);
+        if editor.run_console().view_height != console_rows {
+            editor.run_console_mut().view_height = console_rows;
+        }
+
         let scheme = editor
             .get_color_scheme()
             .cloned()
@@ -945,8 +958,8 @@ impl Renderer {
         if let Some(debug_side) = areas.debug_side_area {
             super::debug_panels::render_debug_side_panel(frame, editor, debug_side);
         }
-        if let Some(debug_output) = areas.debug_output_area {
-            super::debug_panels::render_debug_output(frame, editor, debug_output);
+        if let Some(console_area) = areas.run_console_area {
+            super::run_console::render_run_console(frame, editor, console_area);
         }
 
         // Render status + overlays + cursor

@@ -137,6 +137,20 @@ automatically; installing or signing in to Codex CLI is not required.
 See [AI Setup](ai.md) for profiles, tools, approval behavior, and alternative
 providers.
 
+## Running and Debugging Code
+
+| Keys | Runs |
+|------|------|
+| `Space r r` (or `:Run`) | the code at the cursor, no debugger |
+| `F5` / `Space r d` (or `:Debug`) | the code at the cursor under the debugger |
+| `Space r l` | the last run again |
+| `Space r c` / `Space r C` | pick a configuration from `.ovim/debug.toml` to run / debug |
+| `Space r s` (or `Shift-F5`) | stop it |
+| `Space r f` | focus the run console (scroll, open stack frames) |
+
+Builds run in the background; compile errors go to the quickfix list. See
+[Running and Debugging](running-and-debugging.md).
+
 ## Running Tests
 
 vim-test style bindings, prefixed with `Space t` in normal mode:

@@ -38,6 +38,11 @@ impl Editor {
         let line = self.buffer().cursor().line() as u64 + 1; // DAP uses 1-based lines
         let path = std::path::PathBuf::from(&file_path);
         let lines = self.dap_manager.state.toggle_breakpoint(&path, line);
+        if self.dap_manager.is_active() {
+            // A live session must learn about the change immediately.
+            self.dap_manager.pending_action =
+                Some(crate::dap::PendingDebugAction::UpdateBreakpoints);
+        }
         self.mark_dirty();
         Some(lines)
     }
@@ -65,14 +70,26 @@ impl Editor {
         self.dap_manager.process_events()
     }
 
-    /// Start a debug session by spawning a debug adapter.
+    /// Start a debug session by spawning a debug adapter and initialising
+    /// it. `launch` is sent once the adapter reports `initialized`. A failure
+    /// leaves nothing behind: the adapter is killed and state is reset.
     pub async fn start_debug_session(
         &mut self,
         command: &str,
         args: &[String],
+        launch: crate::dap::DapLaunchRequest,
     ) -> anyhow::Result<()> {
-        self.dap_manager.start(command, args).await?;
-        self.dap_manager.initialize().await?;
+        self.dap_manager.launch_request = Some(launch);
+        let result = async {
+            self.dap_manager.start(command, args).await?;
+            self.dap_manager.initialize().await
+        }
+        .await;
+        if let Err(e) = result {
+            let _ = self.dap_manager.disconnect().await;
+            self.mark_dirty();
+            return Err(e);
+        }
         self.mark_dirty();
         Ok(())
     }

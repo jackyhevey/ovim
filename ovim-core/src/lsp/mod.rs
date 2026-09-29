@@ -231,6 +231,9 @@ pub struct LspManager {
     /// Flag indicating diagnostics have changed and cache needs update
     diagnostics_changed: AtomicBool,
 
+    /// Set when a server sent `workspace/codeLens/refresh`.
+    code_lens_refresh: AtomicBool,
+
     /// Current progress messages keyed by server and LSP progress token.
     /// A server may run multiple operations concurrently, so server identity
     /// alone is not sufficient to track their independent lifetimes.
@@ -317,6 +320,7 @@ impl LspManager {
             flush_tx,
             flush_rx: Mutex::new(Some(flush_rx)),
             diagnostics_changed: AtomicBool::new(false),
+            code_lens_refresh: AtomicBool::new(false),
             current_progress: Mutex::new(HashMap::new()),
             workspace_edit_tx,
             workspace_edit_rx: Mutex::new(workspace_edit_rx),
@@ -332,6 +336,12 @@ impl LspManager {
             lifecycle_events: std::sync::Mutex::new(Vec::new()),
             restart_base_backoff_ms: AtomicU64::new(500),
         }
+    }
+
+    /// True once after a server asked for code lenses to be re-requested
+    /// (`workspace/codeLens/refresh`).
+    pub fn take_code_lens_refresh(&self) -> bool {
+        self.code_lens_refresh.swap(false, Ordering::SeqCst)
     }
 
     /// Checks if diagnostics have changed and resets the flag

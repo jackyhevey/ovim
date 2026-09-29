@@ -24,7 +24,6 @@ use anyhow::Result;
 use std::path::Path;
 use tokio::sync::mpsc;
 
-use crate::debug_config::DebugRunConfig;
 use client::DebugAdapterClient;
 use state::DebugState;
 use types::*;
@@ -44,20 +43,30 @@ pub enum DapEvent {
     Thread { reason: String, thread_id: u64 },
     /// Output from the debuggee.
     Output { category: String, output: String },
+    /// The debuggee process exited (DAP `exited`), with its exit code.
+    Exited { exit_code: Option<i32> },
     /// Debug session terminated.
     Terminated,
     /// Debug adapter initialized (ready for configuration).
     Initialized,
 }
 
+/// What to send to the adapter once it is initialised: DAP `launch` or
+/// `attach` arguments, already fully resolved (see `launch::plan`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DapLaunchRequest {
+    Launch(serde_json::Value),
+    Attach(serde_json::Value),
+}
+
 /// Pending debug action to execute in the async event loop.
 #[derive(Debug, Clone)]
 pub enum PendingDebugAction {
-    /// Start a debug session with command + args + optional run config.
+    /// Spawn the debug adapter, then launch or attach as requested.
     Start {
         command: String,
         args: Vec<String>,
-        run_config: Option<DebugRunConfig>,
+        launch: DapLaunchRequest,
     },
     /// Stop the current session.
     Stop,
@@ -81,8 +90,9 @@ pub enum PendingDebugAction {
     Evaluate { expression: String },
     /// Fetch variables for an expanded object reference.
     FetchVariables { var_ref: u64 },
-    /// Fetch run configurations from TOML + LSP, then start or open picker.
-    FetchRunConfigs,
+    /// Re-send breakpoints for every file to a live session (no
+    /// `configurationDone`).
+    UpdateBreakpoints,
 }
 
 /// Central coordinator for debug sessions.
@@ -97,12 +107,24 @@ pub struct DapManager {
     event_tx: mpsc::Sender<DapEvent>,
     /// Pending action to execute in the async event loop.
     pub pending_action: Option<PendingDebugAction>,
-    /// The chosen run configuration for the current session.
-    pub run_config: Option<DebugRunConfig>,
-    /// Available debug configs for picker selection (temporary, cleared after selection).
-    pub available_debug_configs: Vec<DebugRunConfig>,
-    /// Background Gradle process (killed on disconnect).
-    pub gradle_child: Option<tokio::process::Child>,
+    /// Stop was requested. Kept apart from `pending_action` (a single slot
+    /// that stop/step/fetch events overwrite) so a stop can never be lost.
+    stop_requested: bool,
+    /// The launch/attach request for the session being started.
+    pub launch_request: Option<DapLaunchRequest>,
+    /// Debuggee/adapter output not yet copied into the run console.
+    console_output: Vec<(String, String)>,
+    /// Set when the session ended (adapter `terminated`/`exited`/EOF) and the
+    /// editor has not yet acknowledged it.
+    session_end: Option<SessionEnd>,
+    /// Exit code from the most recent `exited` event.
+    exit_code: Option<i32>,
+}
+
+/// How a debug session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionEnd {
+    pub exit_code: Option<i32>,
 }
 
 impl Default for DapManager {
@@ -120,18 +142,58 @@ impl DapManager {
             event_rx,
             event_tx,
             pending_action: None,
-            run_config: None,
-            available_debug_configs: Vec::new(),
-            gradle_child: None,
+            stop_requested: false,
+            launch_request: None,
+            console_output: Vec::new(),
+            session_end: None,
+            exit_code: None,
         }
     }
 
     /// Start a debug adapter process.
     pub async fn start(&mut self, command: &str, args: &[String]) -> Result<()> {
+        // A previous session may have left an adapter behind; never leak it.
+        self.kill_adapter();
+        self.state.clear();
+        self.state.output_lines.clear();
+        self.exit_code = None;
+        self.session_end = None;
+        while self.event_rx.try_recv().is_ok() {}
         let client = DebugAdapterClient::spawn(command, args, self.event_tx.clone()).await?;
         self.client = Some(client);
         self.state.session_active = true;
         Ok(())
+    }
+
+    /// Kills the adapter process (if any) without waiting for it.
+    fn kill_adapter(&mut self) {
+        if let Some(client) = self.client.take() {
+            client.kill();
+        }
+    }
+
+    /// Asks the event loop to end the session (and any queued start).
+    pub fn request_stop(&mut self) {
+        self.stop_requested = true;
+        if matches!(self.pending_action, Some(PendingDebugAction::Start { .. })) {
+            self.pending_action = None;
+        }
+    }
+
+    /// True once after [`request_stop`](Self::request_stop).
+    pub fn take_stop_request(&mut self) -> bool {
+        std::mem::take(&mut self.stop_requested)
+    }
+
+    /// Drains debuggee/adapter output that has not been shown in the run
+    /// console yet, as `(DAP category, text)`.
+    pub fn take_console_output(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.console_output)
+    }
+
+    /// Returns (once) how the last session ended.
+    pub fn take_session_end(&mut self) -> Option<SessionEnd> {
+        self.session_end.take()
     }
 
     /// Initialize the debug adapter (send initialize request).
@@ -291,18 +353,45 @@ impl DapManager {
         client.evaluate(expression, frame_id, context).await
     }
 
-    /// Disconnect from the debug adapter.
+    /// Disconnect from the debug adapter: ask it to terminate the debuggee,
+    /// then make sure the adapter process itself is gone. The session's
+    /// output stays available; only live state (frames, variables,
+    /// execution marker) is cleared.
     pub async fn disconnect(&mut self) -> Result<()> {
-        if let Some(client) = self.client.take() {
-            client.disconnect(true).await?;
-        }
-        // Kill the Gradle background process if one is running.
-        if let Some(mut child) = self.gradle_child.take() {
-            let _ = child.kill().await;
-        }
-        self.run_config = None;
+        let had_session = self.client.is_some() || self.state.session_active;
+        let result = match self.client.take() {
+            Some(client) => {
+                let result = client.disconnect(true).await;
+                client.kill();
+                result
+            }
+            None => Ok(()),
+        };
+        self.launch_request = None;
         self.state.clear();
-        Ok(())
+        if had_session && self.session_end.is_none() {
+            self.session_end = Some(SessionEnd {
+                exit_code: self.exit_code,
+            });
+        }
+        result
+    }
+
+    /// The debuggee is gone (`exited`/`terminated`/adapter EOF). Output is
+    /// kept (it is the only record of why the program ended); everything tied
+    /// to a live debuggee goes, and the adapter process must not linger.
+    fn end_session(&mut self) {
+        if !(self.state.session_active || self.client.is_some()) {
+            return;
+        }
+        self.state.end_session_keep_output();
+        self.kill_adapter();
+        self.launch_request = None;
+        if self.session_end.is_none() {
+            self.session_end = Some(SessionEnd {
+                exit_code: self.exit_code,
+            });
+        }
     }
 
     /// Poll for events from the debug adapter. Returns the number of events processed.
@@ -336,6 +425,7 @@ impl DapManager {
                     // Thread lifecycle — we can track this later.
                 }
                 DapEvent::Output { category, output } => {
+                    self.console_output.push((category.clone(), output.clone()));
                     self.state
                         .output_lines
                         .push(format!("[{category}] {output}"));
@@ -345,19 +435,16 @@ impl DapManager {
                         self.state.output_lines.drain(..drain_count);
                     }
                 }
-                DapEvent::Terminated => {
-                    self.state.session_active = false;
-                    self.state.is_running = false;
-                    self.state.stopped_thread = None;
-                    self.state.panels_visible = false;
+                DapEvent::Exited { exit_code } => {
+                    self.exit_code = *exit_code;
+                    self.end_session();
                 }
+                DapEvent::Terminated => self.end_session(),
                 DapEvent::Initialized => {
-                    // The adapter is ready. If we have a run config, launch/attach first;
-                    // otherwise fall back to just syncing breakpoints (legacy flow).
-                    if self.run_config.is_some() {
+                    // The adapter is ready: send launch/attach first, then
+                    // breakpoints and configurationDone.
+                    if self.launch_request.is_some() {
                         self.pending_action = Some(PendingDebugAction::LaunchOrAttach);
-                    } else {
-                        self.pending_action = Some(PendingDebugAction::SyncBreakpoints);
                     }
                 }
             }
@@ -374,5 +461,32 @@ impl DapManager {
     /// Get the client (if connected).
     pub fn client(&self) -> Option<&DebugAdapterClient> {
         self.client.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stop_request_survives_other_actions_overwriting_the_pending_slot() {
+        let mut dap = DapManager::new();
+        dap.request_stop();
+        // A `stopped` event queues a state fetch in the same tick.
+        dap.pending_action = Some(PendingDebugAction::FetchState);
+        assert!(dap.take_stop_request());
+        assert!(!dap.take_stop_request(), "reported once");
+    }
+
+    #[test]
+    fn stopping_cancels_a_start_that_has_not_run_yet() {
+        let mut dap = DapManager::new();
+        dap.pending_action = Some(PendingDebugAction::Start {
+            command: "x".into(),
+            args: vec![],
+            launch: DapLaunchRequest::Attach(serde_json::json!({})),
+        });
+        dap.request_stop();
+        assert!(dap.pending_action.is_none());
     }
 }
