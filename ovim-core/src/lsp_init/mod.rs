@@ -9,8 +9,8 @@ use crate::language_config::{
     LanguageRegistry,
 };
 use crate::lsp::companion_server_id;
+use crate::project_root::find_project_root;
 use auto_install::{attempt_auto_install, InstallResult};
-use ovim_core::project_root::find_project_root;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,7 +39,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                         .as_deref()
                         .unwrap_or("LSP server not found in PATH");
                     request.status(format!("LSP: {}", hint)).await;
-                    ovim_core::lsp_info!(
+                    crate::lsp_info!(
                         "LSP",
                         "Skipping auto-install for {} because autoinstall=off",
                         lang_config.name
@@ -53,7 +53,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                         .as_deref()
                         .unwrap_or("LSP server not found in PATH");
                     request.status(format!("LSP: {}", hint)).await;
-                    ovim_core::lsp_info!(
+                    crate::lsp_info!(
                         "LSP",
                         "Skipping auto-install for {} because policy is manual_only",
                         lang_config.name
@@ -72,7 +72,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                             hint
                         ))
                         .await;
-                    ovim_core::lsp_info!(
+                    crate::lsp_info!(
                         "LSP",
                         "Skipping auto-install for {} in headless mode (allow_headless=false)",
                         lang_config.name
@@ -92,7 +92,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                             file_path: request.file_path.clone(),
                         })
                         .await;
-                    ovim_core::lsp_info!(
+                    crate::lsp_info!(
                         "LSP",
                         "Prompting user for auto-install consent for {}",
                         lang_config.name
@@ -100,7 +100,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                     return;
                 }
 
-                ovim_core::lsp_info!(
+                crate::lsp_info!(
                     "LSP",
                     "{} language server not found. Attempting auto-install...",
                     lang_config.name
@@ -126,7 +126,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                                 lsp_config.command
                             ))
                             .await;
-                        ovim_core::lsp_info!(
+                        crate::lsp_info!(
                             "LSP",
                             "Auto-installed {} to {}",
                             lsp_config.command,
@@ -141,12 +141,12 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                         request
                             .status(format!("LSP: Auto-install failed: {}", error))
                             .await;
-                        ovim_core::lsp_warn!("LSP", "Auto-install failed: {}", error);
+                        crate::lsp_warn!("LSP", "Auto-install failed: {}", error);
                         return;
                     }
                     InstallResult::PrerequisitesMissing(msg) => {
                         request.status(format!("LSP: {}", msg)).await;
-                        ovim_core::lsp_warn!("LSP", "Prerequisites missing: {}", msg);
+                        crate::lsp_warn!("LSP", "Prerequisites missing: {}", msg);
                         return;
                     }
                 }
@@ -158,7 +158,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                     .unwrap_or("LSP server not found in PATH");
 
                 request.status(format!("LSP: {}", hint)).await;
-                ovim_core::lsp_warn!(
+                crate::lsp_warn!(
                     "LSP",
                     "Language server not found for {} (tried: {}, fallbacks: {:?})",
                     lang_config.name,
@@ -180,7 +180,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
         language.lsp_language_id.clone()
     };
 
-    ovim_core::lsp_info!(
+    crate::lsp_info!(
         "LSP",
         "Initializing {} LSP: command={}, root={}, language_id={}",
         lang_config.name,
@@ -233,7 +233,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                             .as_ref()
                             .expect("repair precondition checked");
 
-                        ovim_core::lsp_warn!(
+                        crate::lsp_warn!(
                             "LSP",
                             "Known startup failure for {} ({}). Attempting one auto-repair install.",
                             lang_config.name,
@@ -253,7 +253,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                             InstallResult::Success(path) => {
                                 server_command = find_lsp_command(lsp_config)
                                     .unwrap_or_else(|| path.to_string_lossy().to_string());
-                                ovim_core::lsp_info!(
+                                crate::lsp_info!(
                                     "LSP",
                                     "Auto-repair completed for {}. Retrying with '{}'",
                                     lang_config.name,
@@ -265,12 +265,12 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                                 request
                                     .status(format!("LSP: Auto-repair failed: {}", msg))
                                     .await;
-                                ovim_core::lsp_warn!("LSP", "Auto-repair failed: {}", msg);
+                                crate::lsp_warn!("LSP", "Auto-repair failed: {}", msg);
                                 return;
                             }
                             InstallResult::PrerequisitesMissing(msg) => {
                                 request.status(format!("LSP: {}", msg)).await;
-                                ovim_core::lsp_warn!(
+                                crate::lsp_warn!(
                                     "LSP",
                                     "Auto-repair prerequisites missing: {}",
                                     msg
@@ -286,7 +286,7 @@ async fn initialize_configured_lsp(request: &InitRequest) {
                             server_command, error
                         ))
                         .await;
-                    ovim_core::lsp_warn!(
+                    crate::lsp_warn!(
                         "LSP",
                         "Failed to start {} server '{}': {}",
                         lang_config.name,
@@ -436,7 +436,7 @@ async fn initialize_companions(request: &InitRequest, language_id: &str, abs_pat
         if !companion.activation_markers.is_empty()
             && !has_activation_marker(abs_path, &companion.activation_markers)
         {
-            ovim_core::lsp_debug!(
+            crate::lsp_debug!(
                 "LSP",
                 "Skipping companion {} - no activation markers found",
                 companion.name
@@ -454,11 +454,7 @@ async fn initialize_companions(request: &InitRequest, language_id: &str, abs_pat
                         && auto_install_on_missing_enabled(auto_install_config)
                         && is_auto_install_allowed_for_current_mode(auto_install_config)
                     {
-                        ovim_core::lsp_info!(
-                            "LSP",
-                            "Auto-installing companion {}...",
-                            companion.name
-                        );
+                        crate::lsp_info!("LSP", "Auto-installing companion {}...", companion.name);
                         request
                             .status(format!("Installing {}...", companion.name))
                             .await;
@@ -470,7 +466,7 @@ async fn initialize_companions(request: &InitRequest, language_id: &str, abs_pat
                         .await
                         {
                             InstallResult::Success(installed_path) => {
-                                ovim_core::lsp_info!(
+                                crate::lsp_info!(
                                     "LSP",
                                     "Installed companion {}: {}",
                                     companion.name,
@@ -479,7 +475,7 @@ async fn initialize_companions(request: &InitRequest, language_id: &str, abs_pat
                                 installed_path.to_string_lossy().to_string()
                             }
                             InstallResult::Failed(e) | InstallResult::PrerequisitesMissing(e) => {
-                                ovim_core::lsp_warn!(
+                                crate::lsp_warn!(
                                     "LSP",
                                     "Failed to install companion {}: {}",
                                     companion.name,
@@ -490,7 +486,7 @@ async fn initialize_companions(request: &InitRequest, language_id: &str, abs_pat
                         }
                     } else {
                         if let Some(hint) = &companion.install_hint {
-                            ovim_core::lsp_info!(
+                            crate::lsp_info!(
                                 "LSP",
                                 "Companion {} not found. {}",
                                 companion.name,
@@ -501,14 +497,9 @@ async fn initialize_companions(request: &InitRequest, language_id: &str, abs_pat
                     }
                 } else {
                     if let Some(hint) = &companion.install_hint {
-                        ovim_core::lsp_info!(
-                            "LSP",
-                            "Companion {} not found. {}",
-                            companion.name,
-                            hint
-                        );
+                        crate::lsp_info!("LSP", "Companion {} not found. {}", companion.name, hint);
                     } else {
-                        ovim_core::lsp_info!(
+                        crate::lsp_info!(
                             "LSP",
                             "Companion {} not found (command: {})",
                             companion.name,
@@ -529,7 +520,7 @@ async fn initialize_companions(request: &InitRequest, language_id: &str, abs_pat
 
         let server_id = companion_server_id(language_id, &companion.id);
 
-        ovim_core::lsp_info!(
+        crate::lsp_info!(
             "LSP",
             "Starting companion {} (server_id={}, command={}, root={})",
             companion.name,
@@ -557,11 +548,11 @@ async fn initialize_companions(request: &InitRequest, language_id: &str, abs_pat
                     .ready(language_id, server_id, server_command, false)
                     .await;
 
-                ovim_core::lsp_info!("LSP", "Companion {} ready", companion.name);
+                crate::lsp_info!("LSP", "Companion {} ready", companion.name);
             }
             Err(e) => {
                 // Log but don't fail - companions are optional
-                ovim_core::lsp_warn!("LSP", "Failed to start companion {}: {}", companion.name, e);
+                crate::lsp_warn!("LSP", "Failed to start companion {}: {}", companion.name, e);
             }
         }
     }
@@ -690,7 +681,7 @@ async fn install_approved(request: &InitRequest) {
 
     match install_result {
         InstallResult::Success(path) => {
-            ovim_core::lsp_info!(
+            crate::lsp_info!(
                 "LSP",
                 "Auto-installed {} to {}",
                 lsp_config.command,
@@ -721,7 +712,7 @@ async fn install_approved(request: &InitRequest) {
                         path.display()
                     ))
                     .await;
-                ovim_core::lsp_warn!(
+                crate::lsp_warn!(
                     "LSP",
                     "Installed {} but it is not discoverable via find_lsp_command; \
                      not re-running init to avoid a repeated install prompt",

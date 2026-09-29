@@ -30,6 +30,7 @@ pub mod launch;
 pub mod line_layout;
 pub mod log;
 pub mod lsp;
+pub mod lsp_init;
 #[cfg(feature = "lua")]
 pub mod lua;
 pub mod markdown_conceal;

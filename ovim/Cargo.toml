@@ -47,9 +47,6 @@ tempfile = "3.14"
 ignore = "0.4"
 unicode-segmentation = "1.12"
 open = "5"
-flate2 = "1"
-tar = "0.4"
-zip = "2"
 tauri = { version = "2", optional = true, features = ["unstable"] }
 portable-pty = { version = "0.9", optional = true }
 rfd = { version = "0.17.2", optional = true, default-features = false, features = ["xdg-portal"] }

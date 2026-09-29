@@ -10,6 +10,9 @@ workspace = true
 [dependencies]
 bitflags = "2"
 flate2 = "1"
+# lsp_init/auto_install (GitHub release archives)
+tar = "0.4"
+zip = "2"
 
 # mode/ - no extra deps
 # unicode/

@@ -210,7 +210,7 @@ async fn install_via_npm(
     }
     args.extend(packages.iter().cloned());
 
-    ovim_core::lsp_info!(
+    crate::lsp_info!(
         "AutoInstall",
         "Installing {} via npm: npm {}{}",
         package_list,
@@ -297,7 +297,7 @@ async fn install_via_npm(
 
     match install_path {
         Some(path) => {
-            ovim_core::lsp_info!(
+            crate::lsp_info!(
                 "AutoInstall",
                 "Successfully installed {} (binary: {}) at {}",
                 package_list,
@@ -393,7 +393,7 @@ async fn install_via_cargo(
         );
     };
 
-    ovim_core::lsp_info!(
+    crate::lsp_info!(
         "AutoInstall",
         "Installing {} via cargo install (sandbox: {})",
         package,
@@ -467,7 +467,7 @@ async fn install_via_cargo(
 /// consent prompt forever. So we resolve the actual binary here and report a
 /// clear failure if it can't be found, rather than a bogus success.
 async fn install_via_shell(_language_name: &str, verify_bin: &str, command: &str) -> InstallResult {
-    ovim_core::lsp_info!("AutoInstall", "Running custom install command: {}", command);
+    crate::lsp_info!("AutoInstall", "Running custom install command: {}", command);
 
     // Parse command (simple split on spaces - doesn't handle quotes)
     let parts: Vec<&str> = command.split_whitespace().collect();
@@ -506,7 +506,7 @@ async fn install_via_shell(_language_name: &str, verify_bin: &str, command: &str
     // The command exited 0 — now locate the binary it was supposed to install.
     match verify_shell_installation(verify_bin) {
         Some(path) => {
-            ovim_core::lsp_info!(
+            crate::lsp_info!(
                 "AutoInstall",
                 "Custom install succeeded; resolved '{}' at {}",
                 verify_bin,

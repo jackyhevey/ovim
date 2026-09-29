@@ -84,7 +84,7 @@ pub(super) async fn install_via_github(
         ));
     };
 
-    ovim_core::lsp_info!(
+    crate::lsp_info!(
         "AutoInstall",
         "Installing {} via GitHub release: {}/{}",
         language_name,
