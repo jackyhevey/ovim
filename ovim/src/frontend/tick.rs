@@ -308,6 +308,7 @@ async fn process_pending_debug_action(editor: &mut Editor) {
         }
         PendingDebugAction::FetchState => {
             let _ = editor.debug_fetch_stack_trace().await;
+            editor.debug_fetch_exception_info().await;
             let _ = editor.debug_fetch_scopes().await;
             let scope_refs: Vec<u64> = editor
                 .debug_state()

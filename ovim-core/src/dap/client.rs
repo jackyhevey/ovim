@@ -232,6 +232,13 @@ impl DebugAdapterClient {
         Ok(())
     }
 
+    /// What the thread stopped on (`exceptionInfo`).
+    pub async fn exception_info(&self, thread_id: u64) -> Result<DapExceptionInfo> {
+        let args = serde_json::json!({ "threadId": thread_id });
+        let result = self.request("exceptionInfo", Some(args)).await?;
+        Ok(serde_json::from_value(result)?)
+    }
+
     pub async fn threads(&self) -> Result<Vec<DapThread>> {
         let result = self.request("threads", None).await?;
         let threads: Vec<DapThread> = serde_json::from_value(
@@ -351,10 +358,17 @@ fn parse_dap_event(msg: &DapIncoming) -> Option<DapEvent> {
                 .and_then(|b| b.get("allThreadsStopped"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let description = ["description", "text"].iter().find_map(|key| {
+                body.and_then(|b| b.get(*key))
+                    .and_then(|v| v.as_str())
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_owned)
+            });
             Some(DapEvent::Stopped {
                 reason,
                 thread_id,
                 all_threads_stopped,
+                description,
             })
         }
         "continued" => {

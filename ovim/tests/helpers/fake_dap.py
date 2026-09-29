@@ -11,6 +11,7 @@ argv[1] is a directory shared with the test:
       "exception_filters": advertised exceptionBreakpointFilters
       "frames", "scopes": answers for stackTrace / scopes
       "variables": {"<variablesReference>": [variable, ...]}
+      "exception_info": body answered to exceptionInfo (else it fails)
       "evaluate": {"<expression>": {"result": ..., "type": ..., "variablesReference": ...}}
 """
 
@@ -109,6 +110,11 @@ while True:
             respond(request, known[expression])
         else:
             respond(request, success=False, message=f"cannot evaluate {expression}")
+    elif command == "exceptionInfo":
+        if "exception_info" in scenario:
+            respond(request, scenario["exception_info"])
+        else:
+            respond(request, success=False, message="no exception")
     elif command == "disconnect":
         respond(request)
         if scenario.get("linger_after_disconnect"):

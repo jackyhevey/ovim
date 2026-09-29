@@ -186,6 +186,31 @@ impl Editor {
         Ok(())
     }
 
+    /// When the debuggee stopped on an exception: ask the adapter what was
+    /// thrown and show it in the panel, the status line and the console.
+    /// The stop event's own description is the fallback.
+    pub async fn debug_fetch_exception_info(&mut self) {
+        if self.dap_manager.state.stop_reason.as_deref() != Some("exception") {
+            return;
+        }
+        let thread_id = self.dap_manager.state.stopped_thread.unwrap_or(1);
+        let summary = match self.dap_manager.exception_info(thread_id).await {
+            Ok(info) => Some(info.summary()),
+            Err(_) => self.dap_manager.state.exception.clone(),
+        };
+        // The debuggee may have been resumed while the request was in flight.
+        if self.dap_manager.state.stop_reason.as_deref() != Some("exception") {
+            return;
+        }
+        if let Some(summary) = summary {
+            self.set_status_message(format!("Exception: {summary}"));
+            self.dap_manager
+                .log_console(format!("Stopped on exception: {summary}"));
+            self.dap_manager.state.exception = Some(summary);
+        }
+        self.mark_dirty();
+    }
+
     /// Fetch and store scopes for the currently selected frame.
     pub async fn debug_fetch_scopes(&mut self) -> anyhow::Result<()> {
         let frame_id = self

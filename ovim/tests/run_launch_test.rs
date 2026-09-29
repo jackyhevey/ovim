@@ -1670,3 +1670,41 @@ async fn stopping_in_another_file_opens_it_and_marks_only_that_buffer() {
     assert_eq!(d.inner.test.editor.execution_line_in_current_buffer(), None);
     d.inner.stop_lsp().await;
 }
+
+/// OV-00443: an exception stop asks for `exceptionInfo` and shows type and
+/// message in the panel, the status line and the console.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exception_stop_shows_the_exception_type_and_message() {
+    let mut d = stopped_session(|root| {
+        let mut scenario = stopped_scenario(root);
+        scenario["on_configuration_done"] = json!([
+            {"event": "stopped", "body": {"reason": "exception", "threadId": 1, "allThreadsStopped": true}}
+        ]);
+        scenario["exception_info"] = json!({
+            "exceptionId": "java.lang.ArrayIndexOutOfBoundsException",
+            "description": "java.lang.ArrayIndexOutOfBoundsException: Index 5 out of bounds for length 2",
+            "breakMode": "unhandled",
+            "details": {"message": "Index 5 out of bounds for length 2",
+                        "typeName": "java.lang.ArrayIndexOutOfBoundsException"}
+        });
+        scenario
+    })
+    .await;
+    d.inner
+        .until("exception info", |s| {
+            s.test.editor.debug_state().exception.is_some()
+        })
+        .await;
+    assert!(!d.requests("exceptionInfo").is_empty());
+    let want = "java.lang.ArrayIndexOutOfBoundsException: Index 5 out of bounds for length 2";
+    assert!(
+        panel_labels(&d.inner).iter().any(|l| l.contains(want)),
+        "{:?}",
+        panel_labels(&d.inner)
+    );
+    assert!(d.inner.test.editor.status_message().contains(want));
+    d.inner
+        .until("the console line", |s| s.console_text().contains(want))
+        .await;
+    d.inner.stop_lsp().await;
+}

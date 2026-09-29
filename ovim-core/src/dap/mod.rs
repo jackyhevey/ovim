@@ -37,6 +37,9 @@ pub enum DapEvent {
         reason: String,
         thread_id: Option<u64>,
         all_threads_stopped: bool,
+        /// The adapter's `description`/`text` for the stop (for an exception
+        /// stop: `Type: message`).
+        description: Option<String>,
     },
     /// Debuggee continued execution.
     Continued { thread_id: u64 },
@@ -194,6 +197,12 @@ impl DapManager {
     /// console yet, as `(DAP category, text)`.
     pub fn take_console_output(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.console_output)
+    }
+
+    /// Adds a line to the debug console (shown in the run console).
+    pub fn log_console(&mut self, text: String) {
+        self.state.output_lines.push(format!("[console] {text}"));
+        self.console_output.push(("console".to_string(), format!("{text}\n")));
     }
 
     /// Returns (once) how the last session ended.
@@ -356,6 +365,15 @@ impl DapManager {
         Ok(())
     }
 
+    /// What the stopped thread threw.
+    pub async fn exception_info(&self, thread_id: u64) -> Result<DapExceptionInfo> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
+        client.exception_info(thread_id).await
+    }
+
     /// Get stack trace for a thread.
     pub async fn stack_trace(&self, thread_id: u64) -> Result<Vec<DapStackFrame>> {
         let client = self
@@ -447,9 +465,13 @@ impl DapManager {
                     reason,
                     thread_id,
                     all_threads_stopped: _,
+                    description,
                 } => {
                     self.state.stopped_thread = *thread_id;
                     self.state.stop_reason = Some(reason.clone());
+                    self.state.exception = (reason == "exception")
+                        .then(|| description.clone())
+                        .flatten();
                     self.state.is_running = false;
                     self.state.panels_visible = true;
                 }
@@ -457,6 +479,7 @@ impl DapManager {
                     self.state.is_running = true;
                     self.state.stopped_thread = None;
                     self.state.stop_reason = None;
+                    self.state.exception = None;
                     // Clear stale frame/variable data.
                     self.state.stack_frames.clear();
                     self.state.scopes.clear();

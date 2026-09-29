@@ -67,6 +67,8 @@ pub struct DebugState {
     pub stopped_thread: Option<u64>,
     /// Reason for the stop (e.g., "breakpoint", "step", "exception").
     pub stop_reason: Option<String>,
+    /// What was thrown (`Type: message`) when the stop reason is "exception".
+    pub exception: Option<String>,
 
     // ---- Breakpoints ----
     /// Breakpoints per file path.
@@ -124,6 +126,7 @@ impl DebugState {
             is_running: false,
             stopped_thread: None,
             stop_reason: None,
+            exception: None,
             breakpoints: HashMap::new(),
             stack_frames: Vec::new(),
             selected_frame: 0,
@@ -317,6 +320,7 @@ impl DebugState {
         self.is_running = false;
         self.stopped_thread = None;
         self.stop_reason = None;
+        self.exception = None;
         self.stack_frames.clear();
         self.selected_frame = 0;
         self.scopes.clear();

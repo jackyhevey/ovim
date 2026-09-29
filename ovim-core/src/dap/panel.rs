@@ -128,6 +128,9 @@ pub fn rows(state: &DebugState) -> Vec<PanelRow> {
         RowKind::Header,
         format!("Call Stack ({status})"),
     ));
+    if let Some(exception) = state.exception.as_deref().filter(|_| !state.is_running) {
+        rows.push(PanelRow::new(RowKind::Note, format!("! {exception}")));
+    }
     if state.stack_frames.is_empty() {
         rows.push(PanelRow::new(
             RowKind::Note,
