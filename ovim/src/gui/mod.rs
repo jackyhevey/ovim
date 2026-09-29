@@ -428,6 +428,9 @@ pub struct GuiLine {
     pub executing: bool,
     /// Number of lines hidden below this line by a closed fold.
     pub folded: Option<usize>,
+    /// Fold gutter mark of the innermost fold around the line: `open` and
+    /// `closed` on its header, `inside` on the lines below it.
+    pub fold: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1149,6 +1152,11 @@ enum GuiRequest {
         line: usize,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// A click on a fold marker in the gutter (`line` is 1-based).
+    ToggleFold {
+        line: usize,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     SelectDebugFrame {
         index: usize,
         reply: oneshot::Sender<Result<(), String>>,
@@ -1453,6 +1461,12 @@ impl GuiBridge {
     /// A click in the gutter: toggle the breakpoint on `line` (1-based).
     pub async fn toggle_breakpoint(&self, line: usize) -> Result<(), String> {
         self.request(|reply| GuiRequest::ToggleBreakpoint { line, reply })
+            .await
+    }
+
+    /// A click on a fold marker in the gutter: toggle the fold on `line` (1-based).
+    pub async fn toggle_fold(&self, line: usize) -> Result<(), String> {
+        self.request(|reply| GuiRequest::ToggleFold { line, reply })
             .await
     }
 
@@ -2406,6 +2420,15 @@ async fn handle_request(
             };
             (reply, result)
         }
+        GuiRequest::ToggleFold { line, reply } => {
+            let result = if line >= 1 && editor.toggle_fold_at_gutter(line - 1) {
+                refresh_after_input(editor);
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("No fold starts on line {line}"))
+            };
+            (reply, result)
+        }
         GuiRequest::SelectDebugFrame { index, reply } => {
             let result = (index < editor.debug_state().stack_frames.len())
                 .then_some(())
@@ -2917,6 +2940,22 @@ fn project_lines(
                 folded: (!continuation)
                     .then(|| buffer.fold_manager().folded_line_count_at(line_index))
                     .flatten(),
+                fold: (!continuation)
+                    .then(|| {
+                        buffer
+                            .fold_manager()
+                            .gutter_chain(line_index)
+                            .last()
+                            .and_then(|mark| match mark {
+                                ovim_core::fold::FoldGutterMark::OpenStart => Some("open"),
+                                ovim_core::fold::FoldGutterMark::ClosedStart => Some("closed"),
+                                ovim_core::fold::FoldGutterMark::Inside => Some("inside"),
+                                ovim_core::fold::FoldGutterMark::Blank => None,
+                            })
+                            .map(str::to_string)
+                    })
+                    .flatten()
+                    .filter(|_| editor.options.foldcolumn > 0),
             });
             if projected.len() >= visible {
                 break 'lines;
@@ -4435,6 +4474,44 @@ fn indexed_rgb(index: u8) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OV-00473: the GUI gets one fold mark per line (innermost fold), and a
+    /// click on a header toggles it through the same core command as `za`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn gui_lines_carry_the_fold_gutter_mark() {
+        let mut editor = Editor::with_content("a {\n  b {\n    c\n  }\n}\nd\n");
+        editor
+            .buffer_mut()
+            .set_file_path("/tmp/fold_gui.txt".into());
+        handle_viewport_resize(&mut editor, 100, 30);
+        // Fold commands compute the folds; open everything, close the inner one.
+        editor.fold_command('R');
+        let marks = |editor: &Editor| -> Vec<Option<String>> {
+            snapshot(editor, 1).panes[0]
+                .lines
+                .iter()
+                .map(|line| line.fold.clone())
+                .collect()
+        };
+        let text = |value: &str| Some(value.to_string());
+        assert_eq!(
+            marks(&editor),
+            [
+                text("open"),
+                text("open"),
+                text("inside"),
+                text("inside"),
+                None,
+                None
+            ]
+        );
+        assert!(editor.toggle_fold_at_gutter(1));
+        let closed = snapshot(&editor, 2).panes[0].lines.clone();
+        // The body of the closed fold is not projected; its header says so.
+        assert_eq!(closed[1].fold.as_deref(), Some("closed"));
+        assert_eq!(closed[1].folded, Some(1));
+        assert!(!editor.toggle_fold_at_gutter(5), "no fold starts on `d`");
+    }
 
     #[test]
     fn gui_diff_geometry_tracks_the_focused_pane_width() {

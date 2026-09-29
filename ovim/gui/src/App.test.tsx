@@ -1452,6 +1452,27 @@ describe("Ovim Solid workbench", () => {
         }
     });
 
+    it("draws fold markers in the gutter: closed headers always, inside lines never", () => {
+        const pane = mockSnapshot.panes[0];
+        const original = pane.lines.slice(0, 3).map((line) => line.fold);
+        pane.lines[0].fold = "closed";
+        pane.lines[1].fold = "open";
+        pane.lines[2].fold = "inside";
+        try {
+            const result = render(() => <App />);
+            const marks = result.container.querySelectorAll(".fold-gutter");
+            expect(marks).toHaveLength(3);
+            expect(marks[0].textContent).toBe("▸");
+            expect(marks[0].classList.contains("fold-closed")).toBe(true);
+            expect(marks[1].textContent).toBe("▾");
+            expect(marks[2].textContent).toBe("");
+        } finally {
+            pane.lines.slice(0, 3).forEach((line, index) => {
+                line.fold = original[index];
+            });
+        }
+    });
+
     it("renders the selected language server detail projected by the core", () => {
         mockSnapshot.lspManager = {
             filter: "",

@@ -28,6 +28,8 @@ export interface GuiLine {
     executing?: boolean;
     /** Lines hidden below this one by a closed fold. */
     folded?: number;
+    /** Fold gutter mark: a fold header (open or closed) or a line inside one. */
+    fold?: "open" | "closed" | "inside";
 }
 
 export type GuiLayoutNode =

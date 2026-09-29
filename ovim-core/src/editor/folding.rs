@@ -7,7 +7,7 @@
 
 use super::decoration::{Decoration, DecorationPlacement, DecorationSource, DecorationStyle};
 use super::Editor;
-use crate::fold::indent_fold_ranges;
+use crate::fold::{indent_fold_ranges, syntax_fold_ranges, FoldSource};
 use crate::unicode::GraphemeCol;
 
 /// How long the buffer must be quiet before folds are recomputed.
@@ -21,23 +21,35 @@ impl Editor {
             return;
         }
         self.buffer_mut().fold_manager_mut().activate();
-        self.compute_indent_folds();
+        self.compute_local_folds();
         self.lsp.intents.folding_ranges = true;
     }
 
-    /// Replaces the automatic folds with indentation folds.
-    fn compute_indent_folds(&mut self) {
+    /// Replaces the automatic folds with the ones the editor can compute
+    /// itself: the tree-sitter syntax tree when the buffer has one, otherwise
+    /// indentation. Used until (and instead of) a language server's answer.
+    pub(crate) fn compute_local_folds(&mut self) {
         let tab_width = self.indent_options().tab_width.max(1);
         let buffer = self.buffer();
-        let lines: Vec<String> = (0..buffer.line_count())
-            .map(|line| buffer.line_text(line).unwrap_or_default().to_string())
-            .collect();
-        let ranges = indent_fold_ranges(&lines, tab_width);
-        let version = buffer.version();
         let line_count = buffer.line_count();
+        let version = buffer.version();
+        let syntax = buffer.syntax_tree().map(|tree| {
+            syntax_fold_ranges(tree, &|row| {
+                buffer.line_text(row).unwrap_or_default().to_string()
+            })
+        });
+        let (ranges, source) = match syntax {
+            Some(ranges) if !ranges.is_empty() => (ranges, FoldSource::Syntax),
+            _ => {
+                let lines: Vec<String> = (0..line_count)
+                    .map(|line| buffer.line_text(line).unwrap_or_default().to_string())
+                    .collect();
+                (indent_fold_ranges(&lines, tab_width), FoldSource::Indent)
+            }
+        };
         self.buffer_mut()
             .fold_manager_mut()
-            .set_auto_folds(&ranges, line_count, version, false);
+            .set_auto_folds_from(&ranges, line_count, version, source);
     }
 
     /// Applies folds from the language server. Returns false for stale or
@@ -72,11 +84,16 @@ impl Editor {
 
     /// Recomputes the automatic folds after the text settled.
     pub(crate) async fn maintain_folds(&mut self) {
+        if !self.buffer().fold_manager().is_active() {
+            // The fold gutter needs the folds up front; without it they are
+            // computed on the first fold command.
+            if !self.fold_gutter_wants_folds() {
+                return;
+            }
+            self.ensure_folds();
+        }
         let buffer = self.buffer();
         let manager = buffer.fold_manager();
-        if !manager.is_active() {
-            return;
-        }
         let version = buffer.version();
         if manager.auto_version() == Some(version) {
             self.lsp.state.fold_tracking = None;
@@ -95,10 +112,22 @@ impl Editor {
         }
         self.lsp.state.fold_tracking = None;
         if !self.buffer().fold_manager().is_lsp_backed() {
-            self.compute_indent_folds();
+            self.compute_local_folds();
             self.refresh_fold_view();
         }
         self.request_folding_ranges().await;
+    }
+
+    /// Whether the current buffer should get folds without a fold command
+    /// because the fold gutter is enabled: real files of a sane size.
+    fn fold_gutter_wants_folds(&self) -> bool {
+        const MAX_LINES: usize = 50_000;
+        let buffer = self.buffer();
+        self.options.foldcolumn > 0
+            && buffer
+                .file_path()
+                .is_some_and(|path| !super::buffer_manager::is_scratch_path(path))
+            && buffer.line_count() <= MAX_LINES
     }
 
     pub(in crate::editor) async fn request_folding_ranges(&mut self) {
@@ -518,5 +547,50 @@ impl Editor {
             None => end,
         };
         (start, end)
+    }
+
+    /// Width of the fold gutter column for the current buffer (0 = hidden).
+    pub fn fold_column_width(&self) -> usize {
+        let options = &self.options;
+        if options.foldcolumn == 0 {
+            return 0;
+        }
+        if !options.foldcolumn_auto {
+            return options.foldcolumn;
+        }
+        let manager = self.buffer().fold_manager();
+        if manager.is_empty() || !manager.is_enabled() {
+            return 0;
+        }
+        manager.deepest_nesting().min(options.foldcolumn)
+    }
+
+    /// The `width` fold gutter cells of `line`, left to right. The innermost
+    /// `width` fold levels are shown (right-aligned), so `foldcolumn=1`
+    /// marks the innermost fold: `-` on its header, `|` inside, `+` when it
+    /// is closed.
+    pub fn fold_gutter_cells(&self, line: usize, width: usize) -> Vec<crate::fold::FoldGutterMark> {
+        use crate::fold::FoldGutterMark;
+        let chain = self.buffer().fold_manager().gutter_chain(line);
+        let shown = &chain[chain.len().saturating_sub(width)..];
+        let mut cells = vec![FoldGutterMark::Blank; width - shown.len().min(width)];
+        cells.extend_from_slice(shown);
+        cells
+    }
+
+    /// Toggles the fold that starts at `line` (a click on its gutter mark).
+    /// Returns false when no fold starts there.
+    pub fn toggle_fold_at_gutter(&mut self, line: usize) -> bool {
+        self.ensure_folds();
+        let manager = self.buffer_mut().fold_manager_mut();
+        // The closed fold that hides the line's body, else the outermost
+        // fold that starts on it.
+        let started = manager.fold_at(line).is_some();
+        if !started {
+            return false;
+        }
+        manager.toggle_fold_at(line);
+        self.after_fold_change();
+        true
     }
 }

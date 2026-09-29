@@ -2645,6 +2645,52 @@ function App() {
                                                         );
                                                     }}
                                                 >
+                                                    <Show when={line.fold}>
+                                                        {(fold) => (
+                                                            <span
+                                                                class={`fold-gutter fold-${fold()}`}
+                                                                title={
+                                                                    fold() ===
+                                                                    "closed"
+                                                                        ? "Unfold"
+                                                                        : fold() ===
+                                                                            "open"
+                                                                          ? "Fold"
+                                                                          : undefined
+                                                                }
+                                                                onMouseDown={(
+                                                                    event,
+                                                                ) => {
+                                                                    // Only a fold header toggles; the
+                                                                    // breakpoint click must not fire.
+                                                                    event.stopPropagation();
+                                                                    if (
+                                                                        fold() ===
+                                                                            "inside" ||
+                                                                        !props
+                                                                            .pane
+                                                                            .focused
+                                                                    )
+                                                                        return;
+                                                                    event.preventDefault();
+                                                                    void mutate(
+                                                                        "gui_toggle_fold",
+                                                                        {
+                                                                            line: line.number,
+                                                                        },
+                                                                    );
+                                                                }}
+                                                            >
+                                                                {fold() ===
+                                                                "closed"
+                                                                    ? "▸"
+                                                                    : fold() ===
+                                                                        "open"
+                                                                      ? "▾"
+                                                                      : ""}
+                                                            </span>
+                                                        )}
+                                                    </Show>
                                                     {line.continuation
                                                         ? ""
                                                         : line.number}

@@ -302,6 +302,12 @@ pub struct EditorOptions {
     /// Milliseconds the typist must pause before an identifier-triggered
     /// request is sent (default: 40). Trigger characters ignore the delay.
     pub autocomplete_delay_ms: u64,
+    /// Vim's `foldcolumn`: width of the fold marker column in the gutter
+    /// (0 hides it). With `foldcolumn_auto` it is the maximum: the column is
+    /// as wide as the deepest fold nesting and absent when there are no folds
+    /// (nvim's `auto[:N]`). Default `auto:1`.
+    pub foldcolumn: usize,
+    pub foldcolumn_auto: bool,
 }
 
 impl Default for EditorOptions {
@@ -341,6 +347,8 @@ impl Default for EditorOptions {
             autocomplete: true,
             autocomplete_min_chars: 2,
             autocomplete_delay_ms: 40,
+            foldcolumn: 1,
+            foldcolumn_auto: true,
         }
     }
 }

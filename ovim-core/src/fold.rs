@@ -18,6 +18,42 @@ pub enum FoldOrigin {
     Auto,
 }
 
+/// One cell of the fold gutter (Vim's `foldcolumn`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldGutterMark {
+    /// No fold at this nesting level.
+    Blank,
+    /// The line heads an open fold (`-`).
+    OpenStart,
+    /// The line heads a closed fold (`+`).
+    ClosedStart,
+    /// The line is inside an open fold (`|`).
+    Inside,
+}
+
+impl FoldGutterMark {
+    /// The character Vim draws for the mark.
+    pub fn glyph(self) -> char {
+        match self {
+            Self::Blank => ' ',
+            Self::OpenStart => '-',
+            Self::ClosedStart => '+',
+            Self::Inside => '|',
+        }
+    }
+}
+
+/// Which automatic source produced the current `Auto` folds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoldSource {
+    /// Indentation heuristic (no server ranges, no syntax tree).
+    Indent,
+    /// The tree-sitter syntax tree (no server ranges).
+    Syntax,
+    /// The language server's `textDocument/foldingRange`.
+    Lsp,
+}
+
 /// Represents a text fold (collapsed region)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fold {
@@ -113,9 +149,8 @@ pub struct FoldManager {
     /// Set once the user has issued a fold command for this buffer; folds are
     /// only computed and maintained after that.
     active: bool,
-    /// The automatic folds came from the language server (not the indentation
-    /// fallback).
-    lsp_backed: bool,
+    /// Where the automatic folds came from.
+    source: FoldSource,
     /// Vim's `foldlevel`: folds nested deeper than this are closed, the others
     /// open. `None` is "everything open" (a fresh buffer): it counts as the
     /// deepest nesting, so the first `zm` is useful (Vim under
@@ -132,7 +167,7 @@ impl FoldManager {
             synced_line_count: 0,
             auto_version: None,
             active: false,
-            lsp_backed: false,
+            source: FoldSource::Indent,
             foldlevel: None,
         }
     }
@@ -208,7 +243,11 @@ impl FoldManager {
     }
 
     pub fn is_lsp_backed(&self) -> bool {
-        self.lsp_backed
+        self.source == FoldSource::Lsp
+    }
+
+    pub fn source(&self) -> FoldSource {
+        self.source
     }
 
     /// The outermost closed fold containing `line`, as `(start, end)`.
@@ -248,6 +287,29 @@ impl FoldManager {
             Some((start, end)) if start == line => Some(end - start),
             _ => None,
         }
+    }
+
+    /// Marks for the fold gutter of `line`, outermost fold first: one entry
+    /// per fold that contains the line (the chain stops at a closed fold,
+    /// whose body is hidden anyway).
+    pub fn gutter_chain(&self, line: usize) -> Vec<FoldGutterMark> {
+        if !self.enabled {
+            return Vec::new();
+        }
+        let mut marks = Vec::new();
+        for index in self.chain(line) {
+            let fold = &self.folds[index];
+            if !fold.is_open() {
+                marks.push(FoldGutterMark::ClosedStart);
+                break;
+            }
+            marks.push(if fold.start_line == line {
+                FoldGutterMark::OpenStart
+            } else {
+                FoldGutterMark::Inside
+            });
+        }
+        marks
     }
 
     /// Merged inclusive ranges of hidden lines, ascending.
@@ -592,7 +654,23 @@ impl FoldManager {
         buffer_version: usize,
         from_lsp: bool,
     ) {
-        self.lsp_backed = from_lsp;
+        let source = if from_lsp {
+            FoldSource::Lsp
+        } else {
+            FoldSource::Indent
+        };
+        self.set_auto_folds_from(ranges, line_count, buffer_version, source);
+    }
+
+    /// Like [`Self::set_auto_folds`], recording which source produced them.
+    pub fn set_auto_folds_from(
+        &mut self,
+        ranges: &[(usize, usize)],
+        line_count: usize,
+        buffer_version: usize,
+        source: FoldSource,
+    ) {
+        self.source = source;
         let previous: Vec<Fold> = self
             .folds
             .iter()
@@ -719,6 +797,98 @@ pub fn indent_fold_ranges(lines: &[String], tab_width: usize) -> Vec<(usize, usi
         }
     }
     ranges
+}
+
+/// Node kinds worth folding: bodies, declarations, literals and comments
+/// across the tree-sitter grammars ovim ships (`block`, `class_body`,
+/// `function_definition`, `object`, `block_comment`, ...).
+fn syntax_kind_is_foldable(kind: &str) -> bool {
+    const PARTS: &[&str] = &[
+        "block",
+        "body",
+        "declaration",
+        "definition",
+        "item",
+        "literal",
+        "list",
+        "array",
+        "object",
+        "dictionary",
+        "table",
+        "comment",
+        "arguments",
+        "parameters",
+        "statement",
+        "expression",
+        "clause",
+        "class",
+        "function",
+        "method",
+        "struct",
+        "enum",
+        "impl",
+        "trait",
+        "interface",
+        "module",
+        "namespace",
+        "element",
+        "section",
+    ];
+    // Single-token-ish or purely structural nodes that repeat their parent.
+    const SKIP: &[&str] = &["program", "source_file", "compilation_unit", "document"];
+    !SKIP.contains(&kind) && PARTS.iter().any(|part| kind.contains(part))
+}
+
+/// Folds derived from a tree-sitter syntax tree: every multi-line foldable
+/// node heads a fold from its first line. A last line that only closes the
+/// construct (`}`, `)`, `]`, `end`, `</tag>`) stays visible, as in every
+/// editor; `line_text` supplies the buffer's lines.
+pub fn syntax_fold_ranges(
+    tree: &tree_sitter::Tree,
+    line_text: &dyn Fn(usize) -> String,
+) -> Vec<(usize, usize)> {
+    let closes_only = |row: usize| -> bool {
+        let text = line_text(row);
+        let text = text.trim_start();
+        text.starts_with(['}', ')', ']'])
+            || text.starts_with("</")
+            || matches!(text.trim_end(), "end" | "fi" | "done" | "esac" | "endif")
+    };
+    let mut ranges = Vec::new();
+    let mut cursor = tree.walk();
+    loop {
+        let node = cursor.node();
+        let start_row = node.start_position().row;
+        let mut end_row = node.end_position().row;
+        // A node ending at column 0 of a row does not cover that row.
+        if node.end_position().column == 0 && end_row > start_row {
+            end_row -= 1;
+        }
+        if node.is_named() && end_row > start_row && syntax_kind_is_foldable(node.kind()) {
+            let end = if closes_only(end_row) && end_row - 1 > start_row {
+                end_row - 1
+            } else {
+                end_row
+            };
+            if end > start_row {
+                ranges.push((start_row, end));
+            }
+        }
+        // Depth-first walk.
+        if end_row > start_row && cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                ranges.sort_unstable();
+                ranges.dedup();
+                return ranges;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
