@@ -40,7 +40,7 @@ pub struct UiPanels {
     /// Top-right toast notifications (transient and sticky)
     pub toast_center: ToastCenter,
     /// Open branch diff review (`<Space>gd`), if any
-    pub diff_review: Option<super::diff_review::DiffReviewState>,
+    pub diff_review: Option<Box<super::diff_review::DiffReviewState>>,
     /// Shared durable refinements, enabled by frontends or explicitly injected by tests.
     pub diff_review_store: Option<crate::native_diff::store::ReviewStore>,
     /// Latest agent arrangement for each Git worktree in this editor session.

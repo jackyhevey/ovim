@@ -9,7 +9,7 @@ pub(crate) struct LspSubsystem {
     /// Core LSP state (manager, diagnostics, hover, etc.)
     pub(crate) state: LspState,
     /// Generic slots for in-flight LSP requests
-    pub(crate) slots: LspSlots,
+    pub(crate) slots: Box<LspSlots>,
     /// Per-feature intent flags (replaces old single-slot LspAction dispatch)
     pub(crate) intents: LspIntents,
     /// LSP UI panel state (manager panel and install progress)

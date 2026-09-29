@@ -444,7 +444,7 @@ pub struct Editor {
     /// UI panels (file tree, quickfix, path completion, dashboard, diagnostic badge)
     pub ui_panels: UiPanels,
     /// DAP (Debug Adapter Protocol) manager for debug sessions
-    dap_manager: crate::dap::DapManager,
+    dap_manager: Box<crate::dap::DapManager>,
     /// AI chat, selection, and in-buffer agent state
     pub ai_state: Box<ai_state::AiState>,
     /// Optional capabilities supplied by the active frontend.
@@ -633,7 +633,7 @@ impl Editor {
             render_cache: RenderCache::default(),
             yank_flash: None,
             ui_panels: UiPanels::default(),
-            dap_manager: crate::dap::DapManager::new(),
+            dap_manager: Box::new(crate::dap::DapManager::new()),
             ai_state: Box::new(ai_state::AiState::default()),
             services: EditorServices::default(),
             browser_start_pending: false,
@@ -687,7 +687,7 @@ impl Editor {
             render_cache: RenderCache::default(),
             yank_flash: None,
             ui_panels: UiPanels::default(),
-            dap_manager: crate::dap::DapManager::new(),
+            dap_manager: Box::new(crate::dap::DapManager::new()),
             ai_state: Box::new(ai_state::AiState::default()),
             services: EditorServices::default(),
             browser_start_pending: false,
@@ -2779,7 +2779,11 @@ mod size_tests {
     /// This prevents accidental struct bloat during development
     #[test]
     fn editor_size_regression() {
-        const MAX_ACCEPTABLE_SIZE: usize = 10_000; // 10KB - conservative threshold
+        // Rarely used per-feature state (diff review, debugger, the LSP request
+        // slots) lives behind a Box, which took the struct from ~9.9 KB to
+        // ~6.7 KB (OV-00472). The limit sits ~1 KB above that so the next
+        // large field has to be boxed instead of quietly eating the headroom.
+        const MAX_ACCEPTABLE_SIZE: usize = 7_800;
 
         let actual = size_of::<Editor>();
 
