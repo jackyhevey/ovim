@@ -87,6 +87,33 @@ const openExternalLink = (url: string) => {
     window.open(url, "_blank", "noopener,noreferrer");
 };
 
+/** A completion label with the characters the user typed emphasised. */
+export const MatchedLabel = (props: { label: string; matched: number[] }) => {
+    const parts = createMemo(() => {
+        const matched = new Set(props.matched);
+        const chars = Array.from(props.label);
+        const out: Array<{ text: string; match: boolean }> = [];
+        chars.forEach((char, index) => {
+            const match = matched.has(index);
+            const last = out[out.length - 1];
+            if (last && last.match === match) last.text += char;
+            else out.push({ text: char, match });
+        });
+        return out;
+    });
+    return (
+        <For each={parts()}>
+            {(part) =>
+                part.match ? (
+                    <mark class="completion-match">{part.text}</mark>
+                ) : (
+                    <>{part.text}</>
+                )
+            }
+        </For>
+    );
+};
+
 export const Markdown = (props: {
     text: string;
     onOpenLink?: (url: string) => void;
@@ -2416,6 +2443,36 @@ function App() {
         };
     };
 
+    /** The completion menu width; the documentation popup sits beside it. */
+    const COMPLETION_WIDTH = 430;
+    const COMPLETION_DOCS_WIDTH = 320;
+    const completionDocsStyle = (line: number, displayColumn: number) => {
+        const menu = inlineOverlayStyle(
+            line,
+            displayColumn,
+            COMPLETION_WIDTH,
+            Math.min(
+                290,
+                Math.max(34, (view().completion?.items.length ?? 1) * 34),
+            ),
+        );
+        const containerWidth = editorBody?.clientWidth || 960;
+        const menuLeft = parseFloat(menu.left);
+        const menuWidth = parseFloat(menu.width);
+        const rightLeft = menuLeft + menuWidth + 6;
+        const fitsRight =
+            rightLeft + COMPLETION_DOCS_WIDTH <= containerWidth - 8;
+        const left = fitsRight
+            ? rightLeft
+            : Math.max(8, menuLeft - COMPLETION_DOCS_WIDTH - 6);
+        return {
+            left: `${left}px`,
+            top: menu.top,
+            width: `${COMPLETION_DOCS_WIDTH}px`,
+            "max-height": "290px",
+        };
+    };
+
     const InlineSelectionComposer = (props: { pane: GuiPane }) => (
         <Show
             when={
@@ -4552,7 +4609,7 @@ function App() {
                                     style={inlineOverlayStyle(
                                         view().cursor.line,
                                         view().cursor.displayColumn,
-                                        430,
+                                        COMPLETION_WIDTH,
                                         Math.min(
                                             290,
                                             Math.max(
@@ -4583,6 +4640,8 @@ function App() {
                                                     selected:
                                                         item.index ===
                                                         menu().selected,
+                                                    deprecated:
+                                                        !!item.deprecated,
                                                 }}
                                                 onPointerEnter={() =>
                                                     void mutate(
@@ -4606,18 +4665,65 @@ function App() {
                                                     );
                                                 }}
                                             >
-                                                <span class="completion-kind">
-                                                    <Icon
-                                                        name="command"
-                                                        size={16}
-                                                    />
+                                                <span
+                                                    class={`completion-kind kind-${item.kindClass ?? "other"}`}
+                                                    title={item.kind}
+                                                    aria-hidden="true"
+                                                >
+                                                    {item.kindGlyph ?? "·"}
                                                 </span>
-                                                <strong>{item.label}</strong>
-                                                <small>{item.detail}</small>
+                                                <span class="completion-label">
+                                                    <MatchedLabel
+                                                        label={item.label}
+                                                        matched={
+                                                            item.matched ?? []
+                                                        }
+                                                    />
+                                                    <Show when={item.detail}>
+                                                        <em class="completion-detail">
+                                                            {item.detail}
+                                                        </em>
+                                                    </Show>
+                                                </span>
+                                                <small class="completion-description">
+                                                    {item.description}
+                                                </small>
                                             </button>
                                         )}
                                     </For>
+                                    <Show
+                                        when={
+                                            (menu().total ?? 0) >
+                                            menu().items.length
+                                        }
+                                    >
+                                        <div class="completion-count">
+                                            {menu().selected + 1} /{" "}
+                                            {menu().total}
+                                        </div>
+                                    </Show>
                                 </div>
+                            )}
+                        </Show>
+
+                        <Show
+                            when={
+                                !view().aiChat
+                                    ? view().completion?.documentation
+                                    : undefined
+                            }
+                        >
+                            {(documentation) => (
+                                <aside
+                                    class="completion-docs"
+                                    aria-label="Completion documentation"
+                                    style={completionDocsStyle(
+                                        view().cursor.line,
+                                        view().cursor.displayColumn,
+                                    )}
+                                >
+                                    <Markdown text={documentation()} />
+                                </aside>
                             )}
                         </Show>
 

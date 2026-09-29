@@ -211,6 +211,10 @@ pub struct EditorSnapshot {
     pub search_replace: Option<SearchReplaceInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hover_info: Option<String>,
+    /// The completion menu while it is open (headless sessions have no screen
+    /// to read it from).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<CompletionInfo>,
     /// Active AI chat state, including hidden chats that continue running.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ai_chat: Option<AiChatSnapshot>,
@@ -438,6 +442,36 @@ pub struct SearchReplaceRowInfo {
     pub selected: bool,
     /// For matches: the line as it will read after the replacement.
     pub preview: String,
+}
+
+/// Completion menu state: what is listed, in which order, and what is selected.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionInfo {
+    /// Index of the selected row within the full list.
+    pub selected: usize,
+    /// Number of rows in the full (filtered) list.
+    pub total: usize,
+    /// The leading rows, best first (capped at 50).
+    pub items: Vec<CompletionItemInfo>,
+    /// Markdown shown in the documentation popup for the selected row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub documentation: Option<String>,
+    /// Snippet tab stops are being navigated (Tab / Shift-Tab).
+    pub snippet_active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionItemInfo {
+    pub label: String,
+    /// Text drawn right after the label (`labelDetails.detail`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Right-aligned text (`labelDetails.description`, e.g. the package).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    pub deprecated: bool,
 }
 
 /// Picker state information

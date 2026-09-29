@@ -1372,6 +1372,72 @@ describe("Ovim Solid workbench", () => {
         }
     });
 
+    it("renders completion rows with kind, label details, matches, deprecation and documentation", () => {
+        mockSnapshot.completion = {
+            selected: 0,
+            total: 40,
+            items: [
+                {
+                    index: 0,
+                    label: "getEmail",
+                    detail: "()",
+                    description: "String",
+                    kind: "Method",
+                    kindGlyph: "m",
+                    kindClass: "function",
+                    matched: [0, 3, 4],
+                },
+                {
+                    index: 1,
+                    label: "ArrayList",
+                    description: "java.util",
+                    kind: "Class",
+                    kindGlyph: "C",
+                    kindClass: "type",
+                    deprecated: true,
+                    matched: [],
+                },
+            ],
+            documentation:
+                "```\nString getEmail()\n```\n\nReturns the **email**.",
+        };
+        try {
+            const result = render(() => <App />);
+            const rows = result.container.querySelectorAll(".completion-item");
+            expect(rows).toHaveLength(2);
+            expect(rows[0].querySelector(".completion-kind")?.textContent).toBe(
+                "m",
+            );
+            expect(
+                rows[0].querySelector(".completion-kind")?.className,
+            ).toContain("kind-function");
+            expect(
+                rows[0].querySelector(".completion-detail")?.textContent,
+            ).toBe("()");
+            expect(
+                [...rows[0].querySelectorAll(".completion-match")].map(
+                    (mark) => mark.textContent,
+                ),
+            ).toEqual(["g", "Em"]);
+            expect(
+                rows[0].querySelector(".completion-description")?.textContent,
+            ).toBe("String");
+            expect(rows[1].classList.contains("deprecated")).toBe(true);
+            expect(
+                rows[1].querySelector(".completion-description")?.textContent,
+            ).toBe("java.util");
+            expect(
+                result.container.querySelector(".completion-count")
+                    ?.textContent,
+            ).toContain("1 / 40");
+            expect(
+                result.container.querySelector(".completion-docs")?.textContent,
+            ).toContain("Returns the email.");
+        } finally {
+            delete mockSnapshot.completion;
+        }
+    });
+
     it("marks a closed fold header with the hidden line count", () => {
         const pane = mockSnapshot.panes[0];
         const original = pane.lines[0].folded;

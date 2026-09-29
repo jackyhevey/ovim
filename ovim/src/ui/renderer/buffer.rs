@@ -2288,6 +2288,21 @@ pub fn render_buffer(
                         .collect()
                 })
                 .unwrap_or_default();
+            // A just-entered snippet placeholder reads as selected: typing
+            // replaces it (see `Editor::snippet_placeholder_highlight`).
+            if let Some((hl_line, start_col, end_col)) = editor.snippet_placeholder_highlight() {
+                if hl_line == line_idx {
+                    let mut offsets = line_text_original
+                        .char_indices()
+                        .map(|(byte, _)| byte)
+                        .chain(std::iter::once(line_text_original.len()));
+                    let start = offsets.clone().nth(start_col);
+                    let end = offsets.nth(end_col);
+                    if let (Some(start), Some(end)) = (start, end) {
+                        background_ranges.push((start..end, Color::Rgb(62, 84, 140)));
+                    }
+                }
+            }
             if !background_ranges.is_empty() {
                 background_ranges = remap_highlights(&background_ranges, &conceal_byte_map);
                 if !wrap {

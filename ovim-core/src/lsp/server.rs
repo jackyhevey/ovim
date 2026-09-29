@@ -926,7 +926,7 @@ impl LanguageServer {
 
             // Text document capabilities - advertise support for common LSP features
             text_document: Some(lsp_types::TextDocumentClientCapabilities {
-                completion: Some(Default::default()),
+                completion: Some(completion_client_capabilities()),
                 hover: Some(hover_client_capabilities()),
                 signature_help: Some(Default::default()),
                 declaration: Some(Default::default()),
@@ -1930,6 +1930,25 @@ impl LanguageServer {
             .collect()
     }
 
+    /// Whether the server advertised `completionProvider.resolveProvider`.
+    pub async fn supports_completion_resolve(&self) -> bool {
+        self.capabilities()
+            .await
+            .and_then(|caps| caps.completion_provider)
+            .and_then(|provider| provider.resolve_provider)
+            .unwrap_or(false)
+    }
+
+    /// `completionProvider.allCommitCharacters` (LSP 3.17): commit characters
+    /// for every item that does not carry its own.
+    pub async fn completion_all_commit_characters(&self) -> Vec<String> {
+        self.capabilities()
+            .await
+            .and_then(|caps| caps.completion_provider)
+            .and_then(|provider| provider.all_commit_characters)
+            .unwrap_or_default()
+    }
+
     /// Checks if the server supports formatting (lock-free)
     pub async fn supports_formatting(&self) -> bool {
         self.inner.has_cap(LspCapFlags::FORMATTING)
@@ -2299,6 +2318,73 @@ fn hover_client_capabilities() -> lsp_types::HoverClientCapabilities {
             lsp_types::MarkupKind::Markdown,
             lsp_types::MarkupKind::PlainText,
         ]),
+    }
+}
+
+/// What this client can do with completion items. The menu renders
+/// `labelDetails`, deprecation tags and lazily-resolved documentation, expands
+/// snippets, understands insert/replace ranges, `commitCharacters` and list
+/// level `itemDefaults`.
+pub(crate) fn completion_client_capabilities() -> lsp_types::CompletionClientCapabilities {
+    use lsp_types::{
+        CompletionClientCapabilities, CompletionItemCapability,
+        CompletionItemCapabilityResolveSupport, CompletionItemKind, CompletionItemKindCapability,
+        CompletionItemTag, CompletionListCapability, InsertTextMode, InsertTextModeSupport,
+        MarkupKind, TagSupport,
+    };
+    CompletionClientCapabilities {
+        dynamic_registration: Some(false),
+        completion_item: Some(CompletionItemCapability {
+            snippet_support: Some(true),
+            commit_characters_support: Some(true),
+            documentation_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
+            deprecated_support: Some(true),
+            preselect_support: Some(true),
+            tag_support: Some(TagSupport {
+                value_set: vec![CompletionItemTag::DEPRECATED],
+            }),
+            insert_replace_support: Some(true),
+            // Only presentation fields are resolved lazily. Anything that
+            // changes what accepting an item inserts (additionalTextEdits,
+            // textEdit) must arrive with the list: accepting is synchronous.
+            resolve_support: Some(CompletionItemCapabilityResolveSupport {
+                properties: vec![
+                    "documentation".to_string(),
+                    "detail".to_string(),
+                    "labelDetails".to_string(),
+                ],
+            }),
+            insert_text_mode_support: Some(InsertTextModeSupport {
+                value_set: vec![InsertTextMode::AS_IS, InsertTextMode::ADJUST_INDENTATION],
+            }),
+            label_details_support: Some(true),
+        }),
+        completion_item_kind: Some(CompletionItemKindCapability {
+            value_set: Some(
+                (1..=25)
+                    .map(|n| {
+                        serde_json::from_value::<CompletionItemKind>(serde_json::json!(n))
+                            .expect("valid completion item kind")
+                    })
+                    .collect(),
+            ),
+        }),
+        context_support: Some(true),
+        insert_text_mode: Some(InsertTextMode::ADJUST_INDENTATION),
+        completion_list: Some(CompletionListCapability {
+            item_defaults: Some(
+                [
+                    "commitCharacters",
+                    "editRange",
+                    "insertTextFormat",
+                    "insertTextMode",
+                    "data",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            ),
+        }),
     }
 }
 

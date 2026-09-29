@@ -46,6 +46,8 @@ mod code_lens;
 mod command_context;
 mod command_history;
 mod completion;
+mod completion_accept;
+pub mod completion_match;
 mod debug_integration;
 pub mod decoration;
 mod diff_review;
@@ -88,6 +90,7 @@ pub mod problems;
 pub mod project_nav;
 mod pseudocode;
 pub mod search_replace;
+mod snippet_session;
 pub use pseudocode::MarkdownDocument;
 mod quickfix;
 mod register;
@@ -141,7 +144,12 @@ pub use code_explanation::{
 };
 pub use code_lens::LensEntry;
 pub use command_context::CommandContext;
-pub use completion::CompletionMenu;
+pub use completion::{
+    completion_documentation_markdown, completion_item_is_deprecated, completion_kind_style,
+    completion_row_text, CompletionAnchor, CompletionKindClass, CompletionKindStyle,
+    CompletionMenu, CompletionRowText,
+};
+pub use completion_accept::CompletionAcceptMode;
 pub use debug_integration::{BreakpointExtra, BreakpointMarker};
 pub use diff_review::{
     DiffLayout, DiffOverlayViewState, DiffReviewState, PendingGitFetch, DIFF_REVIEW_TITLE_PREFIX,
@@ -158,7 +166,8 @@ pub use keymap::{KeyMapManager, KeyMapping, MapMode};
 pub use launch_flow::{LaunchRequest, LaunchSource};
 pub use lsp_manager_panel::LspManagerPanel;
 pub use lsp_state::{
-    HoverContentType, LspIntents, LspResultType, LspState, ProjectedDiagnostics, SignatureHelpState,
+    CompletionIntent, HoverContentType, LspIntents, LspResultType, LspState, ProjectedDiagnostics,
+    SignatureHelpState,
 };
 pub use lsp_ui::LspUi;
 pub use macros::MacroManager;
@@ -177,6 +186,7 @@ pub use search::Search;
 pub use search_context::{SearchContext, VisualSearchState};
 pub use services::EditorServices;
 pub use single_line_input::SingleLineInput;
+pub use snippet_session::SnippetSession;
 pub use tabpage::{TabPage, TabPageId, TabPageManager};
 pub use test_panel::{
     format_duration, TestFailure, TestPanelState, TestRun, TestRunStatus, TestSourceLocation,
@@ -283,6 +293,15 @@ pub struct EditorOptions {
     /// Off by default while OV-00257 (wrap math) and OV-00258 (stale
     /// placement) are open. Toggle on with `:set inlay_hints` to opt in.
     pub inlay_hints: bool,
+    /// Open the completion menu automatically while typing in insert mode
+    /// (identifier characters and server trigger characters). Ctrl-Space
+    /// always works. Default: true.
+    pub autocomplete: bool,
+    /// Identifier characters typed before the menu opens by itself (default: 2).
+    pub autocomplete_min_chars: usize,
+    /// Milliseconds the typist must pause before an identifier-triggered
+    /// request is sent (default: 40). Trigger characters ignore the delay.
+    pub autocomplete_delay_ms: u64,
 }
 
 impl Default for EditorOptions {
@@ -319,6 +338,9 @@ impl Default for EditorOptions {
             makeprg: "cargo build".to_string(),
             lsp_auto_install: AutoInstallMode::default(),
             inlay_hints: false,
+            autocomplete: true,
+            autocomplete_min_chars: 2,
+            autocomplete_delay_ms: 40,
         }
     }
 }
@@ -404,7 +426,7 @@ pub struct Editor {
     /// Editing operation state (insert, replace, substitute, rename)
     pub editing: EditingState,
     /// Completion menu popup (LSP)
-    completion_menu: CompletionMenu,
+    completion_menu: Box<CompletionMenu>,
     /// Theme and color scheme state
     theme: ThemeState,
     /// Editor options and settings
@@ -602,7 +624,7 @@ impl Editor {
             #[cfg(feature = "lua")]
             editor_bridge: None,
             editing: EditingState::default(),
-            completion_menu: CompletionMenu::new(),
+            completion_menu: Box::default(),
             theme: ThemeState::default(),
             options: EditorOptions::default(),
             viewport: ViewportState::default(),
@@ -656,7 +678,7 @@ impl Editor {
             #[cfg(feature = "lua")]
             editor_bridge: None,
             editing: EditingState::default(),
-            completion_menu: CompletionMenu::new(),
+            completion_menu: Box::default(),
             theme: ThemeState::default(),
             options: EditorOptions::default(),
             viewport: ViewportState::default(),

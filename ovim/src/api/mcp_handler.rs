@@ -866,6 +866,7 @@ mod tests {
             picker: None,
             search_replace: None,
             hover_info: hover.map(|s| s.to_string()),
+            completion: None,
             ai_chat: None,
             decorations: Vec::new(),
             view: crate::api::ViewSnapshot::default(),

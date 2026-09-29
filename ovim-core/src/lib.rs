@@ -48,6 +48,7 @@ pub mod repeat_action;
 pub mod run_log;
 pub mod search;
 pub mod session;
+pub mod snippet;
 pub mod syntax;
 pub mod text_index;
 pub mod textobjects;

@@ -43,4 +43,6 @@ pub struct EditingState {
     pub insert_normal_pending: bool,
     /// Text and cursor state for LSP rename mode.
     pub rename_input: SingleLineInput,
+    /// Tab stops of the snippet just expanded from a completion.
+    pub snippet: Option<Box<super::SnippetSession>>,
 }

@@ -569,7 +569,12 @@ pub struct GuiPickerItem {
 #[serde(rename_all = "camelCase")]
 pub struct GuiCompletion {
     pub selected: usize,
+    /// Number of items matching, of which `items` is the visible window.
+    pub total: usize,
     pub items: Vec<GuiCompletionItem>,
+    /// Markdown for the side popup: signature and documentation of the
+    /// selected item.
+    pub documentation: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -577,8 +582,17 @@ pub struct GuiCompletion {
 pub struct GuiCompletionItem {
     pub index: usize,
     pub label: String,
+    /// Text right after the label (`labelDetails.detail`, e.g. a signature).
     pub detail: Option<String>,
+    /// Right-aligned dimmed text (`labelDetails.description`, e.g. a package).
+    pub description: Option<String>,
     pub kind: Option<String>,
+    /// One-cell glyph and colour family of the kind.
+    pub kind_glyph: String,
+    pub kind_class: String,
+    pub deprecated: bool,
+    /// Char positions of `label` matched by what the user typed.
+    pub matched: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -3566,22 +3580,37 @@ fn signature_help(
 }
 
 fn completion(editor: &Editor) -> Option<GuiCompletion> {
+    use ovim_core::editor::{
+        completion_documentation_markdown, completion_item_is_deprecated, completion_kind_style,
+        completion_row_text,
+    };
     let menu = editor.completion_menu();
-    let selected = menu.selected_index();
-    let start = centered_window_start(selected, menu.items().len(), MAX_COMPLETION_ITEMS);
-    menu.is_visible().then(|| GuiCompletion {
-        selected,
-        items: menu
-            .items()
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(MAX_COMPLETION_ITEMS)
-            .map(|(index, item)| GuiCompletionItem {
-                index,
-                label: item.label.clone(),
-                detail: item.detail.clone(),
-                kind: item.kind.map(|kind| format!("{kind:?}")),
+    if !menu.is_visible() {
+        return None;
+    }
+    let window = menu.window(MAX_COMPLETION_ITEMS);
+    Some(GuiCompletion {
+        selected: menu.selected_index(),
+        total: menu.len(),
+        documentation: menu
+            .selected_item()
+            .and_then(completion_documentation_markdown),
+        items: window
+            .filter_map(|index| {
+                let item = menu.get(index)?;
+                let text = completion_row_text(item);
+                let kind = completion_kind_style(item.kind);
+                Some(GuiCompletionItem {
+                    index,
+                    label: item.label.clone(),
+                    detail: Some(text.label_suffix).filter(|s| !s.is_empty()),
+                    description: Some(text.description).filter(|s| !s.is_empty()),
+                    kind: item.kind.map(|kind| format!("{kind:?}")),
+                    kind_glyph: kind.glyph.to_string(),
+                    kind_class: kind.class.name().to_string(),
+                    deprecated: completion_item_is_deprecated(item),
+                    matched: menu.matched_positions(index).to_vec(),
+                })
             })
             .collect(),
     })

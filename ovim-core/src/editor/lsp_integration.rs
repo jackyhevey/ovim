@@ -380,6 +380,7 @@ impl Editor {
 
         // --- Completion ---
         changed |= self.poll_pending_completion_response();
+        changed |= self.poll_completion_resolve_slot();
 
         // --- User-triggered actions ---
         changed |= self.poll_action_slots();
@@ -842,7 +843,10 @@ impl Editor {
     /// Poll completion responses (non-blocking)
     /// Returns true if a response was processed and UI should redraw
     pub fn poll_pending_completion_response(&mut self) -> bool {
-        let timeout = Duration::from_secs(3);
+        // Generous: a language server that is still loading (JDK index, first
+        // analysis) can take several seconds to answer its first request, and
+        // aborting it here left the menu closed until the user asked again.
+        let timeout = Duration::from_secs(15);
         let Some(result) = self.lsp.slots.completion.poll_with_timeout(timeout) else {
             return false;
         };
@@ -871,11 +875,22 @@ impl Editor {
                     return false;
                 }
 
-                // Drop responses that arrived after the buffer has been edited
-                // further. The mode check above is not sufficient: the user
-                // can Esc out and re-enter insert mode before the response
-                // arrives, keeping mode=Insert while the context has shifted.
-                if result.buffer_version != self.buffer().version() {
+                // A response for a buffer that has been edited further is only
+                // usable when the user merely kept typing the word at the
+                // request position (the common case while typing fast: the
+                // answer to `gE` arrives after `gEm`). Anything else - Esc and
+                // back into insert mode, cursor moved, text elsewhere edited -
+                // means the context has shifted.
+                if result.buffer_version != self.buffer().version()
+                    && self.completion_typed_since(&result.anchor).is_none()
+                {
+                    self.hide_completion_menu();
+                    return false;
+                }
+                let cursor_col = self.buffer().cursor_char_col().0;
+                if self.buffer().cursor().line() != result.anchor.line
+                    || cursor_col < result.anchor.col
+                {
                     self.hide_completion_menu();
                     return false;
                 }
@@ -892,10 +907,15 @@ impl Editor {
 
                 let (trigger_col, trigger_prefix) = self.derive_completion_prefix(&result.items);
                 let items_version = result.buffer_version;
+                let incomplete = result.is_incomplete;
+                let anchor = result.anchor;
                 let menu = self.completion_menu_mut();
                 menu.show(result.items.clone(), trigger_col, trigger_prefix);
-                // The version check above proved the items' textEdit ranges
-                // target the buffer as it is right now (OV-00327).
+                menu.set_incomplete(incomplete);
+                menu.set_anchor(anchor);
+                // The items' textEdit ranges target this buffer version; if
+                // the user typed on since, accepting rebases them through
+                // the anchor (OV-00327).
                 menu.set_items_buffer_version(items_version);
                 self.lsp.state.available_completions = result.items;
                 self.mark_dirty();
@@ -2222,9 +2242,12 @@ impl Editor {
         if std::mem::take(&mut self.lsp.intents.signature_help) {
             let _ = self.signature_help_impl().await;
         }
-        if std::mem::take(&mut self.lsp.intents.completion) {
-            let _ = self.completion_impl().await;
+        self.promote_due_completion();
+        if let Some(intent) = self.lsp.intents.completion.take() {
+            let _ = self.completion_impl(intent).await;
         }
+        self.request_completion_resolve().await;
+        self.run_pending_completion_command().await;
         if std::mem::take(&mut self.lsp.intents.format_document) {
             let _ = self.format_document_impl().await;
         }
@@ -2909,6 +2932,20 @@ mod tests {
         editor.lsp.slots.completion.fire(task, rx);
     }
 
+    fn anchor_of(editor: &Editor) -> crate::editor::CompletionAnchor {
+        let line = editor.buffer().cursor().line();
+        crate::editor::CompletionAnchor {
+            line,
+            col: editor.buffer().cursor_char_col().0,
+            line_text: editor
+                .buffer()
+                .line_text(line)
+                .unwrap_or_default()
+                .to_string(),
+            line_count: editor.buffer().line_count(),
+        }
+    }
+
     fn completion_item(label: &str) -> CompletionItem {
         CompletionItem {
             label: label.to_string(),
@@ -2931,10 +2968,13 @@ mod tests {
         let effective_path = editor.buffer().file_path().unwrap().to_string();
 
         let bv = editor.buffer().version();
+        let anchor = anchor_of(&editor);
         fire_completion_result(
             &mut editor,
             CompletionResult {
                 items: vec![completion_item("foo")],
+                is_incomplete: false,
+                anchor,
                 file_path: effective_path,
                 buffer_version: bv,
                 synced_content: None,
@@ -2944,7 +2984,7 @@ mod tests {
 
         assert!(editor.poll_pending_completion_response());
         assert!(editor.completion_menu().is_visible());
-        assert_eq!(editor.completion_menu().items().len(), 1);
+        assert_eq!(editor.completion_menu().len(), 1);
     }
 
     /// OV-00456: an empty completion answer must not leave the
@@ -2957,10 +2997,13 @@ mod tests {
         let effective_path = editor.buffer().file_path().unwrap().to_string();
         let bv = editor.buffer().version();
         editor.set_lsp_status(lsp_modules::completion::REQUESTING_STATUS.to_string());
+        let anchor = anchor_of(&editor);
         fire_completion_result(
             &mut editor,
             CompletionResult {
                 items: Vec::new(),
+                is_incomplete: false,
+                anchor,
                 file_path: effective_path,
                 buffer_version: bv,
                 synced_content: None,
@@ -2983,10 +3026,13 @@ mod tests {
         let bv = editor.buffer().version();
         // Response was fired for /tmp/a.rs but the user has since switched
         // to /tmp/b.rs. Without validation this would apply to the wrong file.
+        let anchor = anchor_of(&editor);
         fire_completion_result(
             &mut editor,
             CompletionResult {
                 items: vec![completion_item("foo")],
+                is_incomplete: false,
+                anchor,
                 file_path: "/tmp/a.rs".to_string(),
                 buffer_version: bv,
                 synced_content: None,
@@ -2996,7 +3042,7 @@ mod tests {
 
         assert!(!editor.poll_pending_completion_response());
         assert!(!editor.completion_menu().is_visible());
-        assert!(editor.completion_menu().items().is_empty());
+        assert!(editor.completion_menu().is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3010,6 +3056,7 @@ mod tests {
         // validation the stale items would populate the menu.
         let effective_path = editor.buffer().file_path().unwrap().to_string();
         let stale_version = editor.buffer().version();
+        let stale_anchor = anchor_of(&editor);
         editor
             .buffer_mut()
             .insert_text_at(0, crate::unicode::CharCol(10), "o");
@@ -3019,6 +3066,8 @@ mod tests {
             &mut editor,
             CompletionResult {
                 items: vec![completion_item("foo")],
+                is_incomplete: false,
+                anchor: stale_anchor,
                 file_path: effective_path,
                 buffer_version: stale_version,
                 synced_content: None,
@@ -3028,7 +3077,7 @@ mod tests {
 
         assert!(!editor.poll_pending_completion_response());
         assert!(!editor.completion_menu().is_visible());
-        assert!(editor.completion_menu().items().is_empty());
+        assert!(editor.completion_menu().is_empty());
     }
 
     fn fire_format_result(editor: &mut Editor, result: crate::editor::lsp_slot::FormatResult) {
