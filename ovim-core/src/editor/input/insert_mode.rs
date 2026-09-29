@@ -526,11 +526,7 @@ pub fn handle_insert_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
 /// Parameter hints: `(` and `,` open the popup; while it is open every edit or
 /// cursor move re-asks the server so the active parameter follows the cursor
 /// (the server answers with nothing once the cursor leaves the call).
-fn request_signature_help_after_key(
-    editor: &mut Editor,
-    key_event: &KeyEvent,
-    was_active: bool,
-) {
+fn request_signature_help_after_key(editor: &mut Editor, key_event: &KeyEvent, was_active: bool) {
     if editor.mode() != Mode::Insert {
         return;
     }
@@ -573,14 +569,17 @@ mod tests {
         editor.set_mode(Mode::Insert);
 
         type_key(&mut editor, KeyCode::Char('f'));
-        assert!(!editor.lsp.intents.signature_help, "plain letters do not trigger");
+        assert!(
+            !editor.lsp.intents.signature_help,
+            "plain letters do not trigger"
+        );
 
         type_key(&mut editor, KeyCode::Char('('));
         assert!(editor.lsp.intents.signature_help, "`(` triggers");
         editor.lsp.intents.signature_help = false;
 
         // Simulate the popup being visible.
-        editor.lsp.state.signature_help = Some(crate::editor::SignatureHelpState {
+        editor.lsp.state.signature_help = Some(Box::new(crate::editor::SignatureHelpState {
             label: "f(int a, int b)".into(),
             active_param: Some((2, 7)),
             active_param_index: Some(0),
@@ -589,15 +588,21 @@ mod tests {
             documentation: None,
             parameter_documentation: None,
             anchor: (0, 2),
-        });
+        }));
         type_key(&mut editor, KeyCode::Char('1'));
-        assert!(editor.lsp.intents.signature_help, "typing retriggers while open");
+        assert!(
+            editor.lsp.intents.signature_help,
+            "typing retriggers while open"
+        );
         editor.lsp.intents.signature_help = false;
         type_key(&mut editor, KeyCode::Char(','));
         assert!(editor.lsp.intents.signature_help, "`,` retriggers");
         editor.lsp.intents.signature_help = false;
         type_key(&mut editor, KeyCode::Backspace);
-        assert!(editor.lsp.intents.signature_help, "backspace retriggers while open");
+        assert!(
+            editor.lsp.intents.signature_help,
+            "backspace retriggers while open"
+        );
         editor.lsp.intents.signature_help = false;
 
         type_key(&mut editor, KeyCode::Esc);

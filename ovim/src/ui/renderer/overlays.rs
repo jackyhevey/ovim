@@ -381,8 +381,7 @@ pub fn render_signature_help(frame: &mut Frame, editor: &Editor, ctx: &OverlayCo
     let mut tail: Vec<char> = after.chars().collect();
     let active_chars: Vec<char> = active.chars().collect();
     let width_of = |chars: &[char]| chars.iter().collect::<String>().width();
-    while width_of(&head) + width_of(&active_chars) + width_of(&tail) + overload.width()
-        > max_inner
+    while width_of(&head) + width_of(&active_chars) + width_of(&tail) + overload.width() > max_inner
     {
         if head.len() > 4 {
             head.remove(0);
@@ -415,7 +414,10 @@ pub fn render_signature_help(frame: &mut Frame, editor: &Editor, ctx: &OverlayCo
         Span::styled(head_text, base),
         Span::styled(active.clone(), active_style),
         Span::styled(tail_text, base),
-        Span::styled(overload.clone(), Style::default().bg(bg).fg(Color::DarkGray)),
+        Span::styled(
+            overload.clone(),
+            Style::default().bg(bg).fg(Color::DarkGray),
+        ),
     ])];
     if let Some(doc) = doc_line {
         lines.push(Line::from(Span::styled(

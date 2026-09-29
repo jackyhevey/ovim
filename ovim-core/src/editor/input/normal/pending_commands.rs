@@ -380,8 +380,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // =====================================================================
         // 'z' - Fold/scroll commands
         // =====================================================================
-        ('z', KeyCode::Char(key))
-            if editor.fold_command(key) => {}
+        ('z', KeyCode::Char(key)) if editor.fold_command(key) => {}
         ('z', KeyCode::Char('f')) => {
             editor.set_pending_operator(Operator::Fold);
         }

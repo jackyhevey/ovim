@@ -229,10 +229,9 @@ impl Editor {
     /// Moves to a jump-list entry, switching buffers when it is in another file.
     fn go_to_jump_entry(&mut self, entry: super::marks::JumpEntry) -> bool {
         if let Some(file) = entry.file.as_deref() {
-            let same_file = self
-                .buffer()
-                .file_path()
-                .is_some_and(|current| super::buffer_manager::paths_identify_same_file(current, file));
+            let same_file = self.buffer().file_path().is_some_and(|current| {
+                super::buffer_manager::paths_identify_same_file(current, file)
+            });
             if !same_file && self.load_file(file).is_err() {
                 self.set_status_message(format!("Jump failed: cannot open {file}"));
                 return false;

@@ -1298,10 +1298,18 @@ mod symbol_row_tests {
         ]);
         let lines = screen(&picker, 100, 4);
         assert!(lines[0].contains("CustomerService"), "{}", lines[0]);
-        assert!(lines[0].contains("class · com.paystream.service"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("class · com.paystream.service"),
+            "{}",
+            lines[0]
+        );
         assert!(lines[0].contains("CustomerService.java:19"), "{}", lines[0]);
         assert!(lines[1].contains("createCustomer"), "{}", lines[1]);
-        assert!(lines[1].contains("method · CustomerService"), "{}", lines[1]);
+        assert!(
+            lines[1].contains("method · CustomerService"),
+            "{}",
+            lines[1]
+        );
         assert!(lines[1].contains("CustomerService.java:23"), "{}", lines[1]);
     }
 

@@ -535,8 +535,20 @@ mod tests {
             }
         };
         let rows = editor.workspace_symbol_items(&[
-            symbol("CustomerService", lsp_types::SymbolKind::CLASS, Some("com.pay.service"), "/proj/src/CustomerService.java", 18),
-            symbol("createCustomer", lsp_types::SymbolKind::METHOD, Some("CustomerService"), "/proj/src/CustomerService.java", 22),
+            symbol(
+                "CustomerService",
+                lsp_types::SymbolKind::CLASS,
+                Some("com.pay.service"),
+                "/proj/src/CustomerService.java",
+                18,
+            ),
+            symbol(
+                "createCustomer",
+                lsp_types::SymbolKind::METHOD,
+                Some("CustomerService"),
+                "/proj/src/CustomerService.java",
+                22,
+            ),
         ]);
         // Server order kept, name is the display text.
         assert_eq!(rows[0].display, "CustomerService");
@@ -548,7 +560,10 @@ mod tests {
         assert_eq!(columns.kind, "method");
         assert_eq!(columns.container.as_deref(), Some("CustomerService"));
         assert_eq!(columns.file, "src/CustomerService.java:23");
-        assert_ne!(columns.glyph, symbol_row_columns(&rows[0], Path::new("/proj")).glyph);
+        assert_ne!(
+            columns.glyph,
+            symbol_row_columns(&rows[0], Path::new("/proj")).glyph
+        );
     }
 
     #[test]
@@ -618,9 +633,11 @@ mod tests {
         };
         let items = editor.workspace_symbol_items(&[symbol]);
         assert_eq!(items.len(), 1);
+        assert_eq!(items[0].display, "area");
+        assert_eq!(items[0].content.as_deref(), Some("method · shapes.Circle"));
         assert_eq!(
-            items[0].display,
-            "area  method · shapes.Circle  Circle.java:5"
+            symbol_row_columns(&items[0], &project.root).file,
+            "Circle.java:5"
         );
         assert_eq!((items[0].line, items[0].col), (4, 11));
     }

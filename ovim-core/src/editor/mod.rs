@@ -54,8 +54,8 @@ mod execution;
 #[cfg(test)]
 mod execution_tests;
 mod file_rename;
-mod folding;
 mod filetree;
+mod folding;
 pub mod fuzzy;
 pub mod git_tools;
 pub mod grep;

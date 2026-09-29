@@ -56,7 +56,7 @@ fn zo_zc_za_open_and_close_the_fold_under_the_cursor() {
 }
 
 #[test]
-fn zr_zm_and_zE_act_on_all_folds() {
+fn zr_zm_and_ze_act_on_all_folds() {
     let mut test = ten_lines();
     test.keys("2Gzf3j7Gzf2j");
     assert_eq!(hidden(&test), vec![2, 3, 4, 7, 8]);

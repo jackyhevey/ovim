@@ -2440,7 +2440,10 @@ mod tests {
     fn location(path: &std::path::Path, line: u32, character: u32) -> Location {
         Location {
             uri: uri_from_file_path(path).unwrap(),
-            range: Range::new(Position::new(line, character), Position::new(line, character)),
+            range: Range::new(
+                Position::new(line, character),
+                Position::new(line, character),
+            ),
         }
     }
 
@@ -2455,7 +2458,10 @@ mod tests {
         std::fs::write(&b, "b0\nb1\nb2\nb3\nb4\nb5\n").unwrap();
         let mut editor = Editor::default();
         editor.load_file(&a).unwrap();
-        editor.buffer_mut().cursor_mut().set_position(2, crate::unicode::GraphemeCol(1));
+        editor
+            .buffer_mut()
+            .cursor_mut()
+            .set_position(2, crate::unicode::GraphemeCol(1));
 
         // gd from A:3 into B:5 (cross-file), then a second jump inside B.
         assert!(editor.handle_goto_location(Some(location(&b, 4, 0)), "Definition", "t", false));
@@ -2463,12 +2469,21 @@ mod tests {
         assert_eq!(editor.buffer().cursor().line(), 1);
 
         assert!(editor.jump_back());
-        assert_eq!(editor.buffer().file_path().map(std::path::Path::new), Some(b.canonicalize().unwrap().as_path()));
+        assert_eq!(
+            editor.buffer().file_path().map(std::path::Path::new),
+            Some(b.canonicalize().unwrap().as_path())
+        );
         assert_eq!(editor.buffer().cursor().line(), 4);
         assert!(editor.jump_back());
-        assert_eq!(editor.buffer().file_path().map(std::path::Path::new), Some(a.canonicalize().unwrap().as_path()));
         assert_eq!(
-            (editor.buffer().cursor().line(), editor.buffer().cursor().col().0),
+            editor.buffer().file_path().map(std::path::Path::new),
+            Some(a.canonicalize().unwrap().as_path())
+        );
+        assert_eq!(
+            (
+                editor.buffer().cursor().line(),
+                editor.buffer().cursor().col().0
+            ),
             (2, 1)
         );
         assert!(!editor.jump_back(), "nothing older than the first jump");

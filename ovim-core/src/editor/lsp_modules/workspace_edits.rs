@@ -227,7 +227,10 @@ impl Editor {
         if self.buffer_is_open_in_ui(index) {
             if let Some(buffer) = self.buffers.get(index) {
                 let id = buffer.id();
-                self.lsp.state.workspace_edit_carriers.remove(&id);
+                self.lsp
+                    .state
+                    .workspace_edit_carriers
+                    .retain(|carrier| *carrier != id);
             }
             return false;
         }
@@ -724,11 +727,9 @@ mod tests {
                 editor.open_file(&file).expect("open");
                 editor.load_file(&other).expect("other");
                 editor.load_file(&open_spelling).expect("reopen");
-                editor.buffer_mut().insert_text_at(
-                    0,
-                    crate::unicode::CharCol(0),
-                    "// unsaved\n",
-                );
+                editor
+                    .buffer_mut()
+                    .insert_text_at(0, crate::unicode::CharCol(0), "// unsaved\n");
                 // Rename was computed against the text the server saw
                 // (the dirty text): `old` sits on line 1 now.
                 let edit = changes_edit(

@@ -136,9 +136,7 @@ impl JumpEntry {
     fn same_place(&self, other: &Self) -> bool {
         self.line == other.line
             && match (&self.file, &other.file) {
-                (Some(a), Some(b)) => {
-                    crate::editor::buffer_manager::paths_identify_same_file(a, b)
-                }
+                (Some(a), Some(b)) => crate::editor::buffer_manager::paths_identify_same_file(a, b),
                 (None, None) => true,
                 _ => false,
             }

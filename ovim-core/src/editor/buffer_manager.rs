@@ -239,7 +239,10 @@ impl Editor {
             // Once the user looks at a buffer it is theirs, not a hidden
             // workspace-edit carrier.
             let viewed = self.buffers[index].id();
-            self.lsp.state.workspace_edit_carriers.remove(&viewed);
+            self.lsp
+                .state
+                .workspace_edit_carriers
+                .retain(|id| *id != viewed);
             self.lsp.state.needs_lsp_init = true;
 
             // Clear buffer-local marks (a-z) when switching files
@@ -440,7 +443,7 @@ impl Editor {
 
         // Load the file into a new buffer (don't switch to it)
         let buffer = Buffer::load_file(&file_path).ok()?;
-        self.lsp.state.workspace_edit_carriers.insert(buffer.id());
+        self.lsp.state.workspace_edit_carriers.push(buffer.id());
         let index = self.push_buffer(buffer);
         // Note: We intentionally don't change current_buffer_index here
         // to avoid switching away from the user's current file
@@ -918,7 +921,10 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn library_source_buffers_are_read_only() {
         let dir = tempfile::tempdir().unwrap();
-        let sources = dir.path().join("hyperion-materialized-sources-v1").join("files");
+        let sources = dir
+            .path()
+            .join("hyperion-materialized-sources-v1")
+            .join("files");
         fs::create_dir_all(&sources).unwrap();
         let library = sources.join("65f9c7.java");
         let own = dir.path().join("Own.java");

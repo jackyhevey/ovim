@@ -20,7 +20,7 @@ use super::layout::{BufferLayout, OverlayContext};
 use super::line_cache::LineRenderCache;
 use super::overlays::{
     render_ai_chat_exa_setup_dialog, render_ai_chat_permission_dialog, render_ai_review_shortcuts,
-    render_completion_menu, render_hover_window, render_signature_help, render_lsp_install_dialog,
+    render_completion_menu, render_hover_window, render_lsp_install_dialog, render_signature_help,
 };
 use super::picker_widget::{render_picker, Fill};
 use super::status_widgets::{

@@ -132,8 +132,11 @@ impl FoldManager {
     }
 
     fn sort(&mut self) {
-        self.folds
-            .sort_by(|a, b| a.start_line.cmp(&b.start_line).then(b.end_line.cmp(&a.end_line)));
+        self.folds.sort_by(|a, b| {
+            a.start_line
+                .cmp(&b.start_line)
+                .then(b.end_line.cmp(&a.end_line))
+        });
     }
 
     fn insert(&mut self, fold: Fold) {
@@ -496,8 +499,7 @@ impl FoldManager {
         self.chain(line)
             .into_iter()
             .map(|index| &self.folds[index])
-            .filter(|f| f.is_open())
-            .next_back()
+            .rfind(|f| f.is_open())
             .map(|f| (f.start_line, f.end_line))
     }
 
@@ -533,10 +535,9 @@ impl FoldManager {
         let mut accepted: Vec<Fold> = Vec::new();
         for (start, end) in incoming {
             let candidate = Fold::auto(start, end, true);
-            let crosses = accepted
-                .iter()
-                .chain(self.folds.iter())
-                .any(|f| f.overlaps(&candidate) && !f.encloses(&candidate) && !candidate.encloses(f));
+            let crosses = accepted.iter().chain(self.folds.iter()).any(|f| {
+                f.overlaps(&candidate) && !f.encloses(&candidate) && !candidate.encloses(f)
+            });
             if crosses {
                 continue;
             }
@@ -695,7 +696,11 @@ mod tests {
         let mut m = FoldManager::new();
         m.set_auto_folds(&[(0, 3), (4, 7)], 10, 1, true);
         m.close_all();
-        assert_eq!(m.hidden_ranges(), vec![(1, 7)]);
+        // The second header (line 4) stays visible between the two bodies.
+        assert_eq!(m.hidden_ranges(), vec![(1, 3), (5, 7)]);
+        let mut touching = FoldManager::new();
+        touching.set_auto_folds(&[(0, 3), (3, 7)], 10, 1, true);
+        assert!(touching.folds().len() == 1, "crossing ranges keep only one");
         m.set_enabled(false);
         assert!(m.hidden_ranges().is_empty());
         assert!(!m.is_line_hidden(2));
@@ -747,7 +752,11 @@ mod tests {
         // A line was inserted at line 1: folds below shift down by one,
         // the enclosing fold grows.
         m.adjust_for_line_count(13, 1);
-        let ranges: Vec<_> = m.folds().iter().map(|f| (f.start_line(), f.end_line())).collect();
+        let ranges: Vec<_> = m
+            .folds()
+            .iter()
+            .map(|f| (f.start_line(), f.end_line()))
+            .collect();
         assert_eq!(ranges, vec![(0, 10), (3, 5), (7, 9)]);
     }
 
@@ -757,8 +766,12 @@ mod tests {
         m.set_auto_folds(&[(2, 5)], 10, 1, true);
         m.close_all();
         assert_eq!(m.step_down(1, 1, 9), 2);
-        assert_eq!(m.step_down(2, 1, 9), 6, "from the header to the next visible line");
-        assert_eq!(m.step_down(1, 3, 9), 6);
+        assert_eq!(
+            m.step_down(2, 1, 9),
+            6,
+            "from the header to the next visible line"
+        );
+        assert_eq!(m.step_down(1, 3, 9), 7, "1 -> fold header -> 6 -> 7");
         assert_eq!(m.step_up(6, 1), 2, "back onto the header");
         assert_eq!(m.step_up(6, 2), 1);
         assert_eq!(m.step_down(8, 5, 9), 9, "stops at the last line");
@@ -791,7 +804,7 @@ mod tests {
     #[test]
     fn indent_folds_follow_indentation_and_ignore_blank_lines() {
         let lines: Vec<String> = [
-            "class A {",     // 0
+            "class A {",      // 0
             "    void f() {", // 1
             "        x();",   // 2
             "",               // 3

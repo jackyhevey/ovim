@@ -60,9 +60,12 @@ impl Editor {
             .map(|range| (range.start_line as usize, range.end_line as usize))
             .collect();
         let line_count = self.buffer().line_count();
-        self.buffer_mut()
-            .fold_manager_mut()
-            .set_auto_folds(&pairs, line_count, buffer_version, true);
+        self.buffer_mut().fold_manager_mut().set_auto_folds(
+            &pairs,
+            line_count,
+            buffer_version,
+            true,
+        );
         self.refresh_fold_view();
         true
     }
@@ -116,11 +119,13 @@ impl Editor {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
             let result = lsp.folding_range(&uri, &language_id).await;
-            let _ = tx.send(result.map(|ranges| crate::editor::lsp_slot::FoldingRangesResult {
-                ranges,
-                file_path,
-                buffer_version: version,
-            }));
+            let _ = tx.send(
+                result.map(|ranges| crate::editor::lsp_slot::FoldingRangesResult {
+                    ranges,
+                    file_path,
+                    buffer_version: version,
+                }),
+            );
         });
         self.lsp.slots.folding_ranges.fire(task, rx);
     }
@@ -157,8 +162,22 @@ impl Editor {
     pub fn fold_command(&mut self, key: char) -> bool {
         if !matches!(
             key,
-            'o' | 'c' | 'a' | 'O' | 'C' | 'A' | 'R' | 'M' | 'v' | 'n' | 'N' | 'i' | 'd' | 'D'
-                | 'E' | 'j' | 'k'
+            'o' | 'c'
+                | 'a'
+                | 'O'
+                | 'C'
+                | 'A'
+                | 'R'
+                | 'M'
+                | 'v'
+                | 'n'
+                | 'N'
+                | 'i'
+                | 'd'
+                | 'D'
+                | 'E'
+                | 'j'
+                | 'k'
         ) {
             return false;
         }
@@ -379,7 +398,6 @@ impl Editor {
         self.lsp.state.fold_markers = markers;
         self.mark_dirty();
     }
-
 
     /// The buffer line drawn on screen row `rel_row` (top of the viewport is
     /// 0) when lines are not soft-wrapped: closed folds take no rows.

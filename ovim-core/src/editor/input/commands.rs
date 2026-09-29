@@ -21,7 +21,10 @@ pub fn handle_command_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<(
         use super::helpers::PromptControl;
         match control {
             PromptControl::Cancel => {
-                return handle_command_mode(editor, KeyEvent::new(KeyCode::Esc, crate::Modifiers::NONE));
+                return handle_command_mode(
+                    editor,
+                    KeyEvent::new(KeyCode::Esc, crate::Modifiers::NONE),
+                );
             }
             PromptControl::Backspace => {
                 return handle_command_mode(

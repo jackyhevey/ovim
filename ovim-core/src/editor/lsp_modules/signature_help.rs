@@ -58,7 +58,10 @@ impl SignatureHelpState {
             active_param_index,
             signature_index,
             signature_count: help.signatures.len(),
-            documentation: signature.documentation.as_ref().and_then(documentation_text),
+            documentation: signature
+                .documentation
+                .as_ref()
+                .and_then(documentation_text),
             parameter_documentation: active
                 .and_then(|param| param.documentation.as_ref())
                 .and_then(documentation_text),
@@ -124,7 +127,7 @@ impl Editor {
 
     /// The signature help popup content, when visible.
     pub fn signature_help(&self) -> Option<&SignatureHelpState> {
-        self.lsp.state.signature_help.as_ref()
+        self.lsp.state.signature_help.as_deref()
     }
 
     /// Dismiss the popup and abandon any in-flight request.
@@ -161,7 +164,9 @@ impl Editor {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let file_for_result = file_path.clone();
         let task = tokio::spawn(async move {
-            let result = lsp.signature_help(&uri, line, character, &language_id).await;
+            let result = lsp
+                .signature_help(&uri, line, character, &language_id)
+                .await;
             let _ = tx.send(result.map(|help| SignatureHelpResult {
                 help,
                 file_path: file_for_result,
@@ -180,7 +185,8 @@ impl Editor {
         // Late answers must not resurrect the popup after the user left
         // insert mode or switched files.
         let insert_active = self.mode == crate::mode::Mode::Insert;
-        let same_file = matches!(&result, Ok(r) if self.buffer().file_path() == Some(r.file_path.as_str()));
+        let same_file =
+            matches!(&result, Ok(r) if self.buffer().file_path() == Some(r.file_path.as_str()));
         if !insert_active || !same_file {
             return self.lsp.state.signature_help.take().is_some();
         }
@@ -190,7 +196,8 @@ impl Editor {
             Ok(r) => r
                 .help
                 .as_ref()
-                .and_then(|help| SignatureHelpState::from_lsp(help, anchor)),
+                .and_then(|help| SignatureHelpState::from_lsp(help, anchor))
+                .map(Box::new),
             Err(_) => None,
         };
         if next == self.lsp.state.signature_help {
@@ -243,7 +250,10 @@ mod tests {
         let state = SignatureHelpState::from_lsp(&help, (0, 0)).unwrap();
         assert_eq!(state.active_param, Some((11, 16)));
         let (before, active, after) = state.label_segments();
-        assert_eq!((before.as_str(), active.as_str(), after.as_str()), ("add(int a, ", "int b", ")"));
+        assert_eq!(
+            (before.as_str(), active.as_str(), after.as_str()),
+            ("add(int a, ", "int b", ")")
+        );
     }
 
     #[test]

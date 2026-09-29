@@ -415,7 +415,7 @@ pub struct LspState {
     /// Hover information to display (from LSP)
     pub hover_info: Option<String>,
     /// Parameter-hints popup for the call being typed (insert mode).
-    pub signature_help: Option<SignatureHelpState>,
+    pub signature_help: Option<Box<SignatureHelpState>>,
     /// Nonmodal commit details opened by pointing at the blame gutter.
     pub blame_mouse_hover: bool,
     /// Scroll offset for hover window (line number)
@@ -442,7 +442,7 @@ pub struct LspState {
     /// never opened (OV-00450). Only these may be written through to disk;
     /// a buffer the user opened, even if hidden, is never persisted behind
     /// their back.
-    pub workspace_edit_carriers: std::collections::HashSet<crate::buffer::BufferId>,
+    pub workspace_edit_carriers: Vec<crate::buffer::BufferId>,
     /// File-explorer rename waiting for its `willRenameFiles` round trip.
     pub pending_file_rename: Option<(std::path::PathBuf, String)>,
     /// Server `showMessageRequest`s waiting their turn, the one currently
@@ -523,7 +523,7 @@ impl LspState {
             pending_did_close_file: None,
             fold_tracking: None,
             fold_markers: Vec::new(),
-            workspace_edit_carriers: std::collections::HashSet::new(),
+            workspace_edit_carriers: Vec::new(),
             pending_file_rename: None,
             hierarchy: None,
             queued_message_requests: Default::default(),

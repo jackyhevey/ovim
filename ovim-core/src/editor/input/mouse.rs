@@ -138,13 +138,15 @@ fn screen_to_buffer(editor: &Editor, screen_col: u16, screen_row: u16) -> Option
             let col = row_start + display_col_in_row;
             (line, col)
         } else {
-            let line = editor.line_for_screen_row(rel_row)
+            let line = editor
+                .line_for_screen_row(rel_row)
                 .min(editor.buffer().line_count().saturating_sub(1));
             (line, display_col_in_row + editor.horizontal_offset())
         }
     } else {
-        let line =
-            editor.line_for_screen_row(rel_row).min(editor.buffer().line_count().saturating_sub(1));
+        let line = editor
+            .line_for_screen_row(rel_row)
+            .min(editor.buffer().line_count().saturating_sub(1));
         (line, display_col_in_row + editor.horizontal_offset())
     };
 
@@ -225,10 +227,14 @@ fn check_concealed_link_click(editor: &Editor, screen_col: u16, screen_row: u16)
             let (logical_line, _sub_line) = wrap_map.visual_to_logical(absolute_visual_row);
             logical_line.min(editor.buffer().line_count().saturating_sub(1))
         } else {
-            editor.line_for_screen_row(rel_row).min(editor.buffer().line_count().saturating_sub(1))
+            editor
+                .line_for_screen_row(rel_row)
+                .min(editor.buffer().line_count().saturating_sub(1))
         }
     } else {
-        editor.line_for_screen_row(rel_row).min(editor.buffer().line_count().saturating_sub(1))
+        editor
+            .line_for_screen_row(rel_row)
+            .min(editor.buffer().line_count().saturating_sub(1))
     };
 
     // Don't check cursor line (concealment is disabled there)
@@ -355,10 +361,14 @@ fn is_sign_column_click(editor: &Editor, screen_col: u16, screen_row: u16) -> Op
             let (logical_line, _sub_line) = wrap_map.visual_to_logical(absolute_visual_row);
             logical_line.min(editor.buffer().line_count().saturating_sub(1))
         } else {
-            editor.line_for_screen_row(rel_row).min(editor.buffer().line_count().saturating_sub(1))
+            editor
+                .line_for_screen_row(rel_row)
+                .min(editor.buffer().line_count().saturating_sub(1))
         }
     } else {
-        editor.line_for_screen_row(rel_row).min(editor.buffer().line_count().saturating_sub(1))
+        editor
+            .line_for_screen_row(rel_row)
+            .min(editor.buffer().line_count().saturating_sub(1))
     };
     Some(buffer_line)
 }
@@ -392,11 +402,14 @@ fn is_gutter_click(editor: &Editor, screen_col: u16, screen_row: u16) -> Option<
                 let (logical_line, _sub_line) = wrap_map.visual_to_logical(absolute_visual_row);
                 logical_line.min(editor.buffer().line_count().saturating_sub(1))
             } else {
-                editor.line_for_screen_row(rel_row)
+                editor
+                    .line_for_screen_row(rel_row)
                     .min(editor.buffer().line_count().saturating_sub(1))
             }
         } else {
-            editor.line_for_screen_row(rel_row).min(editor.buffer().line_count().saturating_sub(1))
+            editor
+                .line_for_screen_row(rel_row)
+                .min(editor.buffer().line_count().saturating_sub(1))
         };
         Some(buffer_line)
     } else {

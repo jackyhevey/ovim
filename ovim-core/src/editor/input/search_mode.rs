@@ -13,7 +13,10 @@ pub fn handle_search_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         use super::helpers::PromptControl;
         match control {
             PromptControl::Cancel => {
-                return handle_search_mode(editor, KeyEvent::new(KeyCode::Esc, crate::Modifiers::NONE));
+                return handle_search_mode(
+                    editor,
+                    KeyEvent::new(KeyCode::Esc, crate::Modifiers::NONE),
+                );
             }
             PromptControl::Backspace => {
                 return handle_search_mode(
