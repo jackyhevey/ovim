@@ -2002,3 +2002,19 @@ async fn logpoints_and_hit_counts_follow_the_adapters_capabilities() {
         d.inner.stop_lsp().await;
     }
 }
+
+/// OV-00449: panels can be resized (`:PanelSize`, `+`/`-` in the console).
+#[test]
+fn panel_size_command_resizes_the_side_panels_and_the_console() {
+    let mut t = EditorTest::new("x\n");
+    t.command("PanelSize test +6");
+    assert_eq!(t.editor.test_panel().width_delta, 6);
+    t.command("PanelSize debug -4");
+    assert_eq!(t.editor.debug_state().panel.width_delta, -4);
+    t.command("PanelSize console +3");
+    assert_eq!(t.editor.run_console().height_delta, 3);
+    t.command("PanelSize test reset");
+    assert_eq!(t.editor.test_panel().width_delta, 0);
+    t.command("PanelSize nonsense +1");
+    assert!(t.editor.status_message().contains("Unknown panel"));
+}

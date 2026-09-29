@@ -15,13 +15,6 @@ use ratatui::{
     Frame,
 };
 
-/// Default width of the panel for a content area of `total` columns, plus
-/// the user's resize offset.
-pub fn panel_width(total: u16, delta: i16) -> u16 {
-    let base = (total / 3).clamp(25, 50) as i32;
-    (base + delta as i32).clamp(20, (total as i32 * 2 / 3).max(20)) as u16
-}
-
 pub fn render_debug_side_panel(frame: &mut Frame, editor: &Editor, area: Rect) {
     let focused = editor.mode() == crate::mode::Mode::DebugPanel;
     let state = editor.debug_state();

@@ -96,12 +96,18 @@ fn compute_frame_layout(frame: &Frame, editor: &Editor) -> Option<FrameAreas> {
         (None, remaining_area)
     };
 
-    // Test panel (right) — split from content area. Sits at the far right;
-    // the debug side panel (rarely open at the same time) splits what's left.
-    let (content_area, test_panel_area) = if editor.is_test_panel_open() {
-        let width = (u32::from(content_area.width) * 2 / 5)
-            .clamp(28, 60)
-            .min(u32::from(content_area.width / 2)) as u16;
+    // Test panel (right) and debug side panel: both are split from the content
+    // area, the test panel at the far right. Their widths are budgeted
+    // together so opening both does not squeeze either.
+    let debug_panels_visible = editor.debug_state().panels_visible;
+    let (test_width, debug_width) = super::layout::side_panel_widths(
+        content_area.width,
+        editor
+            .is_test_panel_open()
+            .then(|| editor.test_panel().width_delta),
+        debug_panels_visible.then(|| editor.debug_state().panel.width_delta),
+    );
+    let (content_area, test_panel_area) = if let Some(width) = test_width {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(1), Constraint::Length(width)])
@@ -110,16 +116,7 @@ fn compute_frame_layout(frame: &Frame, editor: &Editor) -> Option<FrameAreas> {
     } else {
         (content_area, None)
     };
-
-    // Debug panels (if visible and session active)
-    let debug_panels_visible = editor.debug_state().panels_visible;
-
-    // Debug side panel (right) — split from content area
-    let (content_area, debug_side_area) = if debug_panels_visible {
-        let width = super::debug_panels::panel_width(
-            content_area.width,
-            editor.debug_state().panel.width_delta,
-        );
+    let (content_area, debug_side_area) = if let Some(width) = debug_width {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Min(1), Constraint::Length(width)])
@@ -131,7 +128,7 @@ fn compute_frame_layout(frame: &Frame, editor: &Editor) -> Option<FrameAreas> {
 
     // Run console (bottom) — build / run / debug output, kept after exit
     let console_height = if editor.run_console().open {
-        super::run_console::panel_height(content_area.height)
+        super::run_console::panel_height(content_area.height, editor.run_console().height_delta)
     } else {
         0
     };

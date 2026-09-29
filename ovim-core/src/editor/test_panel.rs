@@ -97,6 +97,8 @@ impl TestRun {
 #[derive(Default)]
 pub struct TestPanelState {
     pub open: bool,
+    /// Columns added to (or taken from) the default panel width.
+    pub width_delta: i16,
     /// Run history, newest last.
     pub runs: Vec<TestRun>,
 }

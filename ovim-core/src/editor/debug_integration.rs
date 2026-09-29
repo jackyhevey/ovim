@@ -491,6 +491,47 @@ impl Editor {
         self.mark_dirty();
     }
 
+    /// `:PanelSize test|debug|console <+N|-N|N|reset>`: widens or narrows
+    /// (or heightens, for the console) a bottom/side panel. Returns what to
+    /// tell the user.
+    pub fn resize_panel(&mut self, panel: &str, amount: &str) -> Result<String, String> {
+        let amount = amount.trim();
+        let parse = |current: i16| -> Result<i16, String> {
+            if amount == "reset" || amount.is_empty() {
+                return Ok(0);
+            }
+            let n: i16 = amount
+                .trim_start_matches('+')
+                .parse()
+                .map_err(|_| format!("Not a number: '{amount}' (use +N, -N or reset)"))?;
+            Ok(if amount.starts_with('+') || amount.starts_with('-') {
+                current.saturating_add(n)
+            } else {
+                n
+            })
+        };
+        let message = match panel {
+            "test" | "tests" => {
+                let p = &mut self.build.test_panel;
+                p.width_delta = parse(p.width_delta)?.clamp(-20, 80);
+                format!("Test panel width offset {}", p.width_delta)
+            }
+            "debug" => {
+                let p = &mut self.dap_manager.state.panel;
+                p.width_delta = parse(p.width_delta)?.clamp(-20, 80);
+                format!("Debug panel width offset {}", p.width_delta)
+            }
+            "console" | "run" => {
+                let c = &mut self.launch.console;
+                c.height_delta = parse(c.height_delta)?.clamp(-10, 40);
+                format!("Run console height offset {}", c.height_delta)
+            }
+            other => return Err(format!("Unknown panel '{other}' (test, debug or console)")),
+        };
+        self.mark_dirty();
+        Ok(message)
+    }
+
     /// Tells a live session about changed breakpoints.
     fn after_breakpoint_change(&mut self) {
         if self.dap_manager.is_active() {

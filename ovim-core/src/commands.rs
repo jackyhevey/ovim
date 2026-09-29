@@ -778,6 +778,14 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
             editor.test_visit();
             ok("Visiting last-tested position...")
         }
+        cmd if cmd == "PanelSize" || cmd.starts_with("PanelSize ") => {
+            let mut parts = cmd.split_whitespace().skip(1);
+            let panel = parts.next().unwrap_or("");
+            match editor.resize_panel(panel, parts.next().unwrap_or("")) {
+                Ok(message) => ok(message),
+                Err(message) => err(message),
+            }
+        }
         "TestPanel" | "TestToggle" | "TP" => {
             editor.toggle_test_panel();
             if editor.is_test_panel_open() {
