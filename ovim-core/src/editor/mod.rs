@@ -161,7 +161,7 @@ pub use lsp_state::{
 };
 pub use lsp_ui::LspUi;
 pub use macros::MacroManager;
-pub use marks::{GlobalMark, JumpList, Mark, MarkManager, TagEntry, TagStack};
+pub use marks::{GlobalMark, JumpEntry, JumpList, Mark, MarkManager, TagEntry, TagStack};
 pub use motions::Motions;
 pub use navigation_state::NavigationState;
 pub use operators::Operator;

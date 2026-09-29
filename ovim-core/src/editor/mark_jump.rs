@@ -209,37 +209,62 @@ impl Editor {
         false
     }
 
-    /// Adds current position to jump list
-    pub fn add_jump(&mut self) {
+    /// The cursor position as a jump-list entry.
+    fn current_jump_entry(&self) -> super::marks::JumpEntry {
         let cursor = self.buffer().cursor();
-        self.nav.jump_list.add_jump(cursor.line(), cursor.col().0);
+        super::marks::JumpEntry::new(
+            self.buffer().file_path().map(|p| p.to_string()),
+            cursor.line(),
+            cursor.col().0,
+        )
+    }
+
+    /// Records the current position in the jump list. Call this ONCE, right
+    /// before a jump (Vim's `setpcmark`).
+    pub fn add_jump(&mut self) {
+        let entry = self.current_jump_entry();
+        self.nav.jump_list.add_jump(entry);
+    }
+
+    /// Moves to a jump-list entry, switching buffers when it is in another file.
+    fn go_to_jump_entry(&mut self, entry: super::marks::JumpEntry) -> bool {
+        if let Some(file) = entry.file.as_deref() {
+            let same_file = self
+                .buffer()
+                .file_path()
+                .is_some_and(|current| super::buffer_manager::paths_identify_same_file(current, file));
+            if !same_file && self.load_file(file).is_err() {
+                self.set_status_message(format!("Jump failed: cannot open {file}"));
+                return false;
+            }
+        }
+        let max_line = self.buffer().line_count().saturating_sub(1);
+        let line = entry.line.min(max_line);
+        self.buffer_mut()
+            .cursor_mut()
+            .set_position(line, GraphemeCol(entry.col));
+        self.buffer_mut().validate_cursor_position();
+        // Center cursor after jump (Vim behavior)
+        self.center_cursor_in_viewport();
+        self.mark_dirty();
+        true
     }
 
     /// Jumps back in the jump list (Ctrl-O)
     pub fn jump_back(&mut self) -> bool {
-        if let Some((line, col)) = self.nav.jump_list.jump_back() {
-            self.buffer_mut()
-                .cursor_mut()
-                .set_position(line, GraphemeCol(col));
-            // Center cursor after jump (Vim behavior)
-            self.center_cursor_in_viewport();
-            true
-        } else {
-            false
+        let here = self.current_jump_entry();
+        match self.nav.jump_list.jump_back(here) {
+            Some(entry) => self.go_to_jump_entry(entry),
+            None => false,
         }
     }
 
     /// Jumps forward in the jump list (Ctrl-I)
     pub fn jump_forward(&mut self) -> bool {
-        if let Some((line, col)) = self.nav.jump_list.jump_forward() {
-            self.buffer_mut()
-                .cursor_mut()
-                .set_position(line, GraphemeCol(col));
-            // Center cursor after jump (Vim behavior)
-            self.center_cursor_in_viewport();
-            true
-        } else {
-            false
+        let here = self.current_jump_entry();
+        match self.nav.jump_list.jump_forward(here) {
+            Some(entry) => self.go_to_jump_entry(entry),
+            None => false,
         }
     }
 
@@ -331,6 +356,8 @@ impl Editor {
     /// Pushes current position to tag stack before LSP navigation (gd/gD/gy)
     /// Called just before jumping to definition/implementation/type
     pub fn push_tag(&mut self) {
+        // A tag jump is a jump: Ctrl-O must return here as well as Ctrl-T.
+        self.add_jump();
         if let Some(file_path) = self.buffer().file_path().map(|s| s.to_string()) {
             let cursor = self.buffer().cursor();
             let entry = TagEntry::new(file_path, cursor.line(), cursor.col().0);

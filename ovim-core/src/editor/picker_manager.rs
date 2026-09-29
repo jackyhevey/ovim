@@ -505,6 +505,8 @@ impl Editor {
         use super::PickerAction;
         match action {
             PickerAction::OpenFile { path, line, col } => {
+                // Opening a file from a picker is a jump: Ctrl-O comes back.
+                self.add_jump();
                 if let Err(e) = self.load_file(&path) {
                     self.set_status_message(format!("Failed to load file {}: {}", path, e));
                     return Ok(());

@@ -2430,6 +2430,49 @@ mod tests {
     use lsp_types::{CompletionItem, InlayHint, InlayHintLabel, Location, Position, Range};
     use tokio::sync::oneshot;
 
+    fn location(path: &std::path::Path, line: u32, character: u32) -> Location {
+        Location {
+            uri: uri_from_file_path(path).unwrap(),
+            range: Range::new(Position::new(line, character), Position::new(line, character)),
+        }
+    }
+
+    /// OV-00454: an LSP jump is a jump. `<C-o>` returns to where gd/gi/gr was
+    /// pressed (also across files) and `<C-i>` goes forward again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn ctrl_o_and_ctrl_i_follow_lsp_jumps_across_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("A.java");
+        let b = dir.path().join("B.java");
+        std::fs::write(&a, "a0\na1\na2\na3\na4\n").unwrap();
+        std::fs::write(&b, "b0\nb1\nb2\nb3\nb4\nb5\n").unwrap();
+        let mut editor = Editor::default();
+        editor.load_file(&a).unwrap();
+        editor.buffer_mut().cursor_mut().set_position(2, crate::unicode::GraphemeCol(1));
+
+        // gd from A:3 into B:5 (cross-file), then a second jump inside B.
+        assert!(editor.handle_goto_location(Some(location(&b, 4, 0)), "Definition", "t", false));
+        assert!(editor.handle_goto_location(Some(location(&b, 1, 0)), "Definition", "t", false));
+        assert_eq!(editor.buffer().cursor().line(), 1);
+
+        assert!(editor.jump_back());
+        assert_eq!(editor.buffer().file_path().map(std::path::Path::new), Some(b.canonicalize().unwrap().as_path()));
+        assert_eq!(editor.buffer().cursor().line(), 4);
+        assert!(editor.jump_back());
+        assert_eq!(editor.buffer().file_path().map(std::path::Path::new), Some(a.canonicalize().unwrap().as_path()));
+        assert_eq!(
+            (editor.buffer().cursor().line(), editor.buffer().cursor().col().0),
+            (2, 1)
+        );
+        assert!(!editor.jump_back(), "nothing older than the first jump");
+
+        assert!(editor.jump_forward());
+        assert_eq!(editor.buffer().cursor().line(), 4);
+        assert!(editor.jump_forward());
+        assert_eq!(editor.buffer().cursor().line(), 1);
+        assert!(!editor.jump_forward());
+    }
+
     /// The server keeps a document open while its buffer is loaded, so the
     /// diagnostics of files the user switched away from stay available (the
     /// Problems view). Deleting the buffer is what closes it.
