@@ -451,8 +451,10 @@ fn parse_tool_approval_mode(s: &str) -> ToolApprovalMode {
 /// Infer provider from model name prefix.
 pub fn infer_provider(model: &str) -> AiProviderKind {
     let m = model.to_lowercase();
-    if matches!(m.as_str(), "gpt-6-astra" | "gpt-6-sol" | "gpt-6-luna")
-        || m.starts_with("gpt-5.6-")
+    if matches!(
+        m.as_str(),
+        "gpt-6-astra" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
+    ) || m.starts_with("gpt-5.6-")
         || m.contains("codex")
     {
         AiProviderKind::Codex
@@ -597,6 +599,7 @@ mod tests {
         assert_eq!(infer_provider("gpt-6-astra"), AiProviderKind::Codex);
         assert_eq!(infer_provider("GPT-6-ASTRA"), AiProviderKind::Codex);
         assert_eq!(infer_provider("gpt-6-sol"), AiProviderKind::Codex);
+        assert_eq!(infer_provider("gpt-6.1-sol"), AiProviderKind::Codex);
         assert_eq!(infer_provider("gpt-6-luna"), AiProviderKind::Codex);
         assert_eq!(infer_provider("gpt-5.6-sol"), AiProviderKind::Codex);
         assert_eq!(infer_provider("gpt-5.6-terra"), AiProviderKind::Codex);

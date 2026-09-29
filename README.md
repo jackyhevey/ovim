@@ -153,7 +153,7 @@ vim.ai.setup({
   profiles = {
     codex_sol = {
       provider = "codex",
-      model = "gpt-6-sol",
+      model = "gpt-6.1-sol",
       reasoning_effort = "medium",
     },
     codex_luna = {

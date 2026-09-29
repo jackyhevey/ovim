@@ -219,7 +219,7 @@ pub fn builtin_subagent_model_metadata(config: &AiConfig) -> Vec<ProviderModelMe
                     ReasoningEffort::medium(),
                 ),
                 "gpt-5.6-luna" => (vec![ReasoningEffort::max()], ReasoningEffort::max()),
-                "gpt-6-astra" | "gpt-5.6-terra" => (
+                "gpt-6-astra" | "gpt-6.1-sol" | "gpt-5.6-terra" => (
                     vec![
                         ReasoningEffort::low(),
                         ReasoningEffort::medium(),
