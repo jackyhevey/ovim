@@ -400,7 +400,7 @@ impl Editor {
         let mut stopped = self.stop_current_job();
         if self.dap_manager.is_active() && self.launch.job.is_none() {
             // A debug session started by hand (not through a launch job).
-            self.dap_manager.pending_action = Some(PendingDebugAction::Stop);
+            self.dap_manager.request_stop();
             stopped = true;
         }
         if !stopped {
@@ -585,7 +585,7 @@ impl Editor {
             // it is gone.
             self.launch.queued = Some(request);
             if !self.stop_current_job() && self.dap_manager.is_active() {
-                self.dap_manager.pending_action = Some(PendingDebugAction::Stop);
+                self.dap_manager.request_stop();
             }
             self.set_status_message("Stopping the current run...");
             return;
@@ -1549,7 +1549,7 @@ impl Editor {
         if matches!(job.stage, Stage::StartingDebugger | Stage::Debugging { .. })
             || self.dap_manager.is_active()
         {
-            self.dap_manager.pending_action = Some(PendingDebugAction::Stop);
+            self.dap_manager.request_stop();
         }
         self.log_console(job.run_id, LineKind::System, format!("✗ {message}"));
         self.set_status_message(message.clone());
@@ -1596,7 +1596,7 @@ impl Editor {
                 if let Some(proc) = job.proc.as_mut() {
                     proc.kill();
                 }
-                self.dap_manager.pending_action = Some(PendingDebugAction::Stop);
+                self.dap_manager.request_stop();
             }
         }
         if !done {

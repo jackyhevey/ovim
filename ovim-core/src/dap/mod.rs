@@ -107,6 +107,9 @@ pub struct DapManager {
     event_tx: mpsc::Sender<DapEvent>,
     /// Pending action to execute in the async event loop.
     pub pending_action: Option<PendingDebugAction>,
+    /// Stop was requested. Kept apart from `pending_action` (a single slot
+    /// that stop/step/fetch events overwrite) so a stop can never be lost.
+    stop_requested: bool,
     /// The launch/attach request for the session being started.
     pub launch_request: Option<DapLaunchRequest>,
     /// Debuggee/adapter output not yet copied into the run console.
@@ -139,6 +142,7 @@ impl DapManager {
             event_rx,
             event_tx,
             pending_action: None,
+            stop_requested: false,
             launch_request: None,
             console_output: Vec::new(),
             session_end: None,
@@ -166,6 +170,19 @@ impl DapManager {
         if let Some(client) = self.client.take() {
             client.kill();
         }
+    }
+
+    /// Asks the event loop to end the session (and any queued start).
+    pub fn request_stop(&mut self) {
+        self.stop_requested = true;
+        if matches!(self.pending_action, Some(PendingDebugAction::Start { .. })) {
+            self.pending_action = None;
+        }
+    }
+
+    /// True once after [`request_stop`](Self::request_stop).
+    pub fn take_stop_request(&mut self) -> bool {
+        std::mem::take(&mut self.stop_requested)
     }
 
     /// Drains debuggee/adapter output that has not been shown in the run
@@ -444,5 +461,32 @@ impl DapManager {
     /// Get the client (if connected).
     pub fn client(&self) -> Option<&DebugAdapterClient> {
         self.client.as_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stop_request_survives_other_actions_overwriting_the_pending_slot() {
+        let mut dap = DapManager::new();
+        dap.request_stop();
+        // A `stopped` event queues a state fetch in the same tick.
+        dap.pending_action = Some(PendingDebugAction::FetchState);
+        assert!(dap.take_stop_request());
+        assert!(!dap.take_stop_request(), "reported once");
+    }
+
+    #[test]
+    fn stopping_cancels_a_start_that_has_not_run_yet() {
+        let mut dap = DapManager::new();
+        dap.pending_action = Some(PendingDebugAction::Start {
+            command: "x".into(),
+            args: vec![],
+            launch: DapLaunchRequest::Attach(serde_json::json!({})),
+        });
+        dap.request_stop();
+        assert!(dap.pending_action.is_none());
     }
 }

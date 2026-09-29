@@ -191,6 +191,15 @@ fn process_dap_events(editor: &mut Editor) {
 
 /// Dispatch the pending debug action (start, stop, step, evaluate, etc.).
 async fn process_pending_debug_action(editor: &mut Editor) {
+    // Stop outranks everything else queued.
+    if editor.dap_manager_mut().take_stop_request() {
+        editor.dap_manager_mut().pending_action = None;
+        if let Err(e) = editor.stop_debug_session().await {
+            editor.set_status_message(format!("Debug stop failed: {e}"));
+        }
+        editor.mark_dirty();
+        return;
+    }
     let Some(action) = editor.dap_manager_mut().pending_action.take() else {
         return;
     };

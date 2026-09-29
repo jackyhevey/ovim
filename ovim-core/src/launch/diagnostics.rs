@@ -46,7 +46,7 @@ static ANSI: LazyLock<Regex> = LazyLock::new(|| Regex::new("\x1b\\[[0-9;?]*[A-Za
 
 static JAVAC_HEADER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"^(?P<path>.+?\.(?:java|kt|kts|scala|groovy)):(?P<line>\d+): (?P<kind>error|warning|note): ?(?P<msg>.*)$",
+        r"^(?P<indent>[ \t]*)(?P<path>.+?\.(?:java|kt|kts|scala|groovy)):(?P<line>\d+): (?P<kind>error|warning|note): ?(?P<msg>.*)$",
     )
     .unwrap()
 });
@@ -232,6 +232,9 @@ pub fn parse_jvm_diagnostics(output: &str, base_dir: Option<&Path>) -> JvmDiagno
             let mut text = caps["msg"].trim().to_string();
             let entry_type = kind_type(&caps["kind"]);
             let path = resolve_path(&caps["path"], base_dir);
+            // Gradle repeats compiler output indented inside its failure
+            // report; the caret column is relative to that indentation.
+            let indent = caps["indent"].chars().count();
             consumed[i] = true;
             let mut col = 0usize;
             let mut next = i + 1;
@@ -243,12 +246,16 @@ pub fn parse_jvm_diagnostics(output: &str, base_dir: Option<&Path>) -> JvmDiagno
                 && CARET_LINE.is_match(lines[next + 1])
                 && !is_header(lines[next])
             {
-                col = lines[next + 1].chars().take_while(|c| *c != '^').count() + 1;
+                col = (lines[next + 1].chars().take_while(|c| *c != '^').count() + 1)
+                    .saturating_sub(indent)
+                    .max(1);
                 consumed[next] = true;
                 consumed[next + 1] = true;
                 next += 2;
             } else if next < lines.len() && CARET_LINE.is_match(lines[next]) {
-                col = lines[next].chars().take_while(|c| *c != '^').count() + 1;
+                col = (lines[next].chars().take_while(|c| *c != '^').count() + 1)
+                    .saturating_sub(indent)
+                    .max(1);
                 consumed[next] = true;
                 next += 1;
             }
@@ -463,6 +470,26 @@ mod tests {
             !parsed.consumed[6],
             "the '1 error' summary is not a diagnostic line"
         );
+    }
+
+    #[test]
+    fn gradle_repeats_javac_output_indented_and_the_copy_is_deduplicated() {
+        let out = "\
+/p/A.java:58: error: incompatible types: String cannot be converted to int
+        int total = \"x\";
+                    ^
+1 error
+
+* What went wrong:
+> Compilation failed; see the compiler output below.
+  /p/A.java:58: error: incompatible types: String cannot be converted to int
+          int total = \"x\";
+                      ^
+  1 error
+";
+        let parsed = parse_jvm_diagnostics(out, None);
+        assert_eq!(parsed.entries.len(), 1, "{:?}", parsed.entries);
+        assert_eq!(parsed.entries[0].col, 21);
     }
 
     #[test]
