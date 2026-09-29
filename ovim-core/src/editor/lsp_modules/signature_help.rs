@@ -121,8 +121,25 @@ fn parameter_char_range(
 
 /// Words that put a `(` in front of a condition, not an argument list.
 const NON_CALL_KEYWORDS: &[&str] = &[
-    "if", "for", "while", "switch", "catch", "synchronized", "return", "else", "match", "with",
-    "await", "in", "and", "or", "not", "using", "lock", "foreach", "when",
+    "if",
+    "for",
+    "while",
+    "switch",
+    "catch",
+    "synchronized",
+    "return",
+    "else",
+    "match",
+    "with",
+    "await",
+    "in",
+    "and",
+    "or",
+    "not",
+    "using",
+    "lock",
+    "foreach",
+    "when",
 ];
 
 /// Whether `before_cursor` (the text up to the cursor, possibly several lines)

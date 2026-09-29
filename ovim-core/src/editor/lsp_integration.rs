@@ -3340,7 +3340,10 @@ mod tests {
             .show(vec![method], 5, "ad".to_string());
         editor.accept_completion();
         assert_eq!(editor.buffer().rope().to_string(), "list.add(e)\n");
-        assert!(editor.lsp.intents.signature_help, "cursor is inside add(...)");
+        assert!(
+            editor.lsp.intents.signature_help,
+            "cursor is inside add(...)"
+        );
 
         let mut editor = Editor::with_content("list.si");
         editor.set_file_path("/tmp/a.java".to_string());

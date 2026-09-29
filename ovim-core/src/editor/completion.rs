@@ -112,7 +112,12 @@ impl CompletionMenu {
     }
 
     /// Shows the choices of a snippet stop (see [`Self::is_snippet_choices`]).
-    pub fn show_snippet_choices(&mut self, choices: &[String], trigger_col: usize, buffer_version: usize) {
+    pub fn show_snippet_choices(
+        &mut self,
+        choices: &[String],
+        trigger_col: usize,
+        buffer_version: usize,
+    ) {
         let items = choices
             .iter()
             .enumerate()

@@ -49,9 +49,17 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // p - paste after cursor
         KeyCode::Char('p') => {
             let count = editor.effective_count();
-            if editor.get_from_register_with_type().1 == RegisterType::Line {
+            if editor.closed_fold_at_cursor().is_some() {
                 // A linewise paste lands below a closed fold, not inside it.
-                editor.cursor_to_closed_fold_end();
+                // (Reading the register consumes the pending `"x` prefix.)
+                let pending = editor.pending_register();
+                let linewise = editor.get_from_register_with_type().1 == RegisterType::Line;
+                if let Some(register) = pending {
+                    editor.set_pending_register(register);
+                }
+                if linewise {
+                    editor.cursor_to_closed_fold_end();
+                }
             }
             helpers::paste_after(editor, count)?;
             editor.clear_count();

@@ -886,7 +886,11 @@ mod tests {
         let stale = versioned_edit(file_uri(&hidden), Some(3), vec![replace_edit(3, 9, "old")]);
         assert!(!editor.apply_workspace_edit(stale).unwrap());
         assert!(!editor.any_buffer_modified(), "a stale edit must not land");
-        assert!(editor.lsp_status().contains("discarded"), "{:?}", editor.lsp_status());
+        assert!(
+            editor.lsp_status().contains("discarded"),
+            "{:?}",
+            editor.lsp_status()
+        );
 
         // Matching version and text: applied (kept in memory, not written).
         let fresh = versioned_edit(file_uri(&hidden), Some(4), vec![replace_edit(3, 9, "new")]);
@@ -921,7 +925,11 @@ mod tests {
 
         let edit = versioned_edit(file_uri(&hidden), Some(2), vec![replace_edit(3, 9, "x")]);
         assert!(!editor.apply_workspace_edit(edit).unwrap());
-        assert!(editor.lsp_status().contains("discarded"), "{:?}", editor.lsp_status());
+        assert!(
+            editor.lsp_status().contains("discarded"),
+            "{:?}",
+            editor.lsp_status()
+        );
     }
 
     /// External review on OV-00331: write-through must never clobber a file

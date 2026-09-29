@@ -228,6 +228,20 @@ fn case_and_yank_operators_cover_the_whole_closed_fold() {
     );
 }
 
+/// A `"a` prefix must survive the closed-fold check `p` does (reading the
+/// register consumes the pending name; it once pasted the wrong register).
+#[test]
+fn a_named_register_paste_below_a_closed_fold_keeps_its_register() {
+    assert_eq!(
+        folded("\"ayyG\"ap"),
+        lines("line 1|line 2|line 3|line 4|line 5|line 6|line 7|line 8|line 9|line 10|line 2|line 3|line 4|line 5")
+    );
+    assert_eq!(
+        folded("\"ayy7Gzf1j\"ap"),
+        lines("line 1|line 2|line 3|line 4|line 5|line 6|line 7|line 8|line 2|line 3|line 4|line 5|line 9|line 10")
+    );
+}
+
 #[test]
 fn change_commands_replace_the_whole_closed_fold_with_one_line() {
     let expected = lines("line 1|X|line 6|line 7|line 8|line 9|line 10");
