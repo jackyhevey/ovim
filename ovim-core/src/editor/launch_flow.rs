@@ -1679,13 +1679,21 @@ impl Editor {
             self.finish_test_panel_run(job, exit_ok, Vec::new(), None, Vec::new());
             return;
         };
-        let cases = junit::read_reports_dir(&dir, job.started_wall - Duration::from_secs(2));
-        let summary = junit::summary_text(&cases);
+        let mut cases = junit::read_reports_dir(&dir, job.started_wall - Duration::from_secs(2));
         let roots = job
             .plan
             .as_ref()
             .map(|p| p.source_roots())
             .unwrap_or_default();
+        let method_hint = job
+            .plan
+            .as_ref()
+            .and_then(|p| p.task.as_ref())
+            .and_then(|t| t.method_name.clone());
+        junit::restore_parameterized_names(&mut cases, method_hint.as_deref(), |class| {
+            parameterized_methods_in_source(class, &roots)
+        });
+        let summary = junit::summary_text(&cases);
         let Some(summary_text) = summary.clone() else {
             self.finish_test_panel_run(job, exit_ok, cases, None, Vec::new());
             return;
@@ -2049,6 +2057,44 @@ impl Editor {
 
 /// One block per test for the test panel: `✓ Class.name (12ms)`, failures
 /// with message and the stack, skips dimmed by their `○` marker.
+/// The parameterized test methods of `class` (binary name, `$` for nested
+/// classes) as found in its source file under `roots`.
+fn parameterized_methods_in_source(class: &str, roots: &[PathBuf]) -> Vec<String> {
+    use crate::editor::test_runner::nearest::{discover_tests, TestFlavor};
+    let (package_class, chain) = match class.split_once('$') {
+        Some((outer, nested)) => (
+            outer,
+            std::iter::once(outer.rsplit('.').next().unwrap_or(outer))
+                .chain(nested.split('$'))
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        ),
+        None => (
+            class,
+            vec![class.rsplit('.').next().unwrap_or(class).to_string()],
+        ),
+    };
+    let simple = package_class.rsplit('.').next().unwrap_or(package_class);
+    for (ext, language) in [
+        ("java", crate::syntax::Language::Java),
+        ("kt", crate::syntax::Language::Kotlin),
+    ] {
+        let file = format!("{simple}.{ext}");
+        let Some(path) = stacktrace::resolve_frame_source(package_class, &file, roots) else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        return discover_tests(language, &source)
+            .into_iter()
+            .filter(|t| t.flavor == TestFlavor::Parameterized && t.namespaces == chain)
+            .map(|t| t.name)
+            .collect();
+    }
+    Vec::new()
+}
+
 fn junit_panel_lines(cases: &[junit::TestCaseResult]) -> Vec<String> {
     let mut lines = Vec::new();
     for case in cases {
@@ -2106,4 +2152,32 @@ fn junit_panel_lines(cases: &[junit::TestCaseResult]) -> Vec<String> {
 fn last_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(n)..].join(" | ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parameterized_methods_are_read_from_the_class_source_including_nested_classes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let pkg = root.join("src/test/java/p");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("OrdersTest.java"),
+            "package p;\nclass OrdersTest {\n  @Test void plain() {}\n  @ParameterizedTest @ValueSource(ints = {1}) void totals(int n) {}\n  @Nested class Empty {\n    @ParameterizedTest @ValueSource(ints = {1}) void zero(int n) {}\n  }\n}\n",
+        )
+        .unwrap();
+        let roots = [root];
+        assert_eq!(
+            parameterized_methods_in_source("p.OrdersTest", &roots),
+            vec!["totals"]
+        );
+        assert_eq!(
+            parameterized_methods_in_source("p.OrdersTest$Empty", &roots),
+            vec!["zero"]
+        );
+        assert!(parameterized_methods_in_source("p.Missing", &roots).is_empty());
+    }
 }

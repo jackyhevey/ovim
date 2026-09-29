@@ -21,7 +21,7 @@
 //! `nearest.rs`).
 
 mod jvm;
-mod nearest;
+pub(crate) mod nearest;
 mod runners;
 
 #[cfg(test)]
