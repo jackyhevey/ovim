@@ -904,7 +904,7 @@ mod tests {
             id: "slow-shell".into(),
             name: "bash".into(),
             arguments: serde_json::json!({
-                "command": "touch shell-started; sleep 5; touch cancelled-marker"
+                "command": "touch shell-started; sleep 120; touch cancelled-marker"
             }),
         };
         let tool = editor.ai_runtime_record_tool_intent(&turn, &call).unwrap();
@@ -921,7 +921,8 @@ mod tests {
             .unwrap()
             .kill
             .clone();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         let pid = loop {
             if let Some(pid) = kill.published_child() {
                 break pid;
@@ -937,7 +938,8 @@ mod tests {
 
         // The blocking task reaps the killed child; once the pid is gone the
         // command (and its trailing `touch cancelled-marker`) can never run.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok() {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -948,12 +950,32 @@ mod tests {
         assert!(!dir.path().join("cancelled-marker").exists());
     }
 
+    /// How long the shell tests wait for a condition that only depends on
+    /// process scheduling: the shell is a *login* shell (`-lc`), so on a
+    /// loaded CI runner its profile can take seconds before the command even
+    /// starts. The waits poll, so a healthy run never pays this; the
+    /// commands that must outlive the wait sleep far longer (and are killed
+    /// by the test itself), so no wall-clock window can close underneath it.
+    const SHELL_TEST_PATIENCE_SECS: u64 = 30;
+
     /// True while `pid` names a terminated-but-unreaped (zombie) process.
     /// Used to observe the reap-last ordering: the shell leader must stay a
     /// zombie — reserving its pid and pgid for `killpg` — for as long as
     /// the execution is parked on the output drain.
+    ///
+    /// Reads `/proc/<pid>/stat` where it exists: spawning `ps` from a busy,
+    /// multi-threaded test process costs a fork+exec per poll and made the
+    /// observation itself the slowest step under load.
     #[cfg(unix)]
     fn leader_is_zombie(pid: u32) -> bool {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // `pid (comm) S ...`: the state follows the last `)` because
+            // `comm` may itself contain parentheses.
+            return stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim_start().chars().next())
+                == Some('Z');
+        }
         std::process::Command::new("ps")
             .args(["-o", "stat=", "-p", &pid.to_string()])
             .output()
@@ -986,7 +1008,7 @@ mod tests {
                 // The shell leader exits immediately; the backgrounded
                 // descendant inherits the output pipes, so the execution
                 // stays blocked on the drain long after the leader is gone.
-                "command": "(sleep 5; touch cancelled-marker) & echo started"
+                "command": "(sleep 120; touch cancelled-marker) & echo started"
             }),
         };
         let tool = editor.ai_runtime_record_tool_intent(&turn, &call).unwrap();
@@ -1003,7 +1025,8 @@ mod tests {
             .unwrap()
             .kill
             .clone();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         let pid = loop {
             if let Some(pid) = kill.published_child() {
                 break pid;
@@ -1018,7 +1041,8 @@ mod tests {
         // zombie with its pid still published: the kernel then reserves the
         // pid/pgid, which is what lets cancellation still reach the
         // descendant through `killpg`.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while !leader_is_zombie(pid) {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -1036,7 +1060,8 @@ mod tests {
 
         // The whole process group must die, so the descendant's trailing
         // `touch` can never run.
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid as i32), None).is_ok() {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -1047,7 +1072,8 @@ mod tests {
         // Only the blocking execution reaps the leader, and it does so as
         // its final step — so the zombie disappearing proves the pending
         // execution resolved (and did not leak the zombie).
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_ok() {
             assert!(
                 tokio::time::Instant::now() < deadline,
@@ -1067,14 +1093,15 @@ mod tests {
         let workdir = dir.path().to_path_buf();
         let worker = std::thread::spawn(move || {
             super::super::ai_tool_execution::run_bash_program(
-                "(sleep 5; touch cancelled-marker) & echo started",
+                "(sleep 120; touch cancelled-marker) & echo started",
                 &workdir,
                 Some(&task_kill),
                 None,
             )
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         let pid = loop {
             if let Some(pid) = kill.published_child() {
                 break pid;
@@ -1088,7 +1115,8 @@ mod tests {
         // The leader exits but stays an un-reaped zombie while the
         // backgrounded descendant holds the pipes: the execution is parked
         // on the output drain and reaping is deferred to the very end.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while !leader_is_zombie(pid) {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1106,7 +1134,8 @@ mod tests {
         // Cancellation SIGKILLs the group, which closes the pipes and lets
         // the drain (and thus the whole execution) resolve well before the
         // descendant's 5s sleep would have ended.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while !worker.is_finished() {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1120,6 +1149,59 @@ mod tests {
             nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None).is_err(),
             "shell leader was never reaped"
         );
+        assert!(!dir.path().join("cancelled-marker").exists());
+    }
+
+    /// OV-00471: the zombie-leader observations used a 2 s deadline, which a
+    /// login shell that spends longer than that in its profile (a loaded CI
+    /// runner) blew through. A slow start must only delay the assertions, and
+    /// cancelling afterwards must still resolve the execution promptly.
+    #[cfg(unix)]
+    #[test]
+    fn slow_shell_startup_only_delays_the_zombie_leader_observations() {
+        let dir = tempfile::tempdir().unwrap();
+        let kill = std::sync::Arc::new(super::super::ai_chat_state::ShellKillHandle::default());
+        let task_kill = kill.clone();
+        let workdir = dir.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            super::super::ai_tool_execution::run_bash_program(
+                // 3 s of "profile" before the command, longer than the old
+                // 2 s deadline; the descendant then outlives every wait.
+                "sleep 3; (sleep 120; touch cancelled-marker) & echo started",
+                &workdir,
+                Some(&task_kill),
+                None,
+            )
+        });
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
+        let pid = loop {
+            if let Some(pid) = kill.published_child() {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shell child never spawned"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        while !leader_is_zombie(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shell leader never became an un-reaped zombie"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(!worker.is_finished());
+        kill.cancel();
+        while !worker.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "cancelled shell drain did not resolve"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        worker.join().unwrap();
         assert!(!dir.path().join("cancelled-marker").exists());
     }
 
@@ -1155,7 +1237,8 @@ mod tests {
         // delay, so a timed interrupt could land before the trap is even armed
         // and race the "ready" output away entirely.
         let mut events = Vec::new();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while !events.iter().any(is_ready_output) {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1168,7 +1251,8 @@ mod tests {
         }
         kill.interrupt();
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while !worker.is_finished() {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1217,17 +1301,18 @@ mod tests {
             // The perl descendant leaves the process group via setsid() but
             // keeps the pipes. Once the shell leader exits, the group has NO
             // living members — the window where the pgid would be reusable
-            // if the leader were reaped. sleep 15 so only the bounded
+            // if the leader were reaped. sleep 120 so only the bounded
             // post-cancel drain (a few seconds) can explain a prompt return.
             super::super::ai_tool_execution::run_bash_program(
-                "perl -e 'use POSIX (); POSIX::setsid(); sleep 15' & echo started",
+                "perl -e 'use POSIX (); POSIX::setsid(); sleep 120' & echo started",
                 &workdir,
                 Some(&task_kill),
                 None,
             )
         });
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         let pid = loop {
             if let Some(pid) = kill.published_child() {
                 break pid;
@@ -1240,7 +1325,8 @@ mod tests {
         };
         // The un-reaped zombie leader is what keeps the pid/pgid reserved
         // even though the group has no living members left.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while !leader_is_zombie(pid) {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1253,7 +1339,8 @@ mod tests {
         // exact window where a reaped leader's pgid would be reusable.
         // Cancelling earlier would kill perl while it is still in the group
         // and skip the scenario under test.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid as i32), None).is_ok() {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1271,7 +1358,8 @@ mod tests {
         // execution still resolves via the bounded drain.
         kill.cancel();
 
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while !worker.is_finished() {
             assert!(
                 std::time::Instant::now() < deadline,
@@ -1799,7 +1887,8 @@ mod tests {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         editor.execute_dynamic_tool_after_policy(turn, tool, call, response_tx, None, false);
 
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while editor
             .ai_state
             .chat
@@ -1879,11 +1968,14 @@ mod tests {
 
         // Wait for real process-start progress while the release gate stays
         // closed. Progress is a visible state change, not job completion.
-        tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            while pending.progress.is_empty() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
+        tokio::time::timeout(
+            std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS),
+            async {
+                while pending.progress.is_empty() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            },
+        )
         .await
         .expect("shell did not start");
 
@@ -1913,7 +2005,8 @@ mod tests {
         ));
 
         std::fs::write(release_gate, "go").unwrap();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(SHELL_TEST_PATIENCE_SECS);
         while editor
             .ai_state
             .chat
