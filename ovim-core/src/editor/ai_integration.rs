@@ -468,7 +468,7 @@ mod model_selection_tests {
             models,
             [
                 "default",
-                "claude-sonnet-5",
+                "claude-sonnet-5-5",
                 "claude-opus-5-5",
                 "claude-fable-5-1",
                 "claude-haiku-4-5-20251001"
@@ -533,7 +533,7 @@ mod model_selection_tests {
             ("claude-fable-5-1", "medium"),
             ("fable[1m]", "medium"),
             ("claude-opus-5-5", "medium"),
-            ("claude-sonnet-5", "high"),
+            ("claude-sonnet-5-5", "high"),
             ("claude-haiku-4-5-20251001", "default"),
             ("default", "default"),
             ("custom-deployment", "default"),
@@ -787,7 +787,7 @@ mod model_selection_tests {
         let mut editor = editor();
         editor.open_ai_chat_model_picker(super::super::ChatModelPickerSection::Model);
         for expected in [
-            "claude-sonnet-5",
+            "claude-sonnet-5-5",
             "claude-opus-5-5",
             "claude-fable-5-1",
             "claude-haiku-4-5-20251001",
