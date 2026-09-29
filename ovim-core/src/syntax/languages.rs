@@ -314,8 +314,7 @@ impl LanguageRegistry {
             Language::Tsx => tree_sitter_typescript::LANGUAGE_TSX.into(),
             Language::Python => tree_sitter_python::LANGUAGE.into(),
             Language::Java => tree_sitter_java::LANGUAGE.into(),
-            // Kotlin: use Java grammar as a fallback until we add a dedicated Kotlin grammar.
-            Language::Kotlin => tree_sitter_java::LANGUAGE.into(),
+            Language::Kotlin => tree_sitter_kotlin_sg::LANGUAGE.into(),
             Language::Scala => tree_sitter_scala::LANGUAGE.into(),
             Language::Groovy => tree_sitter_groovy::LANGUAGE.into(),
             Language::Go => tree_sitter_go::LANGUAGE.into(),
@@ -366,8 +365,7 @@ impl LanguageRegistry {
             Language::Rust => tree_sitter_rust::HIGHLIGHTS_QUERY,
             Language::Python => tree_sitter_python::HIGHLIGHTS_QUERY,
             Language::Java => tree_sitter_java::HIGHLIGHTS_QUERY,
-            // Kotlin: Java highlights as a fallback.
-            Language::Kotlin => tree_sitter_java::HIGHLIGHTS_QUERY,
+            Language::Kotlin => include_str!("queries/kotlin.scm"),
             Language::Scala => tree_sitter_scala::HIGHLIGHTS_QUERY,
             Language::Groovy => include_str!("queries/groovy.scm"),
             Language::Go => tree_sitter_go::HIGHLIGHTS_QUERY,
