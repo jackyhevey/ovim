@@ -54,6 +54,7 @@ mod execution;
 #[cfg(test)]
 mod execution_tests;
 mod file_rename;
+mod folding;
 mod filetree;
 pub mod fuzzy;
 pub mod git_tools;
@@ -1086,6 +1087,8 @@ impl Editor {
             && buffer.file_path().is_some_and(|path| path.ends_with(".md"));
         let cursor_line = buffer.cursor().line();
         let conceal_cursor_line = conceal_active.then_some(cursor_line);
+        // Lines hidden by closed folds take no visual rows.
+        let hidden_ranges = buffer.fold_manager().hidden_ranges();
         let make_layout = |line: usize| {
             let mut transform = None;
             let mut links = Vec::new();
@@ -1175,6 +1178,7 @@ impl Editor {
                     }
                     if map.refresh_indexed(&changes, line_count, version, &extra, make_layout) {
                         map.set_conceal_cursor_line(conceal_cursor_line);
+                        map.set_hidden_ranges(&hidden_ranges);
                         return (existing, dec_gen);
                     }
                 }
@@ -1188,6 +1192,7 @@ impl Editor {
         );
         map.set_source_buffer_id(buffer.id());
         map.set_conceal_cursor_line(conceal_cursor_line);
+        map.set_hidden_ranges(&hidden_ranges);
         (Some(map), dec_gen)
     }
 
@@ -1372,12 +1377,24 @@ impl Editor {
                 scrolloff,
             );
         } else {
-            new_offset = Self::compute_logical_scroll_offset(
-                cursor_line,
-                current_offset,
-                visible_lines,
-                scrolloff,
-            );
+            // Closed folds hide lines: scroll in visible-line space.
+            let folds = self.buffer().fold_manager();
+            if folds.hidden_ranges().is_empty() {
+                new_offset = Self::compute_logical_scroll_offset(
+                    cursor_line,
+                    current_offset,
+                    visible_lines,
+                    scrolloff,
+                );
+            } else {
+                let visible_offset = Self::compute_logical_scroll_offset(
+                    folds.visible_index(cursor_line),
+                    folds.visible_index(current_offset),
+                    visible_lines,
+                    scrolloff,
+                );
+                new_offset = folds.line_at_visible_index(visible_offset);
+            }
         };
 
         // Clamp to max_scroll only when the viewport actually needs to move for

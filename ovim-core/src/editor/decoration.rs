@@ -73,6 +73,8 @@ pub enum DecorationSource {
     Diagnostic,
     /// `textDocument/codeLens` actions (`▶ Run | ▶ Debug`).
     CodeLens,
+    /// `⋯ N lines` marker at the end of a closed fold's header line.
+    Fold,
 }
 
 /// Visual style for a decoration, independent of ratatui.

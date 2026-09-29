@@ -2636,6 +2636,16 @@ function App() {
                                                             </span>
                                                         )}
                                                     </For>
+                                                    <Show when={line.folded}>
+                                                        {(count) => (
+                                                            <span
+                                                                class="fold-marker"
+                                                                title="Closed fold (zo to open)"
+                                                            >
+                                                                ⋯ {count()} lines
+                                                            </span>
+                                                        )}
+                                                    </Show>
                                                 </span>
                                             </div>
                                         )}
@@ -4609,16 +4619,6 @@ function App() {
                             )}
                         </Show>
 
-                        <Show when={!view().aiChat ? view().hover : undefined}>
-                            {(hover) => (
-                                <section
-                                    class="hover-popover"
-                                    aria-label="Documentation"
-                                    style={inlineOverlayStyle(
-                                        hover().line ?? view().cursor.line,
-                                        hover().displayColumn ??
-                                            view().cursor.displayColumn,
-                                        520,
                         <Show
                             when={
                                 !view().aiChat ? view().signatureHelp : undefined
@@ -4659,6 +4659,16 @@ function App() {
                             )}
                         </Show>
 
+                        <Show when={!view().aiChat ? view().hover : undefined}>
+                            {(hover) => (
+                                <section
+                                    class="hover-popover"
+                                    aria-label="Documentation"
+                                    style={inlineOverlayStyle(
+                                        hover().line ?? view().cursor.line,
+                                        hover().displayColumn ??
+                                            view().cursor.displayColumn,
+                                        520,
                                         340,
                                     )}
                                 >

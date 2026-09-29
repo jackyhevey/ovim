@@ -78,8 +78,14 @@ pub fn move_right(editor: &mut Editor) {
 pub fn move_up(editor: &mut Editor) {
     let count = editor.effective_count();
     let line_before = editor.buffer().cursor().line();
-    let cursor = editor.buffer_mut().cursor_mut();
-    cursor.move_up(count);
+    let folds = editor.buffer().fold_manager();
+    if !folds.hidden_ranges().is_empty() {
+        // Closed folds count as one line.
+        let target = folds.step_up(line_before, count);
+        editor.buffer_mut().cursor_mut().set_line(target);
+    } else {
+        editor.buffer_mut().cursor_mut().move_up(count);
+    }
     clamp_cursor_with_goal_column(editor);
     editor.clear_count();
     if editor.buffer().cursor().line() == line_before {
@@ -92,9 +98,14 @@ pub fn move_down(editor: &mut Editor) {
     let max_line = editor.buffer().line_count().saturating_sub(1);
 
     let line_before = editor.buffer().cursor().line();
-    let cursor = editor.buffer_mut().cursor_mut();
-    let new_line = (cursor.line() + count).min(max_line);
-    cursor.set_line(new_line);
+    let folds = editor.buffer().fold_manager();
+    let new_line = if folds.hidden_ranges().is_empty() {
+        (line_before + count).min(max_line)
+    } else {
+        // Closed folds count as one line.
+        folds.step_down(line_before, count, max_line)
+    };
+    editor.buffer_mut().cursor_mut().set_line(new_line);
     clamp_cursor_with_goal_column(editor);
     editor.clear_count();
     if editor.buffer().cursor().line() == line_before {

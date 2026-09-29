@@ -252,8 +252,13 @@ pub fn cursor_screen_position(
             buffer.rope(),
             buffer.edit_log(),
         );
+    // Lines hidden by closed folds take no screen rows.
+    let folds = buffer.fold_manager();
+    let screen_line = folds
+        .visible_index(line)
+        .saturating_sub(folds.visible_index(viewport_start));
     (
-        line.saturating_sub(viewport_start),
+        screen_line,
         display_col.saturating_sub(editor.horizontal_offset()),
     )
 }

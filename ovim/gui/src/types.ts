@@ -26,6 +26,8 @@ export interface GuiLine {
     diff?: "header" | "hunk" | "added" | "removed" | "context";
     breakpoint?: "enabled" | "conditional" | "disabled";
     executing?: boolean;
+    /** Lines hidden below this one by a closed fold. */
+    folded?: number;
 }
 
 export type GuiLayoutNode =
@@ -495,8 +497,6 @@ export interface GuiSnapshot {
         }>;
     };
     hover?: { content: string; line?: number; displayColumn?: number };
-    fileTree?: {
-        revealGeneration: number;
     signatureHelp?: {
         before: string;
         active: string;
@@ -507,6 +507,8 @@ export interface GuiSnapshot {
         line: number;
         displayColumn: number;
     };
+    fileTree?: {
+        revealGeneration: number;
         root: string;
         selected: number;
         items: Array<{

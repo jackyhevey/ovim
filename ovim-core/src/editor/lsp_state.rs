@@ -434,6 +434,10 @@ pub struct LspState {
     pub needs_lsp_init: bool,
     /// File path that needs didClose notification (set when switching files)
     pub pending_did_close_file: Option<String>,
+    /// Buffer version the fold debounce is waiting on, and since when.
+    pub fold_tracking: Option<(usize, std::time::Instant)>,
+    /// `(header line, hidden line count)` of the fold markers currently shown.
+    pub fold_markers: Vec<(usize, usize)>,
     /// Buffers created purely to carry a workspace edit for a file the user
     /// never opened (OV-00450). Only these may be written through to disk;
     /// a buffer the user opened, even if hidden, is never persisted behind
@@ -507,16 +511,18 @@ impl LspState {
             lsp_manager: None,
             diagnostic_count: (0, 0, 0, 0),
             hover_info: None,
+            signature_help: None,
             blame_mouse_hover: false,
             hover_scroll: 0,
             hover_h_scroll: 0,
             hover_position: None,
-            signature_help: None,
             document_sync: HashMap::new(),
             status: String::new(),
             active_lsp_servers: HashMap::new(),
             needs_lsp_init: false,
             pending_did_close_file: None,
+            fold_tracking: None,
+            fold_markers: Vec::new(),
             workspace_edit_carriers: std::collections::HashSet::new(),
             pending_file_rename: None,
             hierarchy: None,

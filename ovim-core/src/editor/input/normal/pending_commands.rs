@@ -380,31 +380,8 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // =====================================================================
         // 'z' - Fold/scroll commands
         // =====================================================================
-        ('z', KeyCode::Char('o')) => {
-            let line = editor.buffer().cursor().line();
-            editor.buffer_mut().open_fold(line);
-        }
-        ('z', KeyCode::Char('c')) => {
-            let line = editor.buffer().cursor().line();
-            editor.buffer_mut().close_fold(line);
-        }
-        ('z', KeyCode::Char('a')) => {
-            let line = editor.buffer().cursor().line();
-            editor.buffer_mut().toggle_fold(line);
-        }
-        ('z', KeyCode::Char('R')) => {
-            editor.buffer_mut().fold_manager_mut().open_all();
-        }
-        ('z', KeyCode::Char('M')) => {
-            editor.buffer_mut().fold_manager_mut().close_all();
-        }
-        ('z', KeyCode::Char('d')) => {
-            let line = editor.buffer().cursor().line();
-            editor.buffer_mut().fold_manager_mut().delete_fold_at(line);
-        }
-        ('z', KeyCode::Char('E')) => {
-            editor.buffer_mut().clear_folds();
-        }
+        ('z', KeyCode::Char(key))
+            if editor.fold_command(key) => {}
         ('z', KeyCode::Char('f')) => {
             editor.set_pending_operator(Operator::Fold);
         }

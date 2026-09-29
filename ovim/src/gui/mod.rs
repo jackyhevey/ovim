@@ -426,6 +426,8 @@ pub struct GuiLine {
     pub breakpoint: Option<String>,
     /// The debugger is stopped on this line.
     pub executing: bool,
+    /// Number of lines hidden below this line by a closed fold.
+    pub folded: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -581,8 +583,6 @@ pub struct GuiCompletionItem {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct GuiSignatureHelp {
     /// Signature text before / of / after the active parameter.
     pub before: String,
@@ -595,6 +595,8 @@ pub struct GuiSignatureHelp {
     pub display_column: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GuiHover {
     pub content: String,
     pub line: Option<usize>,
@@ -2575,9 +2577,9 @@ fn snapshot_with_cache(
                     .map(|(line, column)| display_column(buffer, line, column, tab_width)),
             }
         }),
+        signature_help: signature_help(editor, buffer, tab_width),
         file_tree: file_tree(editor),
         ai_chat: ai_chat(editor),
-        signature_help: signature_help(editor, buffer, tab_width),
         test_panel: test_panel(editor),
         problems: problem_list(editor),
         search_replace: search_replace(editor),
@@ -2671,6 +2673,10 @@ fn project_lines(
     let mut projected = Vec::with_capacity(visible);
 
     'lines: for line_index in first_line..buffer.line_count() {
+        // Lines inside a closed fold are not shown.
+        if buffer.is_line_folded(line_index) {
+            continue;
+        }
         let indexed_line = buffer.line_index(line_index);
         let line_start = buffer.rope().line_to_char(line_index);
         let inline_text: std::sync::Arc<[(usize, std::sync::Arc<str>)]> = projected_decorations
@@ -2894,6 +2900,9 @@ fn project_lines(
                 diff: (!continuation).then(|| diff.clone()).flatten(),
                 breakpoint: (!continuation).then(|| breakpoint.clone()).flatten(),
                 executing: !continuation && executing,
+                folded: (!continuation)
+                    .then(|| buffer.fold_manager().folded_line_count_at(line_index))
+                    .flatten(),
             });
             if projected.len() >= visible {
                 break 'lines;
@@ -3518,15 +3527,6 @@ fn picker(editor: &Editor) -> Option<GuiPicker> {
     })
 }
 
-fn completion(editor: &Editor) -> Option<GuiCompletion> {
-    let menu = editor.completion_menu();
-    let selected = menu.selected_index();
-    let start = centered_window_start(selected, menu.items().len(), MAX_COMPLETION_ITEMS);
-    menu.is_visible().then(|| GuiCompletion {
-        selected,
-        items: menu
-            .items()
-            .iter()
 fn signature_help(
     editor: &Editor,
     buffer: &crate::buffer::Buffer,
@@ -3553,6 +3553,15 @@ fn signature_help(
     })
 }
 
+fn completion(editor: &Editor) -> Option<GuiCompletion> {
+    let menu = editor.completion_menu();
+    let selected = menu.selected_index();
+    let start = centered_window_start(selected, menu.items().len(), MAX_COMPLETION_ITEMS);
+    menu.is_visible().then(|| GuiCompletion {
+        selected,
+        items: menu
+            .items()
+            .iter()
             .enumerate()
             .skip(start)
             .take(MAX_COMPLETION_ITEMS)

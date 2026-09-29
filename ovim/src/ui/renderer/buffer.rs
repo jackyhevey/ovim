@@ -1775,6 +1775,11 @@ pub fn render_buffer(
 
     let mut line_idx = start_line;
     while line_idx < line_count && visual_rows_used < emit_budget {
+        // Lines inside a closed fold are not drawn.
+        if buffer.is_line_folded(line_idx) {
+            line_idx += 1;
+            continue;
+        }
         if line_idx < rope.len_lines() {
             // --- Cache check: try to reuse a previously rendered stable line ---
             // Determine upfront if this line has transient overlays that prevent caching.

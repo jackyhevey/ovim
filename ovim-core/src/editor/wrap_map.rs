@@ -44,6 +44,11 @@ pub struct WrapMap {
     /// invalidate the map. `None` when conceal is inactive, so plain buffers
     /// never rebuild on vertical cursor movement.
     conceal_cursor_line: Option<usize>,
+    /// Inclusive line ranges hidden by closed folds: they occupy zero visual
+    /// rows, so scrolling, cursor math and rendering skip them.
+    hidden: Vec<(usize, usize)>,
+    /// Set when a structural edit may have shifted `hidden` under the counts.
+    hidden_stale: bool,
 }
 
 impl WrapMap {
@@ -110,6 +115,8 @@ impl WrapMap {
             tab_width,
             buffer_version,
             conceal_cursor_line: None,
+            hidden: Vec::new(),
+            hidden_stale: false,
         }
     }
 
@@ -133,6 +140,32 @@ impl WrapMap {
     /// Updates the stored buffer version without rebuilding.
     pub fn set_buffer_version(&mut self, version: usize) {
         self.buffer_version = version;
+    }
+
+    fn is_hidden(&self, line: usize) -> bool {
+        let index = self.hidden.partition_point(|&(_, end)| end < line);
+        self.hidden
+            .get(index)
+            .is_some_and(|&(start, end)| start <= line && line <= end)
+    }
+
+    /// Installs the fold-hidden line ranges (inclusive, ascending, merged).
+    /// Hidden lines get zero visual rows. Cheap when nothing changed.
+    pub fn set_hidden_ranges(&mut self, ranges: &[(usize, usize)]) {
+        if !self.hidden_stale && self.hidden == ranges {
+            return;
+        }
+        self.hidden = ranges.to_vec();
+        self.hidden_stale = false;
+        for line in 0..self.visual_counts.len() {
+            let natural = self.layouts[line]
+                .as_ref()
+                .map(|entry| entry.layout.row_count().max(1))
+                .unwrap_or(1);
+            self.visual_counts[line] = if self.is_hidden(line) { 0 } else { natural };
+        }
+        self.row_index = RowIndex::new(&self.visual_counts);
+        self.total_visual_lines = self.visual_counts.iter().sum();
     }
 
     /// Returns the number of visual lines for a given logical line.
@@ -247,6 +280,8 @@ impl WrapMap {
             tab_width: tab_width.max(1),
             buffer_version: version,
             conceal_cursor_line: None,
+            hidden: Vec::new(),
+            hidden_stale: false,
         }
     }
 
@@ -305,9 +340,16 @@ impl WrapMap {
                 .filter(|&line| line < final_line_count),
         );
         self.last_recomputed_lines = dirty.len();
+        if structural && !self.hidden.is_empty() {
+            self.hidden_stale = true;
+        }
         for line in dirty {
             let layout = make_layout(line);
-            let count = layout.layout.row_count().max(1);
+            let count = if self.is_hidden(line) {
+                0
+            } else {
+                layout.layout.row_count().max(1)
+            };
             if !structural {
                 self.row_index
                     .replace(line, self.visual_counts[line], count);

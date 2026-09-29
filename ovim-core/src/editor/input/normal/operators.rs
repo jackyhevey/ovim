@@ -99,6 +99,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // Delete operations
         // =====================================================================
         (Operator::Delete, KeyCode::Char('d')) => {
+            let count = editor.linewise_count_over_folds(count);
             handle_dd(editor, count)?;
             true
         }
@@ -171,6 +172,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // Yank operations
         // =====================================================================
         (Operator::Yank, KeyCode::Char('y')) => {
+            let count = editor.linewise_count_over_folds(count);
             let start_line = editor.buffer().cursor().line();
             let end_line = (start_line + count).min(editor.buffer().line_count()) - 1;
             let yanked = helpers::yank_line(editor.buffer(), count)?;
