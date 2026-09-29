@@ -141,8 +141,8 @@ pub fn side_panel_widths(
     debug: Option<i16>,
 ) -> (Option<u16>, Option<u16>) {
     let wanted = |base: u16, delta: i16| (i32::from(base) + i32::from(delta)).max(20) as u16;
-    let test_want = test.map(|d| wanted((total / 4).clamp(30, 50), d));
-    let debug_want = debug.map(|d| wanted((total / 4).clamp(30, 44), d));
+    let test_want = test.map(|d| wanted((total / 3).clamp(30, 50), d));
+    let debug_want = debug.map(|d| wanted((total / 3).clamp(30, 46), d));
     let budget = total.saturating_sub(MIN_EDITOR_WIDTH);
     let cap = |w: u16, room: u16| w.min(room.max(20)).min(total / 2 * 3 / 2);
     match (test_want, debug_want) {
@@ -170,8 +170,8 @@ mod tests {
     #[test]
     fn side_panels_share_the_width_and_keep_the_editor_usable() {
         // Alone, a panel gets its default share.
-        assert_eq!(side_panel_widths(140, Some(0), None), (Some(35), None));
-        assert_eq!(side_panel_widths(140, None, Some(0)), (None, Some(35)));
+        assert_eq!(side_panel_widths(140, Some(0), None), (Some(46), None));
+        assert_eq!(side_panel_widths(140, None, Some(0)), (None, Some(46)));
         // Together in 140 columns nothing is squeezed below a readable width
         // and the editor keeps 40+.
         let (t, d) = side_panel_widths(140, Some(0), Some(0));
@@ -182,7 +182,7 @@ mod tests {
         let (t, d) = side_panel_widths(90, Some(0), Some(0));
         assert!(t.unwrap() >= MIN_PANEL_WIDTH && d.unwrap() >= MIN_PANEL_WIDTH);
         // Resizing grows a panel.
-        assert_eq!(side_panel_widths(140, Some(10), None), (Some(45), None));
+        assert_eq!(side_panel_widths(140, Some(10), None), (Some(56), None));
         assert_eq!(side_panel_widths(140, Some(-100), None), (Some(20), None));
     }
 
