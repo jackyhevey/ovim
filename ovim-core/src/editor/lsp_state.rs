@@ -411,6 +411,11 @@ pub struct LspState {
     pub pending_did_close_file: Option<String>,
     /// File-explorer rename waiting for its `willRenameFiles` round trip.
     pub pending_file_rename: Option<(std::path::PathBuf, String)>,
+    /// Server `showMessageRequest`s waiting their turn, the one currently
+    /// offered to the user, and answers ready to be sent.
+    pub queued_message_requests: std::collections::VecDeque<crate::lsp::MessageRequest>,
+    pub active_message_request: Option<crate::lsp::MessageRequest>,
+    pub message_replies: Vec<(crate::lsp::MessageRequest, Option<String>)>,
     /// Hierarchy browser stack while a call/type hierarchy picker is open.
     pub hierarchy: Option<HierarchyState>,
     /// Watches the workspace for changes made outside the editor (feeds
@@ -483,6 +488,9 @@ impl LspState {
             pending_did_close_file: None,
             pending_file_rename: None,
             hierarchy: None,
+            queued_message_requests: Default::default(),
+            active_message_request: None,
+            message_replies: Vec::new(),
             workspace_watcher: Default::default(),
             available_code_actions: Vec::new(),
             available_completions: Vec::new(),

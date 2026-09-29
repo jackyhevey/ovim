@@ -18,6 +18,7 @@
 #[macro_use]
 pub mod logger;
 mod file_operations;
+mod messages;
 mod notifications;
 pub mod position;
 mod protocol;
@@ -33,6 +34,7 @@ mod watchers;
 pub use logger::{get_log_path, init_lsp_logging};
 pub use position::{char_col_to_utf16, utf16_to_char_col};
 
+pub use messages::{MessageRequest, MessageSeverity, ServerMessage};
 pub use protocol::{JsonRpcMessage, RequestId};
 pub use recovery::{ServerStatusReport, MAX_AUTO_RESTARTS};
 pub use server::{LanguageServer, LanguageServerHealth, LspServerError};
@@ -266,6 +268,9 @@ pub struct LspManager {
     /// Restart bookkeeping per server id (see `recovery`).
     restart_states: DashMap<String, recovery::RestartState>,
 
+    /// `window/showMessage` / `showMessageRequest` waiting for the editor.
+    server_messages: std::sync::Mutex<Vec<messages::ServerMessage>>,
+
     /// Crash/restart announcements waiting for the editor's status line.
     lifecycle_events: std::sync::Mutex<Vec<String>>,
 
@@ -323,6 +328,7 @@ impl LspManager {
             server_specs: DashMap::new(),
             restart_states: DashMap::new(),
             file_watch_registrations: DashMap::new(),
+            server_messages: std::sync::Mutex::new(Vec::new()),
             lifecycle_events: std::sync::Mutex::new(Vec::new()),
             restart_base_backoff_ms: AtomicU64::new(500),
         }

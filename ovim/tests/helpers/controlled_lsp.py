@@ -51,6 +51,14 @@ while True:
             ).encode()
             sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
             sys.stdout.buffer.flush()
+        # outbox.json: raw JSON-RPC messages (notifications/requests) to push
+        # to the client right after `initialized`.
+        outbox = root / "outbox.json"
+        if outbox.exists():
+            for message in json.loads(outbox.read_text()):
+                body = json.dumps({"jsonrpc": "2.0", **message}).encode()
+                sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+            sys.stdout.buffer.flush()
     elif method == "exit":
         break
     elif "id" in request:

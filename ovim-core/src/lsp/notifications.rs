@@ -1146,23 +1146,58 @@ impl LspManager {
                 }
             }
             "window/showMessageRequest" => {
-                // Server wants to show a message with action buttons.
-                // Respond with null (no action selected) to unblock the server.
-                if let Some(id) = request_id {
-                    if let Some(server) = self
-                        .servers
-                        .get(server_id)
-                        .map(|entry| entry.value().clone())
-                    {
-                        let response_msg = JsonRpcMessage::response(id, serde_json::Value::Null);
-                        if let Err(e) = server.send_response(response_msg).await {
-                            lsp_error!(
-                                "LSP-SERVER-REQUEST",
-                                "Failed to send showMessageRequest response: {}",
-                                e
-                            );
+                // The server wants the user to pick an action. Queue it for
+                // the editor (it answers via `reply_message_request`); a
+                // request without actions is just a message and is answered
+                // right away so the server is never left waiting.
+                let params = request.params.clone().and_then(|p| {
+                    serde_json::from_value::<lsp_types::ShowMessageRequestParams>(p).ok()
+                });
+                match (params, request_id) {
+                    (Some(params), Some(id)) => {
+                        let actions: Vec<String> = params
+                            .actions
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|action| action.title)
+                            .collect();
+                        let severity = super::messages::MessageSeverity::from_lsp(params.typ);
+                        let pending = super::messages::MessageRequest {
+                            server_id: server_id.to_string(),
+                            id: id.clone(),
+                            severity,
+                            message: params.message,
+                            actions,
+                        };
+                        if pending.actions.is_empty() {
+                            self.queue_server_message(super::messages::ServerMessage::Notice {
+                                server_id: server_id.to_string(),
+                                severity,
+                                message: pending.message.clone(),
+                            });
+                            self.reply_message_request(&pending, None).await;
+                        } else {
+                            self.queue_server_message(super::messages::ServerMessage::Request(
+                                pending,
+                            ));
                         }
                     }
+                    (None, Some(id)) => {
+                        // Unparsable: dismiss so the server does not hang.
+                        if let Some(server) = self
+                            .servers
+                            .get(server_id)
+                            .map(|entry| entry.value().clone())
+                        {
+                            let _ = server
+                                .send_response(JsonRpcMessage::response(
+                                    id,
+                                    serde_json::Value::Null,
+                                ))
+                                .await;
+                        }
+                    }
+                    _ => {}
                 }
             }
             "window/workDoneProgress/create" => {
@@ -1273,45 +1308,31 @@ impl LspManager {
                     }
                 }
                 "window/showMessage" => {
-                    // Only show messages if OVIM_LSP_DEBUG is set to avoid cluttering the terminal
-                    if std::env::var("OVIM_LSP_DEBUG").is_ok() {
-                        if let Some(params) = message.params {
-                            if let Ok(msg_params) =
-                                serde_json::from_value::<lsp_types::ShowMessageParams>(params)
-                            {
-                                // Format message with severity prefix
-                                let prefix = match msg_params.typ {
-                                    lsp_types::MessageType::ERROR => "LSP Error",
-                                    lsp_types::MessageType::WARNING => "LSP Warning",
-                                    lsp_types::MessageType::INFO => "LSP Info",
-                                    lsp_types::MessageType::LOG => "LSP Log",
-                                    _ => "LSP",
-                                };
-                                let type_str = match msg_params.typ {
-                                    lsp_types::MessageType::ERROR => "ERROR",
-                                    lsp_types::MessageType::WARNING => "WARN",
-                                    lsp_types::MessageType::INFO => "INFO",
-                                    lsp_types::MessageType::LOG => "LOG",
-                                    _ => "UNKNOWN",
-                                };
-                                let log_level = match msg_params.typ {
-                                    lsp_types::MessageType::ERROR => {
-                                        crate::lsp::logger::LogLevel::Error
-                                    }
-                                    lsp_types::MessageType::WARNING => {
-                                        crate::lsp::logger::LogLevel::Warning
-                                    }
-                                    lsp_types::MessageType::INFO => {
-                                        crate::lsp::logger::LogLevel::Info
-                                    }
-                                    _ => crate::lsp::logger::LogLevel::Info,
-                                };
-                                crate::lsp::logger::log_message(
-                                    log_level,
-                                    &format!("{}:{}", server_id, prefix),
-                                    &format!("{}: {}", type_str, msg_params.message),
-                                );
-                            }
+                    if let Some(params) = message.params {
+                        if let Ok(msg_params) =
+                            serde_json::from_value::<lsp_types::ShowMessageParams>(params)
+                        {
+                            let severity =
+                                super::messages::MessageSeverity::from_lsp(msg_params.typ);
+                            let log_level = match severity {
+                                super::messages::MessageSeverity::Error => {
+                                    crate::lsp::logger::LogLevel::Error
+                                }
+                                super::messages::MessageSeverity::Warning => {
+                                    crate::lsp::logger::LogLevel::Warning
+                                }
+                                _ => crate::lsp::logger::LogLevel::Info,
+                            };
+                            crate::lsp::logger::log_message(
+                                log_level,
+                                &format!("LSP:{server_id}:showMessage"),
+                                &msg_params.message,
+                            );
+                            self.queue_server_message(super::messages::ServerMessage::Notice {
+                                server_id: server_id.to_string(),
+                                severity,
+                                message: msg_params.message,
+                            });
                         }
                     }
                 }

@@ -695,3 +695,99 @@ async fn type_hierarchy_uses_dynamic_registration_and_drills_down_with_names() {
         .await;
     session.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_messages_are_shown_and_message_requests_get_the_users_choice() {
+    let mut session = StartupSession::new();
+    let root = session.dir.path().canonicalize().unwrap();
+    std::fs::write(
+        root.join("outbox.json"),
+        json!([
+            {"method": "window/showMessage", "params": {"type": 2, "message": "Index is incomplete"}},
+            {"id": 7001, "method": "window/showMessageRequest",
+             "params": {"type": 1, "message": "Build failed", "actions": [{"title": "Retry"}, {"title": "Ignore"}]}}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    session.ready();
+    session.wait_for_event("textDocument/didOpen").await;
+
+    session
+        .wait_until("showMessage on the status line", |s| {
+            s.test
+                .editor
+                .status_message()
+                .contains("Index is incomplete")
+                || s.test
+                    .editor
+                    .visible_toasts_newest_first(5)
+                    .iter()
+                    .any(|t| t.message.contains("Index is incomplete"))
+        })
+        .await;
+    session
+        .wait_until("action picker", |s| {
+            s.test
+                .editor
+                .picker()
+                .is_some_and(|p| p.is_message_action_picker())
+        })
+        .await;
+    let rows: Vec<String> = session
+        .test
+        .editor
+        .picker()
+        .unwrap()
+        .filtered_results()
+        .iter()
+        .map(|r| r.display.clone())
+        .collect();
+    assert_eq!(rows, ["Retry", "Ignore"]);
+
+    session.test.press_key(ovim_core::KeyCode::Down);
+    session.test.keys("<CR>");
+    session
+        .wait_until("reply", |s| {
+            std::fs::read_to_string(s.dir.path().join("events.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .any(|e| e["id"] == 7001 && e["result"]["title"] == "Ignore")
+        })
+        .await;
+    session.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dismissing_a_message_request_answers_null() {
+    let mut session = StartupSession::new();
+    let root = session.dir.path().canonicalize().unwrap();
+    std::fs::write(
+        root.join("outbox.json"),
+        json!([{"id": 7002, "method": "window/showMessageRequest",
+                "params": {"type": 3, "message": "Pick", "actions": [{"title": "A"}]}}])
+        .to_string(),
+    )
+    .unwrap();
+    session.ready();
+    session
+        .wait_until("action picker", |s| {
+            s.test
+                .editor
+                .picker()
+                .is_some_and(|p| p.is_message_action_picker())
+        })
+        .await;
+    session.test.keys("<Esc>");
+    session
+        .wait_until("null reply", |s| {
+            std::fs::read_to_string(s.dir.path().join("events.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+                .any(|e| e["id"] == 7002 && e["result"].is_null() && e.get("method").is_none())
+        })
+        .await;
+    session.stop().await;
+}

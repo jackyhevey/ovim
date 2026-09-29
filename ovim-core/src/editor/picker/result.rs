@@ -29,6 +29,8 @@ pub enum PickerAction {
     ApplyCompletion { index: usize },
     /// Select a debug run configuration by index
     SelectDebugConfig { index: usize },
+    /// Answer a server `window/showMessageRequest` with action `index`
+    MessageRequestAction { index: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
