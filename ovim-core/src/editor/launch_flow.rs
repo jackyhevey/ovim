@@ -736,7 +736,11 @@ impl Editor {
             ".git",
         ];
         let markers: Vec<String> = MARKERS.iter().map(|m| m.to_string()).collect();
-        let root = crate::language_config::find_project_root(&file, &markers);
+        let outermost: Vec<String> = ["settings.gradle.kts", "settings.gradle", "pom.xml"]
+            .map(String::from)
+            .into();
+        let root =
+            crate::language_config::find_project_root_with_outermost(&file, &markers, &outermost);
         if root.as_os_str().is_empty() {
             file.parent()
                 .map(Path::to_path_buf)
