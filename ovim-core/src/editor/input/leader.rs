@@ -380,6 +380,11 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
             editor.reset_input_state();
         }
 
+        (&['s'], 'd') => {
+            // <Space>sd - Problems (all published diagnostics, by file)
+            editor.open_problems_picker(crate::editor::problems::ProblemFilter::All);
+            editor.reset_input_state();
+        }
         (&['s'], 'h') => {
             // <Space>sh - Recent files (this project, across sessions)
             editor.open_recent_files_picker();

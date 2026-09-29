@@ -117,6 +117,13 @@ pub fn handle_picker_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         {
             editor.git_status_edit_selected();
         }
+        // Problems list: Ctrl-T cycles the severity filter
+        KeyCode::Char('t')
+            if key_event.modifiers.contains(Modifiers::CONTROL)
+                && editor.picker().and_then(|p| p.role()) == Some(PickerRole::Problems) =>
+        {
+            editor.cycle_problems_filter();
+        }
         // Ctrl-N - move down in results
         KeyCode::Char('n') if key_event.modifiers.contains(Modifiers::CONTROL) => {
             let mut moved = false;

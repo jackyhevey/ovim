@@ -25,6 +25,15 @@ pub fn try_handle(editor: &mut Editor, command: &str) -> Option<CommandResult> {
             editor.open_buffer_picker();
             Some(crate::command_result::ok_silent())
         }
+        "Problems" | "Diagnostics" => {
+            Some(match crate::editor::problems::ProblemFilter::parse(args) {
+                Some(filter) => {
+                    editor.open_problems_picker(filter);
+                    crate::command_result::ok_silent()
+                }
+                None => err("Problems: use all, warnings or errors"),
+            })
+        }
         "Outline" | "DocumentSymbols" => {
             editor.open_outline_picker();
             Some(crate::command_result::ok_silent())

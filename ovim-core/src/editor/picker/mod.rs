@@ -50,6 +50,11 @@ impl Picker {
         self
     }
 
+    /// Renames the picker (the problems filter changes its heading).
+    pub fn set_title(&mut self, title: impl Into<String>) {
+        self.title = Some(title.into());
+    }
+
     /// Marks the picker as serving `role` (extra key bindings, refresh).
     pub fn with_role(mut self, role: PickerRole) -> Self {
         self.role = Some(role);
@@ -66,6 +71,15 @@ impl Picker {
         let selected = self.selected_index;
         self.all_results = results.clone();
         self.filtered_results = results;
+        // Keep honouring what the user already typed.
+        if !self.query.is_empty()
+            && !matches!(
+                self.backend,
+                PickerBackend::Nucleo(_) | PickerBackend::Grep(_)
+            )
+        {
+            self.apply_filter_internal();
+        }
         self.selected_index = selected.min(self.filtered_results.len().saturating_sub(1));
     }
 

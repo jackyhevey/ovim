@@ -71,3 +71,22 @@ async fn recent_files_says_so_when_there_is_nothing_to_offer() {
     test.assert_mode(Mode::Normal);
     assert!(test.editor.status_message().contains("No recent files"));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn problems_command_and_key_report_when_there_is_nothing_to_show() {
+    let (_dir, root) = project(&["a.txt"]);
+    let mut test = EditorTest::new("");
+    test.load_file(&root.join("a.txt").to_string_lossy());
+    test.keys(" sd");
+    test.assert_mode(Mode::Normal);
+    assert!(
+        test.editor.status_message().contains("no language server"),
+        "{}",
+        test.editor.status_message()
+    );
+    test.command("Problems bogus");
+    assert!(test
+        .editor
+        .status_message()
+        .contains("use all, warnings or errors"));
+}
