@@ -228,7 +228,7 @@ impl WorkspaceWatcher {
             }
         }
 
-        let mut mark = |this: &mut Self, path: &PathBuf, created: bool, removed: bool| {
+        let mark = |this: &mut Self, path: &PathBuf, created: bool, removed: bool| {
             if this.is_ignored(path) || !wanted(path) {
                 return;
             }
