@@ -345,7 +345,7 @@ async fn process_pending_debug_action(editor: &mut Editor) {
             let frame_id = editor.selected_frame_id();
             match editor
                 .dap_manager()
-                .evaluate(&expression, frame_id, Some("hover"))
+                .evaluate(&expression, frame_id, Some("repl"))
                 .await
             {
                 Ok((result, _type, _var_ref)) => {

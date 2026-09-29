@@ -1594,3 +1594,40 @@ async fn run_input_feeds_the_programs_stdin_and_eof_ends_it() {
         .contains("No program is running"));
     s.stop_lsp().await;
 }
+
+/// Starts a stopped debug session against the scripted adapter and waits for
+/// the frame/variables to load. `scenario` gets the project root.
+async fn stopped_session(scenario: impl FnOnce(&Path) -> Value) -> DebugSession {
+    let mut d = DebugSession::new(&resolve_commands()).await;
+    let adapter = d.adapter(scenario(&d.inner.root));
+    d.inner.script_resolve(d.inner.main_plan(None));
+    d.inner
+        .test
+        .editor
+        .launch_at_cursor_with(ovim_core::launch::LaunchMode::Debug, Some(adapter));
+    d.inner
+        .until("the stop to be loaded", |s| {
+            s.test.editor.debug_state().variables.contains_key(&10)
+        })
+        .await;
+    d
+}
+
+/// OV-00441: `:eval` is explicit evaluation ("repl", which may run method
+/// calls); only `K` hover is a side-effect-free "hover" evaluation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eval_command_uses_the_repl_context_and_hover_uses_hover() {
+    let mut d = stopped_session(stopped_scenario).await;
+    d.inner.test.command("eval n * 2");
+    d.inner
+        .until("the eval", |s| s.test.editor.status_message().contains("= 6"))
+        .await;
+    let contexts: Vec<Value> = d
+        .requests("evaluate")
+        .iter()
+        .map(|r| r["arguments"]["context"].clone())
+        .collect();
+    assert!(contexts.contains(&json!("repl")), "{contexts:?}");
+    assert!(!contexts.contains(&json!("hover")), "{contexts:?}");
+    d.inner.stop_lsp().await;
+}
