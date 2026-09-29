@@ -316,6 +316,16 @@ fn handle_leader_sequence(editor: &mut Editor, keys: &[char], next_key: char) ->
             editor.request_call_hierarchy_outgoing();
             editor.reset_input_state();
         }
+        (&['c'], 'l') => {
+            // <Space>cl - Run the code lens on this line
+            editor.run_code_lens_at_cursor(crate::launch::LaunchMode::Run);
+            editor.reset_input_state();
+        }
+        (&['c'], 'L') => {
+            // <Space>cL - Debug the code lens on this line
+            editor.run_code_lens_at_cursor(crate::launch::LaunchMode::Debug);
+            editor.reset_input_state();
+        }
 
         // <Space>s... sequences
         (&['s'], 'f') => {

@@ -111,25 +111,67 @@ struct LaunchJob {
     resolve: Option<(oneshot::Receiver<ResolveResult>, JoinHandle<()>)>,
     proc: Option<ProcessHandle>,
     proc_exit: Option<ExitInfo>,
-    /// Tail of combined process output, for diagnostic parsing.
+    /// Tail of process output in arrival order (for summaries and tails).
     log: String,
+    /// The same output per pipe. stdout and stderr are read concurrently, so
+    /// arrival order can split a multi-line diagnostic (javac's snippet and
+    /// caret lines) around an unrelated line from the other pipe; diagnostics
+    /// are therefore parsed from each pipe on its own.
+    log_stdout: String,
+    log_stderr: String,
     started_wall: SystemTime,
     stopping: bool,
     /// The debug session ended (or was stopped) while a child still ran.
     session_end: Option<crate::dap::SessionEnd>,
 }
 
-impl LaunchJob {
-    fn append_log(&mut self, text: &str) {
-        self.log.push_str(text);
-        self.log.push('\n');
-        if self.log.len() > LOG_CAP {
-            let mut cut = self.log.len() - LOG_CAP / 2;
-            while !self.log.is_char_boundary(cut) {
-                cut += 1;
-            }
-            self.log.drain(..cut);
+fn append_capped(log: &mut String, text: &str) {
+    log.push_str(text);
+    log.push('\n');
+    if log.len() > LOG_CAP {
+        let mut cut = log.len() - LOG_CAP / 2;
+        while !log.is_char_boundary(cut) {
+            cut += 1;
         }
+        log.drain(..cut);
+    }
+}
+
+impl LaunchJob {
+    fn append_log(&mut self, stream: StreamKind, text: &str) {
+        append_capped(&mut self.log, text);
+        match stream {
+            StreamKind::Stdout => append_capped(&mut self.log_stdout, text),
+            StreamKind::Stderr => append_capped(&mut self.log_stderr, text),
+        }
+    }
+
+    fn clear_log(&mut self) {
+        self.log.clear();
+        self.log_stdout.clear();
+        self.log_stderr.clear();
+    }
+
+    /// Compiler diagnostics from both pipes, de-duplicated, errors first
+    /// within each pipe's own order.
+    fn diagnostics(&self, cwd: Option<&Path>) -> Vec<crate::editor::QuickfixEntry> {
+        let mut entries = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for log in [&self.log_stderr, &self.log_stdout] {
+            for entry in crate::commands::parse_compiler_output_in(log, cwd) {
+                let key = (
+                    entry.filename.clone(),
+                    entry.lnum,
+                    entry.col,
+                    entry.entry_type as u8,
+                    entry.text.clone(),
+                );
+                if seen.insert(key) {
+                    entries.push(entry);
+                }
+            }
+        }
+        entries
     }
 }
 
@@ -142,6 +184,7 @@ pub(crate) struct LaunchState {
     queued: Option<LaunchRequest>,
     pending_pick: Option<PendingPick>,
     debug_port_timeout: Duration,
+    pub(crate) code_lens: super::code_lens::CodeLensState,
 }
 
 impl Default for LaunchState {
@@ -153,6 +196,7 @@ impl Default for LaunchState {
             queued: None,
             pending_pick: None,
             debug_port_timeout: DEBUG_PORT_TIMEOUT,
+            code_lens: Default::default(),
         }
     }
 }
@@ -217,6 +261,33 @@ impl Editor {
                 source,
                 adapter,
             }),
+            Err(message) => self.set_status_message(message),
+        }
+    }
+
+    /// Run or debug whatever is at a position (0-based line, UTF-16
+    /// character) of the current file, e.g. a code lens.
+    pub fn launch_at_position(&mut self, mode: LaunchMode, line: usize, character: u32) {
+        match self.cursor_launch_source("auto") {
+            Ok(LaunchSource::Cursor {
+                file,
+                language_id,
+                target,
+                project_root,
+                ..
+            }) => self.begin_request(LaunchRequest {
+                mode,
+                source: LaunchSource::Cursor {
+                    file,
+                    language_id,
+                    line: line as u32,
+                    character,
+                    target,
+                    project_root,
+                },
+                adapter: None,
+            }),
+            Ok(_) => {}
             Err(message) => self.set_status_message(message),
         }
     }
@@ -313,6 +384,8 @@ impl Editor {
             proc: None,
             proc_exit: None,
             log: String::new(),
+            log_stdout: String::new(),
+            log_stderr: String::new(),
             started_wall: SystemTime::now(),
             stopping: false,
             session_end: None,
@@ -546,6 +619,8 @@ impl Editor {
             proc: None,
             proc_exit: None,
             log: String::new(),
+            log_stdout: String::new(),
+            log_stderr: String::new(),
             started_wall: SystemTime::now(),
             stopping: false,
             session_end: None,
@@ -887,7 +962,7 @@ impl Editor {
             Ok(proc) => {
                 job.proc = Some(proc);
                 job.proc_exit = None;
-                job.log.clear();
+                job.clear_log();
                 job.stage = stage;
                 self.set_phase(job, phase);
             }
@@ -1095,7 +1170,7 @@ impl Editor {
             match proc.try_recv() {
                 Some(ProcEvent::Line { stream, text }) => {
                     changed = true;
-                    job.append_log(&text);
+                    job.append_log(stream, &text);
                     if let Some(run) = self.launch.console.run_mut(job.run_id) {
                         run.push_line(stream_kind(mapping, stream), text.clone());
                     }
@@ -1235,7 +1310,7 @@ impl Editor {
             .as_ref()
             .and_then(|p| p.build.as_ref())
             .map(|b| b.cwd.clone());
-        let entries = crate::commands::parse_compiler_output_in(&job.log, cwd.as_deref());
+        let entries = job.diagnostics(cwd.as_deref());
         if entries.is_empty() {
             self.close_quickfix_window();
             self.set_quickfix_list(Vec::new(), String::new());
@@ -1243,7 +1318,7 @@ impl Editor {
             self.set_quickfix_list(entries, "build".to_string());
         }
         let Some(plan) = job.plan.clone() else { return };
-        job.log.clear();
+        job.clear_log();
         match (plan.kind, job.request.mode) {
             (_, LaunchMode::Run) => self.start_run_process(job),
             (_, LaunchMode::Debug) => {
@@ -1264,7 +1339,7 @@ impl Editor {
                 .or_else(|| p.task.as_ref().map(|t| t.cwd.clone()))
                 .unwrap_or_else(|| p.project_root.clone())
         });
-        let entries = crate::commands::parse_compiler_output_in(&job.log, cwd.as_deref());
+        let entries = job.diagnostics(cwd.as_deref());
         let summary = diagnostics::summarize_build_failure(&job.log, &entries);
         if entries.is_empty() {
             return summary;

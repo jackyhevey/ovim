@@ -395,7 +395,7 @@ pub struct DecorationInfo {
     pub col: usize,
     /// The virtual text rendered at this position.
     pub text: String,
-    /// Producer of this decoration: `"inlay_hint"` or `"diagnostic"`.
+    /// Producer of this decoration: `"inlay_hint"`, `"diagnostic"` or `"code_lens"`.
     pub source: String,
     /// Where the text is rendered relative to the buffer: `"inline"` or `"eol"`.
     pub placement: String,

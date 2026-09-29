@@ -28,19 +28,25 @@ struct Session {
 impl Session {
     /// A ready language server that advertises `commands`.
     async fn new(commands: &[&str]) -> Self {
+        Self::with_capabilities(commands, json!({})).await
+    }
+
+    async fn with_capabilities(commands: &[&str], extra: Value) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let script = root.join("server.py");
         std::fs::write(&script, include_str!("helpers/controlled_lsp.py")).unwrap();
         std::fs::write(root.join("project.marker"), "").unwrap();
-        std::fs::write(
-            root.join("initialize-response.json"),
-            json!({"result": {"capabilities": {
+        std::fs::write(root.join("initialize-response.json"), {
+            let mut capabilities = json!({
                 "textDocumentSync": 1,
                 "executeCommandProvider": {"commands": commands}
-            }}})
-            .to_string(),
-        )
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                capabilities[key] = value.clone();
+            }
+            json!({"result": {"capabilities": capabilities}}).to_string()
+        })
         .unwrap();
         let mut test = EditorTest::new("class Main {}\n");
         test.editor.enable_lsp();
@@ -101,6 +107,15 @@ impl Session {
 
     fn lsp_events(&self, method: &str) -> Vec<Value> {
         self.events_in("events.jsonl", "method", method)
+    }
+
+    /// Every message the server received, requests and responses alike.
+    fn lsp_events_raw(&self) -> Vec<Value> {
+        std::fs::read_to_string(self.root.join("events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect()
     }
 
     async fn wait_for_event(&mut self, method: &str) {
@@ -309,6 +324,9 @@ async fn build_runs_first_without_blocking_the_tick_and_its_failure_aborts_the_l
             "sleep 1\n\
              echo '> Task :compileJava FAILED'\n\
              echo '{path}:2: error: cannot find symbol' >&2\n\
+             sleep 0.2\n\
+             echo 'noise on stdout between the diagnostic lines'\n\
+             sleep 0.2\n\
              echo '    int x' >&2\n\
              echo '        ^' >&2\n\
              echo '  symbol:   class Foo' >&2\n\
@@ -349,7 +367,15 @@ async fn build_runs_first_without_blocking_the_tick_and_its_failure_aborts_the_l
     assert_eq!(
         (entry.lnum, entry.col),
         (2, 9),
-        "column comes from the caret line"
+        "column comes from the caret line\nentries={:?}\nruns={} status={:?}\n{}",
+        qf.entries(),
+        s.test.editor.run_console().runs.len(),
+        s.test
+            .editor
+            .run_console()
+            .viewed()
+            .map(|r| r.status.clone()),
+        s.console_text()
     );
     assert!(entry.text.contains("symbol: class Foo"), "{}", entry.text);
     assert!(s.test.editor.is_quickfix_window_open());
@@ -1018,5 +1044,140 @@ async fn console_focus_scrolls_and_enter_jumps_to_a_stack_frame_in_the_project()
     assert!(s.test.editor.run_console().runs.is_empty());
     s.test.keys("q");
     assert_eq!(s.test.editor.mode(), Mode::Normal);
+    s.stop_lsp().await;
+}
+
+// ---------------------------------------------------------------------------
+// Code lens
+// ---------------------------------------------------------------------------
+
+fn run_lens(line: u32) -> Value {
+    json!({
+        "range": {"start": {"line": line, "character": 4}, "end": {"line": line, "character": 8}},
+        "command": {"title": "▶ Run", "command": "hyperion.run", "arguments": [{"className": "Main"}]}
+    })
+}
+
+fn lens_events(s: &Session) -> usize {
+    s.lsp_events("textDocument/codeLens").len()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_lenses_are_shown_refreshed_after_edits_and_on_server_request() {
+    let mut s = Session::with_capabilities(
+        &resolve_commands(),
+        json!({"codeLensProvider": {"resolveProvider": false}}),
+    )
+    .await;
+    std::fs::write(
+        s.root.join("response-textDocument_codeLens.json"),
+        json!({"result": [run_lens(0)]}).to_string(),
+    )
+    .unwrap();
+
+    s.until("the lens to appear", |s| {
+        !s.test.editor.code_lenses().is_empty()
+    })
+    .await;
+    assert_eq!(lens_events(&s), 1);
+    let eol = s.test.editor.decorations.eol_for_line(0);
+    assert_eq!(eol.len(), 1);
+    assert_eq!(eol[0].text, "  ▶ Run │ ▶ Debug");
+
+    // Idle: no request storm.
+    for _ in 0..30 {
+        s.tick().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        lens_events(&s),
+        1,
+        "an unchanged buffer is not re-requested"
+    );
+
+    // An edit re-requests once it settles, and the new answer replaces the old.
+    std::fs::write(
+        s.root.join("response-textDocument_codeLens.json"),
+        json!({"result": [run_lens(1)]}).to_string(),
+    )
+    .unwrap();
+    s.test.keys("O// new first line<Esc>");
+    s.until("the lens to move", |s| {
+        s.test
+            .editor
+            .code_lenses()
+            .first()
+            .is_some_and(|l| l.line == 1)
+    })
+    .await;
+    assert_eq!(lens_events(&s), 2);
+    assert!(s.test.editor.decorations.eol_for_line(0).is_empty());
+    assert_eq!(s.test.editor.decorations.eol_for_line(1).len(), 1);
+
+    // workspace/codeLens/refresh makes the editor ask again without an edit.
+    std::fs::write(
+        s.root.join("push-after-textDocument_codeLens.json"),
+        json!([{"id": 777, "method": "workspace/codeLens/refresh"}]).to_string(),
+    )
+    .unwrap();
+    // The push fires after the *next* codeLens answer; provoke one with an edit.
+    s.test.keys("A x<Esc>");
+    s.until("the third request", |s| lens_events(s) >= 3).await;
+    s.until("the refresh-triggered request", |s| lens_events(s) >= 4)
+        .await;
+    let refresh_reply = s
+        .lsp_events_raw()
+        .into_iter()
+        .any(|e| e["id"] == 777 && e.get("method").is_none());
+    assert!(refresh_reply, "the refresh request must be answered");
+    s.stop_lsp().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn running_a_hyperion_run_lens_goes_through_resolve_launch_at_the_lens_not_the_servers_vm() {
+    let _jdk = JDK_LOCK.lock().await;
+    let mut s = Session::with_capabilities(
+        &resolve_commands(),
+        json!({"codeLensProvider": {"resolveProvider": false}}),
+    )
+    .await;
+    s.test
+        .set_buffer_content("class Main {\n  void main() {}\n}\n");
+    std::fs::write(
+        s.root.join("response-textDocument_codeLens.json"),
+        json!({"result": [run_lens(1)]}).to_string(),
+    )
+    .unwrap();
+    s.fake_java("echo real-jvm");
+    s.script_resolve(s.main_plan(None));
+    s.until("the lens", |s| !s.test.editor.code_lenses().is_empty())
+        .await;
+
+    // Not on the lens line: nothing to run.
+    s.test.keys("gg");
+    s.test.keys(" cl");
+    assert_eq!(s.test.editor.status_message(), "No code lens on this line");
+
+    s.test.keys("j");
+    s.test.keys(" cl");
+    s.until("the run", |s| s.run_finished()).await;
+    let commands = s.lsp_events("workspace/executeCommand");
+    assert!(
+        commands
+            .iter()
+            .all(|c| c["params"]["command"] != "hyperion.run"),
+        "the lens must not execute on the server: {commands:?}"
+    );
+    let resolve = commands
+        .iter()
+        .find(|c| c["params"]["command"] == "hyperion.resolveLaunch")
+        .expect("resolveLaunch");
+    let position = &resolve["params"]["arguments"][0]["position"];
+    assert_eq!(
+        (position["line"].as_u64(), position["character"].as_u64()),
+        (Some(1), Some(4)),
+        "resolved at the lens position"
+    );
+    assert!(s.console_text().contains("real-jvm"));
     s.stop_lsp().await;
 }

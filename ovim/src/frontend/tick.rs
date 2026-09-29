@@ -37,6 +37,11 @@ pub async fn process_editor_tick(editor: &mut Editor, channels: &mut FrontendCha
     if editor.poll_launch() {
         editor.mark_dirty();
     }
+    // Code lenses: request once edits settle, apply when the server answers.
+    editor.request_code_lens_if_needed().await;
+    if editor.poll_code_lens() {
+        editor.mark_dirty();
+    }
 
     // === LSP responses & intents ===
     if editor.poll_pending_lsp_responses() {

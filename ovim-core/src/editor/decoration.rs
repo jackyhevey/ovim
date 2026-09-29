@@ -71,6 +71,8 @@ impl DecorationPlacement {
 pub enum DecorationSource {
     InlayHint,
     Diagnostic,
+    /// `textDocument/codeLens` actions (`▶ Run | ▶ Debug`).
+    CodeLens,
 }
 
 /// Visual style for a decoration, independent of ratatui.

@@ -661,6 +661,14 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
             editor.focus_run_console();
             crate::command_result::ok_silent()
         }
+        "CodeLens" | "CodeLensRun" => {
+            editor.run_code_lens_at_cursor(crate::launch::LaunchMode::Run);
+            crate::command_result::ok_silent()
+        }
+        "CodeLensDebug" => {
+            editor.run_code_lens_at_cursor(crate::launch::LaunchMode::Debug);
+            crate::command_result::ok_silent()
+        }
         "RunPrev" => {
             editor.run_console_mut().view_previous();
             crate::command_result::ok_silent()

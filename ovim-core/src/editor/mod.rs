@@ -42,6 +42,7 @@ mod build_state;
 mod change_tracking;
 mod clipboard;
 mod code_explanation;
+mod code_lens;
 mod command_context;
 mod command_history;
 mod completion;
@@ -132,6 +133,7 @@ pub use code_explanation::{
     CodeExplanationCardLayout, CodeExplanationDiscussionView, CodeExplanationPageView,
     CodeExplanationView, ConceptExplanationCardLayout,
 };
+pub use code_lens::LensEntry;
 pub use command_context::CommandContext;
 pub use completion::CompletionMenu;
 pub use diff_review::{

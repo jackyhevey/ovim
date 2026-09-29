@@ -69,3 +69,13 @@ while True:
             respond(request, json.loads(scripted.read_text()))
         else:
             respond(request, {"result": None})
+        # push-after-<method>.json: raw JSON-RPC messages sent once, right
+        # after answering that method (e.g. a server->client refresh request).
+        push = root / ("push-after-" + (method or "").replace("/", "_") + ".json")
+        if push.exists():
+            messages = json.loads(push.read_text())
+            push.unlink()
+            for message in messages:
+                body = json.dumps({"jsonrpc": "2.0", **message}).encode()
+                sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+            sys.stdout.buffer.flush()
