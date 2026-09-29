@@ -1129,6 +1129,7 @@ pub(crate) fn create_snapshot_with_dimensions(
         picker,
         search_replace,
         hover_info: editor.hover_info().map(|s| s.to_string()),
+        completion: create_completion_info(editor),
         ai_chat: create_ai_chat_snapshot(editor),
         decorations,
         view: create_view_snapshot(editor, dimensions),
@@ -1383,12 +1384,45 @@ fn create_snapshot_light(editor: &Editor, dimensions: Option<(u16, u16)>) -> Edi
         picker: None,
         search_replace: None,
         hover_info: editor.hover_info().map(|s| s.to_string()),
+        completion: create_completion_info(editor),
         ai_chat: create_ai_chat_snapshot(editor),
         // Lightweight snapshot deliberately omits decorations to keep polling
         // cheap; callers that need them should hit the full `/v1/snapshot`.
         decorations: Vec::new(),
         view: create_view_snapshot(editor, dimensions),
     }
+}
+
+fn create_completion_info(editor: &Editor) -> Option<ovim::api::CompletionInfo> {
+    use ovim_core::editor::{
+        completion_documentation_markdown, completion_item_is_deprecated, completion_row_text,
+    };
+    let menu = editor.completion_menu();
+    if !menu.is_visible() {
+        return None;
+    }
+    Some(ovim::api::CompletionInfo {
+        selected: menu.selected_index(),
+        total: menu.len(),
+        documentation: menu
+            .selected_item()
+            .and_then(completion_documentation_markdown),
+        snippet_active: editor.snippet_active(),
+        items: menu
+            .iter()
+            .take(50)
+            .map(|item| {
+                let text = completion_row_text(item);
+                ovim::api::CompletionItemInfo {
+                    label: item.label.clone(),
+                    detail: Some(text.label_suffix).filter(|s| !s.is_empty()),
+                    description: Some(text.description).filter(|s| !s.is_empty()),
+                    kind: item.kind.map(|kind| format!("{kind:?}")),
+                    deprecated: completion_item_is_deprecated(item),
+                }
+            })
+            .collect(),
+    })
 }
 
 fn create_buffer_info(editor: &Editor) -> BufferInfo {
@@ -1410,5 +1444,46 @@ fn create_buffer_info(editor: &Editor) -> BufferInfo {
         content,
         line_count,
         file_path,
+    }
+}
+
+#[cfg(test)]
+mod completion_snapshot_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_lists_the_open_completion_menu_in_display_order() {
+        let mut editor = Editor::with_content("obj.");
+        assert!(create_snapshot(&editor).completion.is_none());
+
+        let item = |label: &str, sort: &str| lsp_types::CompletionItem {
+            label: label.to_string(),
+            sort_text: Some(sort.to_string()),
+            kind: Some(lsp_types::CompletionItemKind::METHOD),
+            label_details: Some(lsp_types::CompletionItemLabelDetails {
+                detail: Some("()".to_string()),
+                description: Some("String".to_string()),
+            }),
+            tags: Some(vec![lsp_types::CompletionItemTag::DEPRECATED]),
+            ..Default::default()
+        };
+        editor.completion_menu_mut().show(
+            vec![item("second", "2"), item("first", "1")],
+            4,
+            String::new(),
+        );
+        let completion = create_snapshot(&editor).completion.expect("menu is open");
+        assert_eq!(completion.total, 2);
+        assert_eq!(completion.selected, 0);
+        assert!(!completion.snippet_active);
+        let first = &completion.items[0];
+        assert_eq!(first.label, "first");
+        assert_eq!(first.detail.as_deref(), Some("()"));
+        assert_eq!(first.description.as_deref(), Some("String"));
+        assert_eq!(first.kind.as_deref(), Some("Method"));
+        assert!(first.deprecated);
+
+        editor.hide_completion_menu();
+        assert!(create_snapshot(&editor).completion.is_none());
     }
 }

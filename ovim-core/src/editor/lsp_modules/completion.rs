@@ -297,9 +297,9 @@ impl Editor {
                     .into_iter()
                     .collect();
                 let fallback = crate::lsp::fallback_completion_trigger_characters(&language_id);
-                if advertised.contains(&typed) {
-                    CompletionTrigger::Character(typed)
-                } else if fallback.contains(&typed) && self.typed_fallback_trigger_complete(typed) {
+                if advertised.contains(&typed)
+                    || (fallback.contains(&typed) && self.typed_fallback_trigger_complete(typed))
+                {
                     CompletionTrigger::Character(typed)
                 } else {
                     return Ok(false);

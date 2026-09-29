@@ -2321,29 +2321,6 @@ fn hover_client_capabilities() -> lsp_types::HoverClientCapabilities {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_request_id_generation() {
-        let next_request_id = AtomicU64::new(1);
-
-        assert_eq!(next_request_id.fetch_add(1, Ordering::SeqCst), 1);
-        assert_eq!(next_request_id.fetch_add(1, Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn hover_capabilities_advertise_markdown_first() {
-        // Without advertising Markdown, servers like rust-analyzer fall back
-        // to plaintext and the hover renderer has no code fences to highlight.
-        let caps = hover_client_capabilities();
-        let formats = caps.content_format.expect("content_format set");
-        assert_eq!(formats.first(), Some(&lsp_types::MarkupKind::Markdown));
-        assert!(formats.contains(&lsp_types::MarkupKind::PlainText));
-    }
-}
-
 /// What this client can do with completion items. The menu renders
 /// `labelDetails`, deprecation tags and lazily-resolved documentation, expands
 /// snippets, understands insert/replace ranges, `commitCharacters` and list
@@ -2408,5 +2385,28 @@ pub(crate) fn completion_client_capabilities() -> lsp_types::CompletionClientCap
                 .collect(),
             ),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_request_id_generation() {
+        let next_request_id = AtomicU64::new(1);
+
+        assert_eq!(next_request_id.fetch_add(1, Ordering::SeqCst), 1);
+        assert_eq!(next_request_id.fetch_add(1, Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn hover_capabilities_advertise_markdown_first() {
+        // Without advertising Markdown, servers like rust-analyzer fall back
+        // to plaintext and the hover renderer has no code fences to highlight.
+        let caps = hover_client_capabilities();
+        let formats = caps.content_format.expect("content_format set");
+        assert_eq!(formats.first(), Some(&lsp_types::MarkupKind::Markdown));
+        assert!(formats.contains(&lsp_types::MarkupKind::PlainText));
     }
 }

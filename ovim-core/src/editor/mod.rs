@@ -426,7 +426,7 @@ pub struct Editor {
     /// Editing operation state (insert, replace, substitute, rename)
     pub editing: EditingState,
     /// Completion menu popup (LSP)
-    completion_menu: CompletionMenu,
+    completion_menu: Box<CompletionMenu>,
     /// Theme and color scheme state
     theme: ThemeState,
     /// Editor options and settings
@@ -624,7 +624,7 @@ impl Editor {
             #[cfg(feature = "lua")]
             editor_bridge: None,
             editing: EditingState::default(),
-            completion_menu: CompletionMenu::new(),
+            completion_menu: Box::default(),
             theme: ThemeState::default(),
             options: EditorOptions::default(),
             viewport: ViewportState::default(),
@@ -678,7 +678,7 @@ impl Editor {
             #[cfg(feature = "lua")]
             editor_bridge: None,
             editing: EditingState::default(),
-            completion_menu: CompletionMenu::new(),
+            completion_menu: Box::default(),
             theme: ThemeState::default(),
             options: EditorOptions::default(),
             viewport: ViewportState::default(),

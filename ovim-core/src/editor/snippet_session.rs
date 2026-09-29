@@ -264,7 +264,7 @@ impl Editor {
         let mirrors: Vec<(usize, usize)> = stop.ranges[1..].to_vec();
         let mut edits: Vec<PlannedEdit> = mirrors
             .iter()
-            .filter(|(a, b)| self.buffer().rope().slice(*a..*b).to_string() != primary)
+            .filter(|(a, b)| self.buffer().rope().slice(*a..*b) != primary.as_str())
             .map(|&(a, b)| PlannedEdit {
                 start: a,
                 end: b,
@@ -274,7 +274,7 @@ impl Editor {
         if edits.is_empty() {
             return;
         }
-        edits.sort_by(|a, b| b.start.cmp(&a.start));
+        edits.sort_by_key(|edit| std::cmp::Reverse(edit.start));
         let cursor = self.cursor_char_offset();
         // The cursor sits in the primary; mirrors before it shift it.
         let cursor_shift: isize = edits

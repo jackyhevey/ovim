@@ -505,6 +505,10 @@ pub fn completion_documentation_markdown(item: &CompletionItem) -> Option<String
     }
 }
 
+/// What makes two menu rows the same suggestion: label, inserted text, and the
+/// label details (so overloads stay apart).
+type DedupeKey = (String, Option<String>, Option<String>, Option<String>);
+
 /// Orders by the server's `sortText` (label when absent) and drops obvious
 /// duplicates, keeping the first (best ranked) occurrence.
 fn order_and_dedupe(mut items: Vec<CompletionItem>) -> Vec<CompletionItem> {
@@ -515,8 +519,7 @@ fn order_and_dedupe(mut items: Vec<CompletionItem>) -> Vec<CompletionItem> {
         let key_b = b.sort_text.as_deref().unwrap_or(&b.label);
         key_a.cmp(key_b)
     });
-    let mut seen: HashSet<(String, Option<String>, Option<String>, Option<String>)> =
-        HashSet::new();
+    let mut seen: HashSet<DedupeKey> = HashSet::new();
     items.retain(|item| {
         let details = item.label_details.as_ref();
         let key = (
@@ -617,5 +620,250 @@ mod tests {
         );
         let labels: Vec<String> = menu.iter().map(|i| i.label.clone()).collect();
         assert_eq!(labels, vec!["forEach".to_string()]);
+    }
+
+    fn sorted(label: &str, sort_text: &str) -> CompletionItem {
+        CompletionItem {
+            label: label.to_string(),
+            sort_text: Some(sort_text.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn labels(menu: &CompletionMenu) -> Vec<String> {
+        menu.iter().map(|i| i.label.clone()).collect()
+    }
+
+    #[test]
+    fn menu_keeps_the_servers_sort_text_order_not_alphabetical_order() {
+        let mut menu = CompletionMenu::new();
+        menu.show(
+            vec![
+                sorted("zebra", "0001"),
+                sorted("apple", "0003"),
+                sorted("mango", "0002"),
+                item("banana"), // no sortText: the label is the key
+            ],
+            0,
+            String::new(),
+        );
+        // "0001" < "0002" < "0003" < "banana"
+        assert_eq!(labels(&menu), vec!["zebra", "mango", "apple", "banana"]);
+    }
+
+    #[test]
+    fn typing_orders_by_match_tier_then_server_order() {
+        let mut menu = CompletionMenu::new();
+        menu.show(
+            vec![
+                sorted("xgetEmail", "01"),   // subsequence
+                sorted("getEmail", "02"),    // hump
+                sorted("gemstone", "03"),    // case-insensitive prefix
+                sorted("gEmpty", "04"),      // exact-case prefix
+                sorted("getEmployee", "05"), // hump, later on the server
+            ],
+            0,
+            "gEm".to_string(),
+        );
+        assert_eq!(
+            labels(&menu),
+            vec!["gEmpty", "gemstone", "getEmail", "getEmployee", "xgetEmail"]
+        );
+    }
+
+    #[test]
+    fn an_exact_match_comes_first_whatever_the_server_thought() {
+        let mut menu = CompletionMenu::new();
+        menu.show(
+            vec![sorted("listOf", "01"), sorted("list", "02")],
+            0,
+            "list".to_string(),
+        );
+        assert_eq!(labels(&menu), vec!["list", "listOf"]);
+    }
+
+    #[test]
+    fn narrowing_and_widening_uses_the_original_list() {
+        let mut menu = CompletionMenu::new();
+        menu.show(
+            vec![item("getName"), item("getEmail"), item("size")],
+            0,
+            String::new(),
+        );
+        menu.filter("gE");
+        assert_eq!(labels(&menu), vec!["getEmail", "getName"]);
+        menu.filter("gEma");
+        assert_eq!(labels(&menu), vec!["getEmail"]);
+        menu.filter("");
+        assert_eq!(labels(&menu), vec!["getEmail", "getName", "size"]);
+        assert!(menu.has_session());
+    }
+
+    #[test]
+    fn a_session_survives_a_filter_that_matches_nothing() {
+        let mut menu = CompletionMenu::new();
+        menu.show(vec![item("alpha")], 0, "a".to_string());
+        menu.filter("az");
+        assert!(!menu.is_visible());
+        assert!(menu.has_session());
+        menu.filter("al");
+        assert!(menu.is_visible());
+    }
+
+    #[test]
+    fn overloads_with_different_details_are_not_collapsed() {
+        let with_detail = |detail: &str| CompletionItem {
+            label: "println".to_string(),
+            label_details: Some(lsp_types::CompletionItemLabelDetails {
+                detail: Some(detail.to_string()),
+                description: None,
+            }),
+            ..Default::default()
+        };
+        let mut menu = CompletionMenu::new();
+        menu.show(
+            vec![
+                with_detail("(String)"),
+                with_detail("(int)"),
+                with_detail("(int)"),
+            ],
+            0,
+            String::new(),
+        );
+        assert_eq!(menu.len(), 2);
+    }
+
+    #[test]
+    fn selection_resets_when_the_text_changes_and_survives_a_refresh_only_if_chosen() {
+        let mut menu = CompletionMenu::new();
+        menu.show(vec![item("aa"), item("ab"), item("ac")], 0, "a".to_string());
+        menu.select_next();
+        assert_eq!(menu.selected_item().unwrap().label, "ab");
+        menu.filter("a");
+        assert_eq!(menu.selected_index(), 1, "same text: keep the choice");
+        menu.filter("ab");
+        assert_eq!(menu.selected_index(), 0, "new text: back to the best match");
+        assert!(!menu.navigated());
+    }
+
+    #[test]
+    fn hide_forgets_the_session_flags() {
+        let mut menu = CompletionMenu::new();
+        menu.show(vec![item("a")], 3, "a".to_string());
+        menu.set_incomplete(true);
+        menu.select_next();
+        menu.hide();
+        assert!(!menu.has_session() && !menu.is_incomplete() && !menu.navigated());
+    }
+
+    #[test]
+    fn resolve_only_fills_presentation_fields() {
+        let mut menu = CompletionMenu::new();
+        menu.show(vec![item("alpha")], 0, "a".to_string());
+        let (source, _) = menu.take_unresolved_selection().unwrap();
+        assert!(menu.take_unresolved_selection().is_none(), "asked once");
+        menu.apply_resolved(
+            source,
+            CompletionItem {
+                label: "CHANGED".to_string(),
+                insert_text: Some("evil".to_string()),
+                detail: Some("fn alpha()".to_string()),
+                documentation: Some(lsp_types::Documentation::String("docs".to_string())),
+                ..Default::default()
+            },
+        );
+        let item = menu.get(0).unwrap();
+        assert_eq!(item.label, "alpha");
+        assert_eq!(item.insert_text, None);
+        assert_eq!(item.detail.as_deref(), Some("fn alpha()"));
+        assert!(item.documentation.is_some());
+    }
+
+    #[test]
+    fn the_list_window_scrolls_only_as_far_as_needed() {
+        let mut menu = CompletionMenu::new();
+        let many: Vec<_> = (0..30)
+            .map(|i| sorted(&format!("item{i:02}"), &format!("{i:02}")))
+            .collect();
+        menu.show(many, 0, String::new());
+        assert_eq!(menu.window(10), 0..10);
+        for _ in 0..12 {
+            menu.select_next();
+        }
+        assert_eq!(menu.window(10), 3..13, "selection 12 is the last row");
+        menu.select_previous();
+        menu.select_previous();
+        assert_eq!(
+            menu.window(10),
+            3..13,
+            "moving up inside the window does not scroll"
+        );
+        for _ in 0..9 {
+            menu.select_previous();
+        }
+        assert_eq!(menu.window(10), 1..11);
+    }
+
+    #[test]
+    fn row_text_prefers_label_details_and_falls_back_to_detail() {
+        let plain = CompletionItem {
+            label: "size".to_string(),
+            detail: Some("fn size(&self) -> usize\nsecond line".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::completion_row_text(&plain),
+            super::CompletionRowText {
+                label_suffix: String::new(),
+                description: "fn size(&self) -> usize".to_string()
+            }
+        );
+        let detailed = CompletionItem {
+            label: "ArrayList".to_string(),
+            detail: Some("java.util.ArrayList".to_string()),
+            label_details: Some(lsp_types::CompletionItemLabelDetails {
+                detail: Some("<>".to_string()),
+                description: Some("java.util".to_string()),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::completion_row_text(&detailed),
+            super::CompletionRowText {
+                label_suffix: "<>".to_string(),
+                description: "java.util".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn documentation_markdown_combines_detail_and_docs() {
+        let full = CompletionItem {
+            label: "get".to_string(),
+            detail: Some("String get()".to_string()),
+            documentation: Some(lsp_types::Documentation::MarkupContent(
+                lsp_types::MarkupContent {
+                    kind: lsp_types::MarkupKind::Markdown,
+                    value: "Returns **it**.".to_string(),
+                },
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::completion_documentation_markdown(&full).unwrap(),
+            "```\nString get()\n```\n\nReturns **it**."
+        );
+        assert_eq!(super::completion_documentation_markdown(&item("get")), None);
+    }
+
+    #[test]
+    fn kind_styles_group_by_colour_family() {
+        use lsp_types::CompletionItemKind as K;
+        assert_eq!(super::completion_kind_style(Some(K::METHOD)).glyph, 'm');
+        assert_eq!(
+            super::completion_kind_style(Some(K::CLASS)).class,
+            super::CompletionKindClass::Type
+        );
+        assert_eq!(super::completion_kind_style(None).class.name(), "other");
     }
 }

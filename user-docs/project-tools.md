@@ -78,6 +78,44 @@ buffer is deleted.
 Symbol rows read `<kind glyph> Name  kind · container      relative/file:line`, in
 the language server's order.
 
+## Completion
+
+In insert mode the menu opens by itself after a server trigger character (such
+as `.`) and after two identifier characters; `Ctrl-Space` (or `Ctrl-N`/`Ctrl-P`
+when no menu is open) always asks. Rows are in the server's own order
+(`sortText`), so the best guess is first; as you keep typing the list is refined
+locally: prefix matches, then camelHump / word-initial matches (`gEm` finds
+`getEmail`, `NPE` finds `NullPointerException`), then loose subsequences, with
+the server's order kept inside each group. An lowercase pattern ignores case; a
+capital demands one. A list the server marks `isIncomplete` is asked for again
+as you type.
+
+Each row reads `<kind> label details ...... description`: the kind glyph
+(`m` method, `f` function, `C` class, `I` interface, `v` variable, `F` field,
+`k` keyword, `s` snippet, ...), the label with the characters you typed
+emphasised, the server's `labelDetails.detail` (a signature) right after it and
+its `description` (for example the package) right-aligned and dimmed.
+Deprecated items are struck through. The selected item's signature and
+documentation appear in a popup beside the list (fetched with
+`completionItem/resolve` when the server supports it).
+
+`Enter`, `Ctrl-Y` accept the item and insert it at the cursor; `Tab` accepts it
+and replaces the rest of the identifier under the cursor when the server offers
+a replace range. `Ctrl-N`/`Ctrl-P` or the arrow keys move the selection, `Esc`
+leaves insert mode. Accepting applies the item's extra edits (such as an
+`import` line) in the same undo step, and a server's commit characters accept the
+item you chose before the typed character is inserted.
+
+Snippet completions (`foo(${1:arg})$0`) expand in place: the first tab stop is
+selected, typing replaces its placeholder, `Tab` / `Shift-Tab` jump between tab
+stops, and `Esc` leaves the snippet together with insert mode.
+
+```vim
+:set noautocomplete        " only open the menu with Ctrl-Space
+:set autocompletemin=3     " identifier characters typed before it opens (default 2)
+:set autocompletedelay=80  " milliseconds to wait for a pause in typing (default 40)
+```
+
 ## Signature help and folding
 
 Typing `(` or `,` in a call shows the signature above the line with the active

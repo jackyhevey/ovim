@@ -78,7 +78,7 @@ impl Editor {
         let commits = item
             .commit_characters
             .as_ref()
-            .is_some_and(|chars| chars.iter().any(|c| c.chars().next() == Some(typed)));
+            .is_some_and(|chars| chars.iter().any(|c| c.starts_with(typed)));
         if !commits {
             return false;
         }
