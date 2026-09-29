@@ -196,6 +196,19 @@ fn shift_operators_cover_the_whole_closed_fold() {
     );
 }
 
+/// Found hands-on: `>>` moves the cursor to the first non-blank, which the
+/// "horizontal movement opens a closed fold" rule took for a motion. Vim keeps
+/// the fold closed after an edit.
+#[test]
+fn an_operator_that_moves_the_cursor_does_not_open_the_fold() {
+    let mut test = ten_lines();
+    test.editor.options.shift_width = 2;
+    test.keys("2Gzf3j>>");
+    assert_eq!(hidden(&test), vec![2, 3, 4], "still closed after >>");
+    test.keys("gUU");
+    assert_eq!(hidden(&test), vec![2, 3, 4], "still closed after gUU");
+}
+
 #[test]
 fn case_and_yank_operators_cover_the_whole_closed_fold() {
     // vim: `gUU`.

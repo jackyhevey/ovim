@@ -337,7 +337,12 @@ impl Editor {
     /// Runs after every key: keeps fold ranges aligned with line-count changes,
     /// keeps the cursor out of closed folds (Vim's rules) and refreshes the
     /// header markers.
-    pub(crate) fn sync_folds_after_key(&mut self, prev_line: usize, prev_col: GraphemeCol) {
+    pub(crate) fn sync_folds_after_key(
+        &mut self,
+        prev_line: usize,
+        prev_col: GraphemeCol,
+        prev_version: usize,
+    ) {
         if self.buffer().fold_manager().is_empty() {
             self.clear_fold_markers();
             return;
@@ -384,7 +389,10 @@ impl Editor {
                         | crate::mode::Mode::VisualLine
                         | crate::mode::Mode::VisualBlock
                 );
-                if !insert_like && !selecting {
+                // A key that edited the text (`>>` moves the cursor to the
+                // first non-blank) was no horizontal motion.
+                let edited = self.buffer().version() != prev_version;
+                if !insert_like && !selecting && !edited {
                     self.buffer_mut().fold_manager_mut().open_one(line);
                 }
             }

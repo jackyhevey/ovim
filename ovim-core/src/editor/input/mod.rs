@@ -163,7 +163,7 @@ impl InputHandler {
 
         let fold_prev = {
             let cursor = editor.buffer().cursor();
-            (cursor.line(), cursor.col())
+            (cursor.line(), cursor.col(), editor.buffer().version())
         };
         let completing_insert_normal = editor.editing.insert_normal_pending;
         let mapping_handled = if allow_remap {
@@ -247,7 +247,7 @@ impl InputHandler {
         // when we handled the key directly.
         // Folds: keep ranges aligned with the text, keep the cursor out of
         // closed folds, refresh the header markers.
-        editor.sync_folds_after_key(fold_prev.0, fold_prev.1);
+        editor.sync_folds_after_key(fold_prev.0, fold_prev.1, fold_prev.2);
         editor.report_refused_edit();
 
         let is_viewport_pending = matches!(editor.pending_command(), Some('z') | Some('Z'));
