@@ -417,6 +417,10 @@ pub struct GuiLine {
     pub git: Option<String>,
     pub diagnostic: Option<String>,
     pub diff: Option<String>,
+    /// `enabled`, `conditional` or `disabled` when the line has a breakpoint.
+    pub breakpoint: Option<String>,
+    /// The debugger is stopped on this line.
+    pub executing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -803,7 +807,29 @@ pub struct GuiDebugPanel {
     pub reason: Option<String>,
     pub execution_line: Option<u64>,
     pub stack: Vec<GuiDebugFrame>,
+    /// Variables, watches, breakpoints and exception filters (everything
+    /// but the call stack), with `index` addressing the TUI panel's row list.
+    pub rows: Vec<GuiDebugRow>,
     pub output: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiDebugRow {
+    /// Row index for `gui_debug_panel_row`.
+    pub index: usize,
+    /// `header`, `note`, `variable`, `watch`, `breakpoint` or `exception`.
+    pub kind: String,
+    pub depth: usize,
+    pub label: String,
+    pub value: Option<String>,
+    pub type_name: Option<String>,
+    /// Variables and watches with children.
+    pub expandable: bool,
+    pub expanded: bool,
+    /// Breakpoints and exception filters: switched on.
+    pub enabled: Option<bool>,
+    pub conditional: bool,
 }
 
 /// The run console: output of builds, runs and debug sessions, kept after
@@ -1023,6 +1049,15 @@ enum GuiRequest {
     SelectLsp {
         index: usize,
         activate: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    DebugPanelRow {
+        index: usize,
+        action: String,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ToggleBreakpoint {
+        line: usize,
         reply: oneshot::Sender<Result<(), String>>,
     },
     SelectDebugFrame {
@@ -1303,6 +1338,22 @@ impl GuiBridge {
             reply,
         })
         .await
+    }
+
+    /// A click in the debug panel: `activate`, `delete` or `toggle` on row `index`.
+    pub async fn debug_panel_row(&self, index: usize, action: String) -> Result<(), String> {
+        self.request(|reply| GuiRequest::DebugPanelRow {
+            index,
+            action,
+            reply,
+        })
+        .await
+    }
+
+    /// A click in the gutter: toggle the breakpoint on `line` (1-based).
+    pub async fn toggle_breakpoint(&self, line: usize) -> Result<(), String> {
+        self.request(|reply| GuiRequest::ToggleBreakpoint { line, reply })
+            .await
     }
 
     pub async fn select_debug_frame(&self, index: usize) -> Result<(), String> {
@@ -2161,6 +2212,39 @@ async fn handle_request(
             }
             (reply, result)
         }
+        GuiRequest::DebugPanelRow {
+            index,
+            action,
+            reply,
+        } => {
+            let rows = editor.debug_panel_rows().len();
+            let result = if index >= rows {
+                Err(anyhow::anyhow!("Unknown debug panel row: {index}"))
+            } else {
+                editor.dap_manager_mut().state.panel.cursor = index;
+                match action.as_str() {
+                    "activate" => editor.debug_panel_activate(),
+                    "delete" => editor.debug_panel_delete(),
+                    "toggle" => editor.debug_panel_toggle_enabled(),
+                    other => ovim_core::log_debug!("gui", "unknown debug panel action {other}"),
+                }
+                refresh_after_input(editor);
+                Ok(())
+            };
+            (reply, result)
+        }
+        GuiRequest::ToggleBreakpoint { line, reply } => {
+            let path = editor.buffer().file_path().map(std::path::PathBuf::from);
+            let result = match path {
+                Some(path) if line >= 1 => {
+                    editor.toggle_breakpoint_at(&path, line as u64);
+                    refresh_after_input(editor);
+                    Ok(())
+                }
+                _ => Err(anyhow::anyhow!("No file to set a breakpoint in")),
+            };
+            (reply, result)
+        }
         GuiRequest::SelectDebugFrame { index, reply } => {
             let result = (index < editor.debug_state().stack_frames.len())
                 .then_some(())
@@ -2598,6 +2682,23 @@ fn project_lines(
             }
             vec![(0, display_start, segments)]
         };
+        let breakpoint = buffer
+            .file_path()
+            .map(std::path::Path::new)
+            .and_then(|path| editor.breakpoint_marker_in(path, line_index as u64 + 1))
+            .map(|marker| {
+                match marker {
+                    ovim_core::editor::BreakpointMarker::Enabled => "enabled",
+                    ovim_core::editor::BreakpointMarker::Conditional => "conditional",
+                    ovim_core::editor::BreakpointMarker::Disabled => "disabled",
+                }
+                .to_string()
+            });
+        let executing = buffer
+            .file_path()
+            .map(std::path::Path::new)
+            .zip(editor.execution_position())
+            .is_some_and(|(path, (file, line))| file == path && line == line_index as u64 + 1);
         let git = buffer
             .git_status()
             .get_line_status(line_index)
@@ -2636,6 +2737,8 @@ fn project_lines(
                 git: (!continuation).then(|| git.clone()).flatten(),
                 diagnostic: (!continuation).then(|| diagnostic.clone()).flatten(),
                 diff: (!continuation).then(|| diff.clone()).flatten(),
+                breakpoint: (!continuation).then(|| breakpoint.clone()).flatten(),
+                executing: !continuation && executing,
             });
             if projected.len() >= visible {
                 break 'lines;
@@ -3693,10 +3796,65 @@ fn lsp_manager(editor: &Editor) -> Option<GuiLspManager> {
     })
 }
 
+fn gui_debug_rows(editor: &Editor) -> Vec<GuiDebugRow> {
+    use ovim_core::dap::panel::RowKind;
+    let mut in_stack = false;
+    editor
+        .debug_panel_rows()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            // The call stack has its own list in the GUI.
+            match &row.kind {
+                RowKind::Header => in_stack = row.label.starts_with("Call Stack"),
+                RowKind::Note if in_stack => return None,
+                RowKind::Frame { .. } => return None,
+                _ => {}
+            }
+            if in_stack {
+                return None;
+            }
+            let (kind, expandable, expanded, enabled, conditional) = match &row.kind {
+                RowKind::Header => ("header", false, false, None, false),
+                RowKind::Note => ("note", false, false, None, false),
+                RowKind::Frame { .. } => return None,
+                RowKind::Variable { var_ref, expanded } => {
+                    ("variable", *var_ref > 0, *expanded, None, false)
+                }
+                RowKind::Watch {
+                    var_ref, expanded, ..
+                } => ("watch", *var_ref > 0, *expanded, None, false),
+                RowKind::Breakpoint {
+                    enabled,
+                    conditional,
+                    ..
+                } => ("breakpoint", false, false, Some(*enabled), *conditional),
+                RowKind::Exception { enabled, .. } => {
+                    ("exception", false, false, Some(*enabled), false)
+                }
+            };
+            Some(GuiDebugRow {
+                index,
+                kind: kind.to_string(),
+                depth: row.depth,
+                label: truncate_panel_text(&row.label, 300),
+                value: row.value.map(|v| truncate_panel_text(&v, 300)),
+                type_name: row.type_,
+                expandable,
+                expanded,
+                enabled,
+                conditional,
+            })
+        })
+        .take(400)
+        .collect()
+}
+
 fn debug_panel(editor: &Editor) -> Option<GuiDebugPanel> {
     let debug = editor.debug_state();
-    (debug.session_active && debug.panels_visible).then(|| GuiDebugPanel {
+    debug.panels_visible.then(|| GuiDebugPanel {
         running: debug.is_running,
+        rows: gui_debug_rows(editor),
         reason: debug.stop_reason.clone(),
         execution_line: debug.execution_line,
         stack: debug

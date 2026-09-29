@@ -252,7 +252,8 @@ fn parse_pairs_fixture(mode: Mode, pairs: &[&str]) -> Fixture {
         | Mode::LspManager
         | Mode::RenameInput
         | Mode::AiChat
-        | Mode::RunConsole => Fixture {
+        | Mode::RunConsole
+        | Mode::DebugPanel => Fixture {
             mode,
             content,
             cursor,

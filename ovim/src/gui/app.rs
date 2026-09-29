@@ -538,6 +538,20 @@ async fn gui_select_lsp(
 }
 
 #[tauri::command]
+async fn gui_debug_panel_row(
+    bridge: State<'_, GuiBridge>,
+    index: usize,
+    action: String,
+) -> Result<(), String> {
+    bridge.debug_panel_row(index, action).await
+}
+
+#[tauri::command]
+async fn gui_toggle_breakpoint(bridge: State<'_, GuiBridge>, line: usize) -> Result<(), String> {
+    bridge.toggle_breakpoint(line).await
+}
+
+#[tauri::command]
 async fn gui_select_debug_frame(bridge: State<'_, GuiBridge>, index: usize) -> Result<(), String> {
     bridge.select_debug_frame(index).await
 }
@@ -647,6 +661,8 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
             gui_select_problem,
             gui_select_lsp,
             gui_select_debug_frame,
+            gui_debug_panel_row,
+            gui_toggle_breakpoint,
             gui_window_action,
             gui_open_external,
             super::terminal::gui_terminal_open,

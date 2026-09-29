@@ -24,6 +24,8 @@ export interface GuiLine {
     git?: "added" | "modified" | "removed";
     diagnostic?: "error" | "warning" | "information" | "hint";
     diff?: "header" | "hunk" | "added" | "removed" | "context";
+    breakpoint?: "enabled" | "conditional" | "disabled";
+    executing?: boolean;
 }
 
 export type GuiLayoutNode =
@@ -332,7 +334,21 @@ export interface GuiDebugPanel {
         line: number;
         selected: boolean;
     }>;
+    rows: GuiDebugRow[];
     output: string[];
+}
+
+export interface GuiDebugRow {
+    index: number;
+    kind: "header" | "note" | "variable" | "watch" | "breakpoint" | "exception";
+    depth: number;
+    label: string;
+    value?: string;
+    typeName?: string;
+    expandable: boolean;
+    expanded: boolean;
+    enabled?: boolean;
+    conditional: boolean;
 }
 
 export type GuiRunLineKind =

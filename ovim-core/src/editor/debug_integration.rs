@@ -55,6 +55,12 @@ impl Editor {
         Some(lines)
     }
 
+    /// Toggles a breakpoint at a 1-based line of `path` (gutter click).
+    pub fn toggle_breakpoint_at(&mut self, path: &Path, line: u64) {
+        self.dap_manager.state.toggle_breakpoint(path, line);
+        self.after_breakpoint_change();
+    }
+
     /// Get breakpoint lines for the current file (1-based).
     pub fn current_file_breakpoint_lines(&self) -> Vec<u64> {
         let Some(file_path) = self.buffer().file_path() else {
@@ -77,12 +83,16 @@ impl Editor {
     /// drawn: `None` when there is none.
     pub fn breakpoint_marker_at(&self, line_1based: u64) -> Option<BreakpointMarker> {
         let file_path = self.buffer().file_path()?;
-        let path = std::path::PathBuf::from(file_path);
+        self.breakpoint_marker_in(Path::new(file_path), line_1based)
+    }
+
+    /// Like [`breakpoint_marker_at`](Self::breakpoint_marker_at) for any file.
+    pub fn breakpoint_marker_in(&self, path: &Path, line_1based: u64) -> Option<BreakpointMarker> {
         let bp = self
             .dap_manager
             .state
             .breakpoints
-            .get(&path)?
+            .get(path)?
             .iter()
             .find(|bp| bp.line == line_1based)?;
         Some(if !bp.enabled {
