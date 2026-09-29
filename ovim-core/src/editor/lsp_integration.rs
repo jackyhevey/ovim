@@ -1756,15 +1756,18 @@ impl Editor {
             return;
         };
         let wanted = lsp.watched_file_roots();
-        let watcher = &mut self.lsp.state.workspace_watcher;
-        if let Some(error) = watcher.sync_roots(&wanted) {
+        self.lsp.state.workspace_watcher.sync_roots(&wanted);
+        if let Some(error) = self.lsp.state.workspace_watcher.take_error() {
             self.set_lsp_status(format!("LSP: {error}"));
         }
+        let matcher = lsp.clone();
         let Some(events) = self
             .lsp
             .state
             .workspace_watcher
-            .poll(std::time::Instant::now())
+            .poll(std::time::Instant::now(), &move |path| {
+                matcher.watched_path_matches(path)
+            })
         else {
             return;
         };

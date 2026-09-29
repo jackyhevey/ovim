@@ -193,6 +193,28 @@ impl LspManager {
         roots
     }
 
+    /// Cheap pre-filter for raw file events: does any registered watcher glob
+    /// match `path` for some kind of change?
+    pub fn watched_path_matches(&self, path: &Path) -> bool {
+        self.file_watch_registrations.iter().any(|entry| {
+            let root = self
+                .server_roots
+                .get(entry.key())
+                .map(|r| r.value().clone());
+            entry.value().iter().any(|reg| {
+                reg.watchers.iter().any(|w| {
+                    [
+                        WatchedChange::Created,
+                        WatchedChange::Changed,
+                        WatchedChange::Deleted,
+                    ]
+                    .into_iter()
+                    .any(|c| w.matches(path, root.as_deref(), c))
+                })
+            })
+        })
+    }
+
     /// True when at least one server asked to be told about file changes.
     pub fn has_file_watchers(&self) -> bool {
         self.file_watch_registrations
