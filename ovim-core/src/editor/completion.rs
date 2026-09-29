@@ -62,6 +62,9 @@ pub struct CompletionMenu {
     generation: u64,
     /// First row of the scrolled list window (see [`CompletionMenu::window`]).
     scroll_top: std::cell::Cell<usize>,
+    /// The list is the choice list of a snippet `${1|a,b,c|}` stop, not a
+    /// server answer: accepting replaces the stop's placeholder text.
+    snippet_choices: bool,
 }
 
 impl CompletionMenu {
@@ -81,6 +84,7 @@ impl CompletionMenu {
             resolve_requested: HashSet::new(),
             generation: 0,
             scroll_top: std::cell::Cell::new(0),
+            snippet_choices: false,
         }
     }
 
@@ -102,8 +106,37 @@ impl CompletionMenu {
         self.is_incomplete = false;
         self.navigated = false;
         self.anchor = None;
+        self.snippet_choices = false;
         self.resolve_requested.clear();
         self.apply_filter();
+    }
+
+    /// Shows the choices of a snippet stop (see [`Self::is_snippet_choices`]).
+    pub fn show_snippet_choices(
+        &mut self,
+        choices: &[String],
+        trigger_col: usize,
+        buffer_version: usize,
+    ) {
+        let items = choices
+            .iter()
+            .enumerate()
+            .map(|(index, choice)| CompletionItem {
+                label: choice.clone(),
+                kind: Some(lsp_types::CompletionItemKind::ENUM_MEMBER),
+                // Keep the snippet's own order.
+                sort_text: Some(format!("{index:06}")),
+                ..Default::default()
+            })
+            .collect();
+        self.show(items, trigger_col, String::new());
+        self.items_buffer_version = Some(buffer_version);
+        self.snippet_choices = true;
+    }
+
+    /// Whether the visible list is a snippet stop's choice list.
+    pub fn is_snippet_choices(&self) -> bool {
+        self.snippet_choices
     }
 
     /// Records the buffer version the current items' textEdit ranges were
@@ -147,6 +180,7 @@ impl CompletionMenu {
         self.is_incomplete = false;
         self.navigated = false;
         self.anchor = None;
+        self.snippet_choices = false;
         self.resolve_requested.clear();
     }
 

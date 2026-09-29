@@ -94,6 +94,13 @@ pub struct Buffer {
     pub(super) file_mtime: Option<std::time::SystemTime>,
     /// Whether the file is read-only (no write permission)
     pub(super) read_only: bool,
+    /// Vim's `modifiable`: false refuses every text edit (library sources,
+    /// server-provided virtual documents). Unlike `read_only`, which only
+    /// stops `:w`, this stops the edit itself (E21).
+    pub(super) modifiable: bool,
+    /// An edit was refused because the buffer is not modifiable; the editor
+    /// reports it (E21) once after the key that attempted it.
+    pub(super) refused_edit: bool,
     /// Cached semantic token highlights from LSP (line_idx -> Vec<(range, group)>)
     /// These take precedence over tree-sitter highlights when available
     pub(super) semantic_highlights: Option<LineHighlights>,
@@ -153,6 +160,8 @@ impl Buffer {
             change_manager: ChangeManager::new(),
             file_mtime: None,
             read_only: false,
+            modifiable: true,
+            refused_edit: false,
             semantic_highlights: None,
             version: 0,
             code_block_cache: None,
@@ -264,6 +273,8 @@ impl Buffer {
             change_manager: ChangeManager::new(),
             file_mtime: None,
             read_only: false,
+            modifiable: true,
+            refused_edit: false,
             semantic_highlights: None,
             version: 0,
             code_block_cache: None,
@@ -414,6 +425,29 @@ impl Buffer {
     /// Sets the read-only status of the buffer
     pub fn set_read_only(&mut self, read_only: bool) {
         self.read_only = read_only;
+    }
+
+    /// Whether text edits are accepted (Vim's `modifiable`).
+    pub fn is_modifiable(&self) -> bool {
+        self.modifiable
+    }
+
+    /// Sets Vim's `modifiable`.
+    pub fn set_modifiable(&mut self, modifiable: bool) {
+        self.modifiable = modifiable;
+    }
+
+    /// True (once) when an edit was refused since the last call.
+    pub fn take_refused_edit(&mut self) -> bool {
+        std::mem::take(&mut self.refused_edit)
+    }
+
+    /// Records a refused edit and reports whether the buffer accepts edits.
+    pub(super) fn accepts_edits(&mut self) -> bool {
+        if !self.modifiable {
+            self.refused_edit = true;
+        }
+        self.modifiable
     }
 
     /// Returns the current version of this buffer.

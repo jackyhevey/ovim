@@ -932,6 +932,11 @@ fn execute_command_single(editor: &mut Editor, command: &str) -> Result<()> {
 
     // Handle :sort command (sorts lines in range)
     if cmd_part == "sort" || cmd_part.starts_with("sort ") {
+        if !editor.buffer().is_modifiable() {
+            editor.report_unmodifiable();
+            return Ok(());
+        }
+
         if let Some((start_line, end_line)) = parse_range_with_status(editor, range_str, None) {
             let reverse = cmd_part.contains('!') || cmd_part.contains(" r");
             let numeric = cmd_part.contains(" n");
@@ -1035,6 +1040,11 @@ fn execute_command_single(editor: &mut Editor, command: &str) -> Result<()> {
     // Format: :[range]copy {address} or :[range]t {address}
     // (helper `parse_copy_move_dest` accepts both the spaced and unspaced forms)
     if let Some(dest_str) = parse_copy_move_dest(cmd_part, "copy", "t") {
+        if !editor.buffer().is_modifiable() {
+            editor.report_unmodifiable();
+            return Ok(());
+        }
+
         if dest_str.is_empty() {
             editor.set_status_message("E488: Trailing characters".to_string());
             return Ok(());
@@ -1112,6 +1122,11 @@ fn execute_command_single(editor: &mut Editor, command: &str) -> Result<()> {
     // Handle :move or :m command (move lines to destination)
     // Format: :[range]move {address} or :[range]m {address}
     if let Some(dest_str) = parse_copy_move_dest(cmd_part, "move", "m") {
+        if !editor.buffer().is_modifiable() {
+            editor.report_unmodifiable();
+            return Ok(());
+        }
+
         if dest_str.is_empty() {
             editor.set_status_message("E488: Trailing characters".to_string());
             return Ok(());

@@ -565,6 +565,7 @@ struct GutterContext<'a> {
     line_num_width: usize,
     cursor_line: usize,
     blame_width: usize,
+    fold_width: usize,
     walkthrough_range: Option<(usize, usize)>,
 }
 
@@ -588,10 +589,11 @@ fn build_gutter_line(
     let line_num_width = ctx.line_num_width;
     let cursor_line = ctx.cursor_line;
     let blame_width = ctx.blame_width;
+    let fold_width = ctx.fold_width;
 
     if is_continuation {
         // Blank gutter for wrap continuation rows
-        let width = blame_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING;
+        let width = blame_width + fold_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING;
         if blame_width > 0 {
             if let Some((_, _, _, color)) = blame_info {
                 return Line::from(vec![
@@ -642,6 +644,24 @@ fn build_gutter_line(
         } else {
             spans.push(Span::raw(" ".repeat(blame_width)));
         }
+    }
+
+    // Fold column: `-` heads an open fold, `+` a closed one, `|` inside.
+    if fold_width > 0 {
+        let cells: String = editor
+            .fold_gutter_cells(line_idx, fold_width)
+            .into_iter()
+            .map(|mark| mark.glyph())
+            .collect();
+        let has_mark = cells.chars().any(|c| c != ' ');
+        spans.push(Span::styled(
+            cells,
+            Style::default().fg(if has_mark {
+                Color::DarkGray
+            } else {
+                Color::Reset
+            }),
+        ));
     }
 
     let line_num_text = if editor.options.relative_number {
@@ -1727,6 +1747,7 @@ pub fn render_buffer(
         line_num_width,
         cursor_line: cursor_line_idx,
         blame_width,
+        fold_width: layout.fold_width,
         walkthrough_range,
     };
 
@@ -3227,6 +3248,7 @@ mod tests {
             text_width: 5,
             line_num_width: 0,
             blame_width: 0,
+            fold_width: 0,
             scrollbar_area: None,
         };
         let context = WindowRenderContext {
@@ -3269,6 +3291,7 @@ mod tests {
             text_width: 5,
             line_num_width: 0,
             blame_width: 0,
+            fold_width: 0,
             scrollbar_area: None,
         };
         let context = WindowRenderContext {
@@ -3317,6 +3340,7 @@ mod tests {
             text_width: 5,
             line_num_width: 0,
             blame_width: 0,
+            fold_width: 0,
             scrollbar_area: None,
         };
         let context = WindowRenderContext {

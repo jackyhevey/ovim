@@ -19,6 +19,10 @@ pub(super) fn handle_shell_command(
     range_str: &str,
     shell_cmd: &str,
 ) -> Result<()> {
+    if !editor.buffer().is_modifiable() {
+        editor.report_unmodifiable();
+        return Ok(());
+    }
     // Expand % and # in the shell command
     let current_file = editor.buffer().file_path().unwrap_or("").to_string();
     let alternate_file = editor.registers().get(Some('#'));

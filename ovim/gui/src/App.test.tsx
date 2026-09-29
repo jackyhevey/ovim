@@ -1452,6 +1452,86 @@ describe("Ovim Solid workbench", () => {
         }
     });
 
+    it("draws fold markers in the gutter: closed headers always, inside lines never", () => {
+        const pane = mockSnapshot.panes[0];
+        const original = pane.lines.slice(0, 3).map((line) => line.fold);
+        pane.lines[0].fold = "closed";
+        pane.lines[1].fold = "open";
+        pane.lines[2].fold = "inside";
+        try {
+            const result = render(() => <App />);
+            const marks = result.container.querySelectorAll(".fold-gutter");
+            expect(marks).toHaveLength(3);
+            expect(marks[0].textContent).toBe("▸");
+            expect(marks[0].classList.contains("fold-closed")).toBe(true);
+            expect(marks[1].textContent).toBe("▾");
+            expect(marks[2].textContent).toBe("");
+        } finally {
+            pane.lines.slice(0, 3).forEach((line, index) => {
+                line.fold = original[index];
+            });
+        }
+    });
+
+    it("lists debuggee threads as selectable rows and marks the shown one", () => {
+        mockSnapshot.debug = {
+            running: false,
+            executionLine: 1,
+            stack: [],
+            rows: [
+                {
+                    index: 4,
+                    kind: "header",
+                    depth: 0,
+                    label: "Threads",
+                    expandable: false,
+                    expanded: false,
+                    conditional: false,
+                },
+                {
+                    index: 5,
+                    kind: "thread",
+                    depth: 1,
+                    label: "main (1)",
+                    value: "stopped here",
+                    expandable: false,
+                    expanded: false,
+                    conditional: false,
+                    selected: true,
+                },
+                {
+                    index: 6,
+                    kind: "thread",
+                    depth: 1,
+                    label: "worker (7)",
+                    expandable: false,
+                    expanded: false,
+                    conditional: false,
+                    selected: false,
+                },
+            ],
+            output: [],
+        };
+        try {
+            const { container } = render(() => <App />);
+            const shown = screen.getByRole("treeitem", { name: /main \(1\)/ });
+            expect(shown.getAttribute("aria-selected")).toBe("true");
+            expect(shown.classList.contains("selected")).toBe(true);
+            const other = screen.getByRole("treeitem", {
+                name: /worker \(7\)/,
+            });
+            expect(other.getAttribute("aria-selected")).toBe("false");
+            expect(other.getAttribute("title")).toBe(
+                "Show this thread's stack",
+            );
+            expect(
+                container.querySelectorAll(".debug-row.thread"),
+            ).toHaveLength(2);
+        } finally {
+            delete mockSnapshot.debug;
+        }
+    });
+
     it("renders the selected language server detail projected by the core", () => {
         mockSnapshot.lspManager = {
             filter: "",

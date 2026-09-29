@@ -14,6 +14,9 @@ impl Buffer {
         if text.is_empty() {
             return;
         }
+        if !self.accepts_edits() {
+            return;
+        }
 
         // Track buffer edit metrics
         crate::metrics::BUFFER_EDITS_TOTAL.inc();
@@ -154,6 +157,9 @@ impl Buffer {
         end_line: usize,
         end_col: CharCol,
     ) -> String {
+        if !self.accepts_edits() {
+            return String::new();
+        }
         // Track buffer edit metrics
         crate::metrics::BUFFER_EDITS_TOTAL.inc();
 
@@ -264,6 +270,9 @@ impl Buffer {
     /// for undo of insertions at positions past the content of a line (e.g.,
     /// after the newline character).
     pub fn delete_char_range(&mut self, start_char: usize, end_char: usize) {
+        if !self.accepts_edits() {
+            return;
+        }
         crate::metrics::BUFFER_EDITS_TOTAL.inc();
 
         let start_pos = start_char.min(self.rope.len_chars());

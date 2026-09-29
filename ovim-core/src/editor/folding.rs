@@ -7,7 +7,7 @@
 
 use super::decoration::{Decoration, DecorationPlacement, DecorationSource, DecorationStyle};
 use super::Editor;
-use crate::fold::indent_fold_ranges;
+use crate::fold::{indent_fold_ranges, syntax_fold_ranges, FoldSource};
 use crate::unicode::GraphemeCol;
 
 /// How long the buffer must be quiet before folds are recomputed.
@@ -21,23 +21,35 @@ impl Editor {
             return;
         }
         self.buffer_mut().fold_manager_mut().activate();
-        self.compute_indent_folds();
+        self.compute_local_folds();
         self.lsp.intents.folding_ranges = true;
     }
 
-    /// Replaces the automatic folds with indentation folds.
-    fn compute_indent_folds(&mut self) {
+    /// Replaces the automatic folds with the ones the editor can compute
+    /// itself: the tree-sitter syntax tree when the buffer has one, otherwise
+    /// indentation. Used until (and instead of) a language server's answer.
+    pub(crate) fn compute_local_folds(&mut self) {
         let tab_width = self.indent_options().tab_width.max(1);
         let buffer = self.buffer();
-        let lines: Vec<String> = (0..buffer.line_count())
-            .map(|line| buffer.line_text(line).unwrap_or_default().to_string())
-            .collect();
-        let ranges = indent_fold_ranges(&lines, tab_width);
-        let version = buffer.version();
         let line_count = buffer.line_count();
+        let version = buffer.version();
+        let syntax = buffer.syntax_tree().map(|tree| {
+            syntax_fold_ranges(tree, &|row| {
+                buffer.line_text(row).unwrap_or_default().to_string()
+            })
+        });
+        let (ranges, source) = match syntax {
+            Some(ranges) if !ranges.is_empty() => (ranges, FoldSource::Syntax),
+            _ => {
+                let lines: Vec<String> = (0..line_count)
+                    .map(|line| buffer.line_text(line).unwrap_or_default().to_string())
+                    .collect();
+                (indent_fold_ranges(&lines, tab_width), FoldSource::Indent)
+            }
+        };
         self.buffer_mut()
             .fold_manager_mut()
-            .set_auto_folds(&ranges, line_count, version, false);
+            .set_auto_folds_from(&ranges, line_count, version, source);
     }
 
     /// Applies folds from the language server. Returns false for stale or
@@ -72,11 +84,16 @@ impl Editor {
 
     /// Recomputes the automatic folds after the text settled.
     pub(crate) async fn maintain_folds(&mut self) {
+        if !self.buffer().fold_manager().is_active() {
+            // The fold gutter needs the folds up front; without it they are
+            // computed on the first fold command.
+            if !self.fold_gutter_wants_folds() {
+                return;
+            }
+            self.ensure_folds();
+        }
         let buffer = self.buffer();
         let manager = buffer.fold_manager();
-        if !manager.is_active() {
-            return;
-        }
         let version = buffer.version();
         if manager.auto_version() == Some(version) {
             self.lsp.state.fold_tracking = None;
@@ -95,10 +112,22 @@ impl Editor {
         }
         self.lsp.state.fold_tracking = None;
         if !self.buffer().fold_manager().is_lsp_backed() {
-            self.compute_indent_folds();
+            self.compute_local_folds();
             self.refresh_fold_view();
         }
         self.request_folding_ranges().await;
+    }
+
+    /// Whether the current buffer should get folds without a fold command
+    /// because the fold gutter is enabled: real files of a sane size.
+    fn fold_gutter_wants_folds(&self) -> bool {
+        const MAX_LINES: usize = 50_000;
+        let buffer = self.buffer();
+        self.options.foldcolumn > 0
+            && buffer
+                .file_path()
+                .is_some_and(|path| !super::buffer_manager::is_scratch_path(path))
+            && buffer.line_count() <= MAX_LINES
     }
 
     pub(in crate::editor) async fn request_folding_ranges(&mut self) {
@@ -178,11 +207,16 @@ impl Editor {
                 | 'E'
                 | 'j'
                 | 'k'
+                | 'r'
+                | 'm'
+                | 'x'
+                | 'X'
         ) {
             return false;
         }
         self.ensure_folds();
         let line = self.buffer().cursor().line();
+        let count = self.effective_count();
         let manager = self.buffer_mut().fold_manager_mut();
         match key {
             'o' => {
@@ -211,6 +245,20 @@ impl Editor {
             'v' => {
                 manager.reveal(line);
             }
+            'r' => manager.reduce_folding(count),
+            'm' => {
+                manager.set_enabled(true);
+                manager.fold_more(count);
+            }
+            'x' => {
+                manager.set_enabled(true);
+                manager.reapply_foldlevel();
+                manager.reveal(line);
+            }
+            'X' => {
+                manager.set_enabled(true);
+                manager.reapply_foldlevel();
+            }
             'n' => manager.set_enabled(false),
             'N' => manager.set_enabled(true),
             'i' => {
@@ -237,15 +285,25 @@ impl Editor {
         true
     }
 
-    /// `[z` / `]z`: start / end of the open fold containing the cursor.
+    /// `[z` / `]z`: start / end of the open fold containing the cursor; when
+    /// already there, of the fold around it. `count` repeats. Fails (stays)
+    /// when there is no such fold.
     pub fn fold_edge_motion(&mut self, to_end: bool) {
         self.ensure_folds();
-        let line = self.buffer().cursor().line();
-        if let Some((start, end)) = self.buffer().fold_manager().innermost_open_fold(line) {
-            let target = if to_end { end } else { start };
-            if target != line {
-                self.move_cursor_to_line_keeping_column(target);
+        let count = self.effective_count();
+        let mut line = self.buffer().cursor().line();
+        for _ in 0..count {
+            match self.buffer().fold_manager().fold_edge_target(line, to_end) {
+                Some(target) => line = target,
+                None => break,
             }
+        }
+        if line != self.buffer().cursor().line() {
+            // Vim lands in the first column.
+            self.buffer_mut()
+                .cursor_mut()
+                .set_position(line, GraphemeCol(0));
+            self.buffer_mut().validate_cursor_position();
         }
         self.clear_count();
         self.after_fold_change();
@@ -279,7 +337,12 @@ impl Editor {
     /// Runs after every key: keeps fold ranges aligned with line-count changes,
     /// keeps the cursor out of closed folds (Vim's rules) and refreshes the
     /// header markers.
-    pub(crate) fn sync_folds_after_key(&mut self, prev_line: usize, prev_col: GraphemeCol) {
+    pub(crate) fn sync_folds_after_key(
+        &mut self,
+        prev_line: usize,
+        prev_col: GraphemeCol,
+        prev_version: usize,
+    ) {
         if self.buffer().fold_manager().is_empty() {
             self.clear_fold_markers();
             return;
@@ -317,8 +380,19 @@ impl Editor {
                 }
             }
             Some((start, _)) if line == start && line == prev_line && col != prev_col => {
-                // Horizontal movement on a closed header opens it (`l`, `$`, ...).
-                if !insert_like {
+                // Horizontal movement on a closed header opens it (`l`, `$`,
+                // ...), except while selecting: a Visual selection keeps the
+                // fold closed and covers all of it (`v$d` in Vim).
+                let selecting = matches!(
+                    self.mode(),
+                    crate::mode::Mode::Visual
+                        | crate::mode::Mode::VisualLine
+                        | crate::mode::Mode::VisualBlock
+                );
+                // A key that edited the text (`>>` moves the cursor to the
+                // first non-blank) was no horizontal motion.
+                let edited = self.buffer().version() != prev_version;
+                if !insert_like && !selecting && !edited {
                     self.buffer_mut().fold_manager_mut().open_one(line);
                 }
             }
@@ -421,5 +495,110 @@ impl Editor {
             .closed_fold_at(last_visible)
             .map_or(last_visible, |(_, end)| end);
         end - start + 1
+    }
+
+    /// The closed fold whose header is the cursor line, as `(start, end)`.
+    /// Vim treats characterwise commands there (`x`, `D`, `C`, `s`, `dl`,
+    /// `cl`) as acting on the whole fold.
+    pub(crate) fn closed_fold_at_cursor(&self) -> Option<(usize, usize)> {
+        let line = self.buffer().cursor().line();
+        self.buffer()
+            .fold_manager()
+            .closed_fold_at(line)
+            .filter(|(start, _)| *start == line)
+    }
+
+    /// `count` for a `{op}j`-style command that must cover `count` visible
+    /// lines below the cursor line plus everything a closed fold hides:
+    /// returns the `count` that yields the same line span when applied as
+    /// "cursor line and `count` lines below" (Vim's `dj` over closed folds).
+    pub(crate) fn down_count_over_folds(&self, count: usize) -> usize {
+        let manager = self.buffer().fold_manager();
+        if manager.hidden_ranges().is_empty() {
+            return count;
+        }
+        let start = self.buffer().cursor().line();
+        let max_line = self.buffer().line_count().saturating_sub(1);
+        let last_visible = manager.step_down(start, count, max_line);
+        let end = manager
+            .closed_fold_at(last_visible)
+            .map_or(last_visible, |(_, end)| end);
+        end - start
+    }
+
+    /// `o` / linewise `p` on a closed fold act below the fold's last line.
+    pub(crate) fn cursor_to_closed_fold_end(&mut self) {
+        if let Some((_, end)) = self.closed_fold_at_cursor() {
+            self.buffer_mut()
+                .cursor_mut()
+                .set_position(end, GraphemeCol(0));
+            self.buffer_mut().validate_cursor_position();
+        }
+    }
+
+    /// Extends a selection over closed folds at either end (Vim does this
+    /// when a Visual selection or a motion starts or ends inside one).
+    /// `end_col_past_line` is the column just past the last character.
+    pub(crate) fn extend_selection_over_folds(
+        &self,
+        start: (usize, usize),
+        end: (usize, usize),
+        end_col: impl Fn(usize) -> usize,
+    ) -> ((usize, usize), (usize, usize)) {
+        let manager = self.buffer().fold_manager();
+        let start = match manager.closed_fold_at(start.0) {
+            Some((fold_start, _)) => (fold_start, 0),
+            None => start,
+        };
+        let end = match manager.closed_fold_at(end.0) {
+            Some((_, fold_end)) => (fold_end, end_col(fold_end)),
+            None => end,
+        };
+        (start, end)
+    }
+
+    /// Width of the fold gutter column for the current buffer (0 = hidden).
+    pub fn fold_column_width(&self) -> usize {
+        let options = &self.options;
+        if options.foldcolumn == 0 {
+            return 0;
+        }
+        if !options.foldcolumn_auto {
+            return options.foldcolumn;
+        }
+        let manager = self.buffer().fold_manager();
+        if manager.is_empty() || !manager.is_enabled() {
+            return 0;
+        }
+        manager.deepest_nesting().min(options.foldcolumn)
+    }
+
+    /// The `width` fold gutter cells of `line`, left to right. The innermost
+    /// `width` fold levels are shown (right-aligned), so `foldcolumn=1`
+    /// marks the innermost fold: `-` on its header, `|` inside, `+` when it
+    /// is closed.
+    pub fn fold_gutter_cells(&self, line: usize, width: usize) -> Vec<crate::fold::FoldGutterMark> {
+        use crate::fold::FoldGutterMark;
+        let chain = self.buffer().fold_manager().gutter_chain(line);
+        let shown = &chain[chain.len().saturating_sub(width)..];
+        let mut cells = vec![FoldGutterMark::Blank; width - shown.len().min(width)];
+        cells.extend_from_slice(shown);
+        cells
+    }
+
+    /// Toggles the fold that starts at `line` (a click on its gutter mark).
+    /// Returns false when no fold starts there.
+    pub fn toggle_fold_at_gutter(&mut self, line: usize) -> bool {
+        self.ensure_folds();
+        let manager = self.buffer_mut().fold_manager_mut();
+        // The closed fold that hides the line's body, else the outermost
+        // fold that starts on it.
+        let started = manager.fold_at(line).is_some();
+        if !started {
+            return false;
+        }
+        manager.toggle_fold_at(line);
+        self.after_fold_change();
+        true
     }
 }

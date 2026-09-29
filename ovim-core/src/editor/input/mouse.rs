@@ -326,9 +326,31 @@ fn is_blame_click(editor: &Editor, screen_col: u16, screen_row: u16) -> Option<u
 
 /// Returns the buffer line if the click lands in the sign column (first 2 chars of gutter).
 fn is_sign_column_click(editor: &Editor, screen_col: u16, screen_row: u16) -> Option<usize> {
+    let start = editor.render_cache.last_blame_width + editor.fold_column_width();
+    gutter_segment_click(editor, screen_col, screen_row, start, start + 2)
+}
+
+/// Returns the buffer line if the click lands in the fold marker column.
+fn is_fold_column_click(editor: &Editor, screen_col: u16, screen_row: u16) -> Option<usize> {
+    let start = editor.render_cache.last_blame_width;
+    let width = editor.fold_column_width();
+    if width == 0 {
+        return None;
+    }
+    gutter_segment_click(editor, screen_col, screen_row, start, start + width)
+}
+
+/// The buffer line under a click inside the gutter columns `start..end`
+/// (relative to the buffer area's left edge).
+fn gutter_segment_click(
+    editor: &Editor,
+    screen_col: u16,
+    screen_row: u16,
+    start: usize,
+    end: usize,
+) -> Option<usize> {
     let area = editor.render_cache.last_buffer_area?;
     let gutter_width = editor.render_cache.last_gutter_width;
-    let blame_width = editor.render_cache.last_blame_width;
 
     if gutter_width == 0 {
         return None;
@@ -343,12 +365,7 @@ fn is_sign_column_click(editor: &Editor, screen_col: u16, screen_row: u16) -> Op
     }
 
     let rel_col = (screen_col - area.x) as usize;
-
-    // Sign column starts after blame, spans 2 columns (SIGN_WIDTH)
-    let sign_start = blame_width;
-    let sign_end = blame_width + 2; // SIGN_WIDTH
-
-    if rel_col < sign_start || rel_col >= sign_end {
+    if rel_col < start || rel_col >= end {
         return None;
     }
 
@@ -641,6 +658,13 @@ fn handle_left_click(editor: &mut Editor, col: u16, row: u16) -> Result<Option<S
     if let Some(line) = is_blame_click(editor, col, row) {
         editor.show_blame_diff_at(line);
         return Ok(None);
+    }
+
+    // Fold column click → toggle the fold that starts on that line
+    if let Some(line) = is_fold_column_click(editor, col, row) {
+        if editor.toggle_fold_at_gutter(line) {
+            return Ok(None);
+        }
     }
 
     // Check sign column click → toggle breakpoint

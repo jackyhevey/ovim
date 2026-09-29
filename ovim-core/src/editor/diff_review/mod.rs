@@ -397,7 +397,7 @@ impl Editor {
     }
 
     pub fn diff_review(&self) -> Option<&DiffReviewState> {
-        self.ui_panels.diff_review.as_ref()
+        self.ui_panels.diff_review.as_deref()
     }
 
     pub fn diff_review_overlay_state(&self) -> Option<DiffOverlayViewState> {
@@ -589,7 +589,7 @@ impl Editor {
         self.open_diff_buffer_in_new_tab(&rendered.title, &rendered.text);
         let buffer_id = self.buffer().id();
 
-        self.ui_panels.diff_review = Some(DiffReviewState {
+        self.ui_panels.diff_review = Some(Box::new(DiffReviewState {
             item_rows: Vec::new(),
             checked_items: Default::default(),
             show_checked: false,
@@ -620,7 +620,7 @@ impl Editor {
             file_nav: Vec::new(),
             toolbar: Toolbar::default(),
             text_lines: Vec::new(),
-        });
+        }));
         self.apply_rendered_review(rendered);
 
         let message = self
@@ -695,7 +695,7 @@ impl Editor {
         let origin_tab = self.current_tab_index();
         self.open_diff_buffer_in_new_tab(&rendered.title, &rendered.text);
         let buffer_id = self.buffer().id();
-        self.ui_panels.diff_review = Some(DiffReviewState {
+        self.ui_panels.diff_review = Some(Box::new(DiffReviewState {
             item_rows: Vec::new(),
             checked_items: Default::default(),
             show_checked: false,
@@ -723,7 +723,7 @@ impl Editor {
             text_lines: Vec::new(),
             code_highlights: Vec::new(),
             custom_targets: Vec::new(),
-        });
+        }));
         self.apply_rendered_review(rendered);
         self.mark_dirty();
         Ok(())

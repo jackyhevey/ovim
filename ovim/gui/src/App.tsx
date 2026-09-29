@@ -2645,6 +2645,52 @@ function App() {
                                                         );
                                                     }}
                                                 >
+                                                    <Show when={line.fold}>
+                                                        {(fold) => (
+                                                            <span
+                                                                class={`fold-gutter fold-${fold()}`}
+                                                                title={
+                                                                    fold() ===
+                                                                    "closed"
+                                                                        ? "Unfold"
+                                                                        : fold() ===
+                                                                            "open"
+                                                                          ? "Fold"
+                                                                          : undefined
+                                                                }
+                                                                onMouseDown={(
+                                                                    event,
+                                                                ) => {
+                                                                    // Only a fold header toggles; the
+                                                                    // breakpoint click must not fire.
+                                                                    event.stopPropagation();
+                                                                    if (
+                                                                        fold() ===
+                                                                            "inside" ||
+                                                                        !props
+                                                                            .pane
+                                                                            .focused
+                                                                    )
+                                                                        return;
+                                                                    event.preventDefault();
+                                                                    void mutate(
+                                                                        "gui_toggle_fold",
+                                                                        {
+                                                                            line: line.number,
+                                                                        },
+                                                                    );
+                                                                }}
+                                                            >
+                                                                {fold() ===
+                                                                "closed"
+                                                                    ? "▸"
+                                                                    : fold() ===
+                                                                        "open"
+                                                                      ? "▾"
+                                                                      : ""}
+                                                            </span>
+                                                        )}
+                                                    </Show>
                                                     {line.continuation
                                                         ? ""
                                                         : line.number}
@@ -3353,8 +3399,20 @@ function App() {
                                         class={`debug-row ${row.kind}`}
                                         classList={{
                                             disabled: row.enabled === false,
+                                            selected: Boolean(row.selected),
                                         }}
                                         role="treeitem"
+                                        aria-selected={
+                                            row.kind === "thread"
+                                                ? Boolean(row.selected)
+                                                : undefined
+                                        }
+                                        title={
+                                            row.kind === "thread" &&
+                                            !row.selected
+                                                ? "Show this thread's stack"
+                                                : undefined
+                                        }
                                         aria-expanded={
                                             row.expandable
                                                 ? row.expanded
@@ -3381,11 +3439,15 @@ function App() {
                                                   ? row.enabled
                                                       ? "☑"
                                                       : "☐"
-                                                  : row.expandable
-                                                    ? row.expanded
-                                                        ? "▾"
-                                                        : "▸"
-                                                    : ""}
+                                                  : row.kind === "thread"
+                                                    ? row.selected
+                                                        ? "▶"
+                                                        : ""
+                                                    : row.expandable
+                                                      ? row.expanded
+                                                          ? "▾"
+                                                          : "▸"
+                                                      : ""}
                                         </span>
                                         <b>{row.label}</b>
                                         <Show when={row.value}>

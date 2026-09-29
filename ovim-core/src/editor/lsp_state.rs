@@ -41,6 +41,10 @@ pub struct DocumentSyncState {
     /// guard are both bypassed, because they assume "server text == buffer
     /// text", which is exactly what is broken here. (OV-00324)
     pub force_full_resend: bool,
+    /// The document version the server last received for this buffer (the
+    /// version its `TextDocumentEdit`s will carry). Tracked per buffer so
+    /// edits addressed to a hidden buffer can be checked against it.
+    pub flushed_lsp_version: i32,
 }
 
 impl DocumentSyncState {
@@ -89,6 +93,7 @@ impl DocumentSyncState {
         current_content: Option<&str>,
     ) {
         self.last_flushed_content = Some(flushed_content.clone());
+        self.flushed_lsp_version = flushed_version;
 
         if self
             .target_lsp_version

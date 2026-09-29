@@ -561,6 +561,11 @@ async fn gui_toggle_breakpoint(bridge: State<'_, GuiBridge>, line: usize) -> Res
 }
 
 #[tauri::command]
+async fn gui_toggle_fold(bridge: State<'_, GuiBridge>, line: usize) -> Result<(), String> {
+    bridge.toggle_fold(line).await
+}
+
+#[tauri::command]
 async fn gui_select_debug_frame(bridge: State<'_, GuiBridge>, index: usize) -> Result<(), String> {
     bridge.select_debug_frame(index).await
 }
@@ -673,6 +678,7 @@ pub fn run(file: Option<FileArg>, resume: bool) -> Result<()> {
             gui_select_debug_frame,
             gui_debug_panel_row,
             gui_toggle_breakpoint,
+            gui_toggle_fold,
             gui_window_action,
             gui_open_external,
             super::terminal::gui_terminal_open,

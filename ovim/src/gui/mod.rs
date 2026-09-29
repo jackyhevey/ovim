@@ -428,6 +428,9 @@ pub struct GuiLine {
     pub executing: bool,
     /// Number of lines hidden below this line by a closed fold.
     pub folded: Option<usize>,
+    /// Fold gutter mark of the innermost fold around the line: `open` and
+    /// `closed` on its header, `inside` on the lines below it.
+    pub fold: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -912,6 +915,8 @@ pub struct GuiDebugRow {
     /// Breakpoints and exception filters: switched on.
     pub enabled: Option<bool>,
     pub conditional: bool,
+    /// Thread rows: the thread whose stack and variables are shown.
+    pub selected: bool,
 }
 
 /// The run console: output of builds, runs and debug sessions, kept after
@@ -1146,6 +1151,11 @@ enum GuiRequest {
         reply: oneshot::Sender<Result<(), String>>,
     },
     ToggleBreakpoint {
+        line: usize,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    /// A click on a fold marker in the gutter (`line` is 1-based).
+    ToggleFold {
         line: usize,
         reply: oneshot::Sender<Result<(), String>>,
     },
@@ -1453,6 +1463,12 @@ impl GuiBridge {
     /// A click in the gutter: toggle the breakpoint on `line` (1-based).
     pub async fn toggle_breakpoint(&self, line: usize) -> Result<(), String> {
         self.request(|reply| GuiRequest::ToggleBreakpoint { line, reply })
+            .await
+    }
+
+    /// A click on a fold marker in the gutter: toggle the fold on `line` (1-based).
+    pub async fn toggle_fold(&self, line: usize) -> Result<(), String> {
+        self.request(|reply| GuiRequest::ToggleFold { line, reply })
             .await
     }
 
@@ -2406,6 +2422,15 @@ async fn handle_request(
             };
             (reply, result)
         }
+        GuiRequest::ToggleFold { line, reply } => {
+            let result = if line >= 1 && editor.toggle_fold_at_gutter(line - 1) {
+                refresh_after_input(editor);
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("No fold starts on line {line}"))
+            };
+            (reply, result)
+        }
         GuiRequest::SelectDebugFrame { index, reply } => {
             let result = (index < editor.debug_state().stack_frames.len())
                 .then_some(())
@@ -2663,8 +2688,19 @@ fn project_lines(
                 (attachment.end_line, usize::MAX),
             )
         });
+    // The untouched placeholder of an expanded snippet is drawn as a selection
+    // (typing replaces it), like the terminal does (OV-00469).
+    let placeholder_selection = editor
+        .snippet_placeholder_highlight()
+        .filter(|_| editor.visual_selection().is_none())
+        .map(|(line, start, end)| ((line, start), (line, end.saturating_sub(1).max(start))));
     let selection = focused
-        .then(|| editor.visual_selection().or(attached_selection))
+        .then(|| {
+            editor
+                .visual_selection()
+                .or(attached_selection)
+                .or(placeholder_selection)
+        })
         .flatten();
     let selection_mode = if editor.visual_selection().is_some() {
         editor.mode()
@@ -2917,6 +2953,22 @@ fn project_lines(
                 folded: (!continuation)
                     .then(|| buffer.fold_manager().folded_line_count_at(line_index))
                     .flatten(),
+                fold: (!continuation)
+                    .then(|| {
+                        buffer
+                            .fold_manager()
+                            .gutter_chain(line_index)
+                            .last()
+                            .and_then(|mark| match mark {
+                                ovim_core::fold::FoldGutterMark::OpenStart => Some("open"),
+                                ovim_core::fold::FoldGutterMark::ClosedStart => Some("closed"),
+                                ovim_core::fold::FoldGutterMark::Inside => Some("inside"),
+                                ovim_core::fold::FoldGutterMark::Blank => None,
+                            })
+                            .map(str::to_string)
+                    })
+                    .flatten()
+                    .filter(|_| editor.options.foldcolumn > 0),
             });
             if projected.len() >= visible {
                 break 'lines;
@@ -4130,6 +4182,7 @@ fn gui_debug_rows(editor: &Editor) -> Vec<GuiDebugRow> {
             if in_stack {
                 return None;
             }
+            let mut selected = false;
             let (kind, expandable, expanded, enabled, conditional) = match &row.kind {
                 RowKind::Header => ("header", false, false, None, false),
                 RowKind::Note => ("note", false, false, None, false),
@@ -4148,8 +4201,14 @@ fn gui_debug_rows(editor: &Editor) -> Vec<GuiDebugRow> {
                 RowKind::Exception { enabled, .. } => {
                     ("exception", false, false, Some(*enabled), false)
                 }
-                // Listed as plain rows; switching threads is a TUI action.
-                RowKind::Thread { .. } => ("note", false, false, None, false),
+                // Clicking a thread inspects it, like Enter in the TUI panel.
+                RowKind::Thread {
+                    selected: is_selected,
+                    ..
+                } => {
+                    selected = *is_selected;
+                    ("thread", false, false, None, false)
+                }
             };
             Some(GuiDebugRow {
                 index,
@@ -4162,6 +4221,7 @@ fn gui_debug_rows(editor: &Editor) -> Vec<GuiDebugRow> {
                 expanded,
                 enabled,
                 conditional,
+                selected,
             })
         })
         .take(400)
@@ -4435,6 +4495,134 @@ fn indexed_rgb(index: u8) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OV-00473: the GUI gets one fold mark per line (innermost fold), and a
+    /// click on a header toggles it through the same core command as `za`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn gui_lines_carry_the_fold_gutter_mark() {
+        let mut editor = Editor::with_content("a {\n  b {\n    c\n  }\n}\nd\n");
+        editor
+            .buffer_mut()
+            .set_file_path("/tmp/fold_gui.txt".into());
+        handle_viewport_resize(&mut editor, 100, 30);
+        // Fold commands compute the folds; open everything, close the inner one.
+        editor.fold_command('R');
+        let marks = |editor: &Editor| -> Vec<Option<String>> {
+            snapshot(editor, 1).panes[0]
+                .lines
+                .iter()
+                .map(|line| line.fold.clone())
+                .collect()
+        };
+        let text = |value: &str| Some(value.to_string());
+        assert_eq!(
+            marks(&editor),
+            [
+                text("open"),
+                text("open"),
+                text("inside"),
+                text("inside"),
+                None,
+                None
+            ]
+        );
+        assert!(editor.toggle_fold_at_gutter(1));
+        let closed = snapshot(&editor, 2).panes[0].lines.clone();
+        // The body of the closed fold is not projected; its header says so.
+        assert_eq!(closed[1].fold.as_deref(), Some("closed"));
+        assert_eq!(closed[1].folded, Some(1));
+        assert!(!editor.toggle_fold_at_gutter(5), "no fold starts on `d`");
+    }
+
+    /// OV-00469: the placeholder of an expanded snippet (typing replaces it)
+    /// is highlighted in the GUI like in the terminal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn gui_highlights_the_untouched_snippet_placeholder() {
+        let mut editor = Editor::with_content("ca");
+        editor
+            .buffer_mut()
+            .set_file_path("/tmp/snippet_gui.txt".into());
+        handle_viewport_resize(&mut editor, 100, 30);
+        editor.start_change_building(editor.cursor_position());
+        editor.set_mode(Mode::Insert);
+        editor
+            .buffer_mut()
+            .set_cursor_char_col(0, crate::unicode::CharCol(2));
+        let item = lsp_types::CompletionItem {
+            label: "call".into(),
+            insert_text: Some("call(${1:first}, ${2:second})".into()),
+            insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
+            ..Default::default()
+        };
+        editor
+            .completion_menu_mut()
+            .show(vec![item], 0, "ca".into());
+        editor.accept_completion();
+        assert_eq!(editor.buffer().line_text(0).unwrap(), "call(first, second)");
+
+        let selected = |editor: &Editor| -> String {
+            snapshot(editor, 1).panes[0].lines[0]
+                .segments
+                .iter()
+                .filter(|segment| segment.selected)
+                .map(|segment| segment.text.clone())
+                .collect()
+        };
+        assert_eq!(selected(&editor), "first");
+        // Typing over the placeholder drops the highlight.
+        for ch in "x".chars() {
+            crate::editor::InputHandler::handle_key_event(
+                &mut editor,
+                ovim_core::KeyEvent::new(ovim_core::KeyCode::Char(ch), ovim_core::Modifiers::NONE),
+            )
+            .unwrap();
+        }
+        assert_eq!(selected(&editor), "");
+    }
+
+    /// OV-00477: thread rows are clickable in the GUI debug panel (they were
+    /// plain notes): the row says which thread is shown and activating
+    /// another one switches the panel to its stack, like Enter in the TUI.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn gui_debug_panel_lists_threads_and_switches_between_them() {
+        use ovim_core::dap::types::DapThread;
+        let mut editor = Editor::default();
+        {
+            let state = &mut editor.dap_manager_mut().state;
+            state.panels_visible = true;
+            state.is_running = false;
+            state.stopped_thread = Some(1);
+            state.event_thread = Some(1);
+            state.threads = vec![
+                DapThread {
+                    id: 1,
+                    name: "main".into(),
+                },
+                DapThread {
+                    id: 7,
+                    name: "worker".into(),
+                },
+            ];
+        }
+        let threads = |editor: &Editor| -> Vec<(usize, String, bool)> {
+            gui_debug_rows(editor)
+                .into_iter()
+                .filter(|row| row.kind == "thread")
+                .map(|row| (row.index, row.label, row.selected))
+                .collect()
+        };
+        let rows = threads(&editor);
+        assert_eq!(rows.len(), 2, "{rows:?}");
+        assert_eq!(rows[0].1, "main (1)");
+        assert!(rows[0].2 && !rows[1].2, "main is the shown thread");
+
+        // The same request the click sends.
+        editor.dap_manager_mut().state.panel.cursor = rows[1].0;
+        editor.debug_panel_activate();
+        let rows = threads(&editor);
+        assert!(!rows[0].2 && rows[1].2, "the worker is shown now: {rows:?}");
+        assert_eq!(editor.debug_state().stopped_thread, Some(7));
+    }
 
     #[test]
     fn gui_diff_geometry_tracks_the_focused_pane_width() {

@@ -514,6 +514,22 @@ fn request_signature_help_after_key(editor: &mut Editor, key_event: &KeyEvent, w
         | KeyCode::Enter => was_active,
         _ => false,
     };
+    // Moving the cursor into an unfinished call (or jumping between the
+    // placeholders of an expanded method snippet) brings the popup back.
+    if !retrigger
+        && matches!(
+            key_event.code,
+            KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Tab
+                | KeyCode::BackTab
+        )
+    {
+        editor.request_signature_help_if_in_call();
+        return;
+    }
     if retrigger {
         editor.request_signature_help();
     }
@@ -576,6 +592,69 @@ mod tests {
         type_key(&mut editor, KeyCode::Esc);
         assert!(editor.signature_help().is_none(), "Esc dismisses the popup");
         assert!(!editor.lsp.intents.signature_help);
+    }
+
+    /// OV-00474: moving the cursor (Left/Right/Up/Down/Tab) into the argument
+    /// list of an unfinished call shows the popup again, like VS Code; moving
+    /// out of it, or into a plain condition, does not.
+    #[test]
+    fn moving_back_into_an_unfinished_call_shows_signature_help() {
+        let mut editor = Editor::with_content("run(a, b)");
+        editor.start_change_building(editor.cursor_position());
+        editor.set_mode(Mode::Insert);
+        editor
+            .buffer_mut()
+            .set_cursor_char_col(0, crate::unicode::CharCol(9));
+
+        // After the `)`: not inside the call.
+        type_key(&mut editor, KeyCode::Right);
+        assert!(!editor.lsp.intents.signature_help);
+        // One step left is between `b` and `)`: inside the argument list.
+        type_key(&mut editor, KeyCode::Left);
+        assert!(editor.lsp.intents.signature_help, "Left into the call");
+        editor.lsp.intents.signature_help = false;
+        // Leaving the call again (Right, after the `)`) asks nothing new.
+        type_key(&mut editor, KeyCode::Right);
+        assert!(!editor.lsp.intents.signature_help);
+
+        // A condition is not a call.
+        let mut editor = Editor::with_content("if (a > b) {");
+        editor.start_change_building(editor.cursor_position());
+        editor.set_mode(Mode::Insert);
+        editor
+            .buffer_mut()
+            .set_cursor_char_col(0, crate::unicode::CharCol(9));
+        type_key(&mut editor, KeyCode::Left);
+        assert!(!editor.lsp.intents.signature_help);
+    }
+
+    #[test]
+    fn signature_help_scan_follows_call_syntax() {
+        use crate::editor::lsp_integration::lsp_modules::signature_help::text_ends_inside_call;
+        for inside in [
+            "foo(",
+            "foo(a, ",
+            "obj.method(1, bar(2), ",
+            "new Foo<>(x, (y + ",
+            "call (a,\n    b, ",
+            "f(g(1)(",
+            "list.<String>of(",
+            "{ foo(",
+        ] {
+            assert!(text_ends_inside_call(inside), "{inside:?}");
+        }
+        for outside in [
+            "foo(a)",
+            "foo(a); bar",
+            "if (a > ",
+            "while (x",
+            "= (a + b",
+            "foo(a) {",
+            "x = 1;",
+            "",
+        ] {
+            assert!(!text_ends_inside_call(outside), "{outside:?}");
+        }
     }
 
     #[test]

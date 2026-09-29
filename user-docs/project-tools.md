@@ -108,7 +108,10 @@ item you chose before the typed character is inserted.
 
 Snippet completions (`foo(${1:arg})$0`) expand in place: the first tab stop is
 selected, typing replaces its placeholder, `Tab` / `Shift-Tab` jump between tab
-stops, and `Esc` leaves the snippet together with insert mode.
+stops, and `Esc` leaves the snippet together with insert mode. A choice stop
+(`${1|public,private|}`) opens a small chooser over the inserted first choice:
+`Up`/`Down` move, `Enter` or `Tab` picks, typing narrows it or overwrites the
+placeholder.
 
 ```vim
 :set noautocomplete        " only open the menu with Ctrl-Space
@@ -120,14 +123,29 @@ stops, and `Esc` leaves the snippet together with insert mode.
 
 Typing `(` or `,` in a call shows the signature above the line with the active
 parameter highlighted and an `(n/m)` marker when there are overloads; every edit
-or cursor move keeps it in sync, `Esc` or leaving the call dismisses it.
+or cursor move keeps it in sync, `Esc` or leaving the call dismisses it. Moving
+the cursor back into an unfinished call (arrows, `Tab`) and accepting a method
+completion bring it back.
 
 Folds use Vim's commands: `zc`/`zo`/`za` (one level), `zC`/`zO`/`zA`
-(recursive), `zR`/`zM` (all), `zv`, `zn`/`zN`/`zi`, `zd`/`zD`/`zE`, `zj`/`zk`,
-and `zf{motion}` for manual folds. Automatic folds come from the language
-server (`foldingRange`) with an indentation fallback, and are computed the first
-time you use a fold command in a buffer. A closed fold is one line: `j`/`k`
-step over it, `dd`/`yy` take all of it, and the header shows `⋯ N lines`.
+(recursive), `zR`/`zM` (all, and the fold level), `zr`/`zm` (one level less or
+more folded), `zx`/`zX` (re-apply the level), `zv`, `zn`/`zN`/`zi`,
+`zd`/`zD`/`zE`, `zj`/`zk`, `[z`/`]z` (start/end of the open fold) and
+`zf{motion}` for manual folds. Automatic folds come from the language server
+(`foldingRange`), else from the syntax tree (tree-sitter), else from
+indentation. A closed fold is one line: `j`/`k` step over it, and `dd`, `yy`,
+`>>`, `cc`, `x`, `D`, `p`, `o` and Visual selections that reach into it act on
+all of it, as in Vim. The header shows `⋯ N lines`.
+
+The fold column in the gutter (`:set foldcolumn=auto:1`, the default; `0` hides
+it, `N` fixes the width) marks fold headers with `-` (open) or `+` (closed) and
+the lines inside with `|`; click a mark to toggle the fold. It appears once a
+buffer has folds.
+
+Sources that only a package manager or the language server owns (JDK and
+dependency sources, a class-file stub, `~/.cargo/registry`, `~/.gradle/caches`,
+`~/.m2`) open with `modifiable` off: edits are refused with `E21` and `:w` fails;
+`:set modifiable` overrides it.
 
 `Ctrl-O` / `Ctrl-I` (Tab) walk the jump list across files, including jumps made
 with `gd`, `gi` and `gr`. In the rename prompt and the `:` and `/` prompts

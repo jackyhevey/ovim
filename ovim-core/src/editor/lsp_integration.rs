@@ -478,7 +478,75 @@ impl Editor {
             changed |= self.handle_goto_slot_result(result, "Type", "LSP-TYPE");
         }
 
+        if let Some(result) = self.lsp.slots.virtual_document.poll_with_timeout(timeout) {
+            changed |= self.open_virtual_document_result(result);
+        }
+
         changed
+    }
+
+    /// A definition in a document with no `file:` location: fetch its text
+    /// from the server (`workspace/textDocumentContent`) and show it in a
+    /// read-only buffer (OV-00470).
+    fn request_virtual_document(&mut self, location: lsp_types::Location) -> bool {
+        let uri_text = location.uri.as_str().to_string();
+        let language_id = self
+            .buffer()
+            .file_path()
+            .and_then(|path| self.language_id_for_path(path));
+        let (Some(lsp), Some(language_id)) = (self.lsp.state.lsp_manager.clone(), language_id)
+        else {
+            self.set_lsp_status(format!("Cannot open {uri_text}: no language server"));
+            return false;
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let uri = location.uri.clone();
+        let range = location.range;
+        let task = tokio::spawn(async move {
+            let result = lsp.text_document_content(&uri, &language_id).await;
+            let _ = tx.send(
+                result.map(|text| crate::editor::lsp_slot::VirtualDocumentResult {
+                    uri,
+                    text,
+                    range,
+                }),
+            );
+        });
+        self.lsp.slots.virtual_document.fire(task, rx);
+        self.set_lsp_status(format!("Fetching {uri_text}..."));
+        false
+    }
+
+    fn open_virtual_document_result(
+        &mut self,
+        result: anyhow::Result<crate::editor::lsp_slot::VirtualDocumentResult>,
+    ) -> bool {
+        let document = match result {
+            Ok(document) => document,
+            Err(error) => {
+                self.set_lsp_status(format!("Cannot open document: {error}"));
+                return false;
+            }
+        };
+        let title = document
+            .uri
+            .as_str()
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("document")
+            .to_string();
+        self.open_scratch_buffer(&title, &document.text);
+        self.buffer_mut().set_modifiable(false);
+        let line = document.range.start.line as usize;
+        let col = self.utf16_to_grapheme_col(line, document.range.start.character);
+        self.buffer_mut()
+            .cursor_mut()
+            .set_position(line, crate::unicode::GraphemeCol(col));
+        self.buffer_mut().validate_cursor_position();
+        self.center_cursor_in_viewport();
+        self.set_lsp_status(format!("{title}: {}", document.uri.as_str()));
+        true
     }
 
     /// Apply the result from a goto slot — shared logic for definition,
@@ -515,6 +583,13 @@ impl Editor {
                 crate::lsp_debug!(log_tag, "Received {} response", label.to_lowercase());
 
                 let Some(path) = crate::lsp::uri_to_file_path(&location.uri) else {
+                    if location
+                        .uri
+                        .scheme()
+                        .is_some_and(|scheme| scheme.as_str() != "file")
+                    {
+                        return self.request_virtual_document(location);
+                    }
                     self.set_lsp_status("Invalid file path in LSP response".to_string());
                     return false;
                 };
@@ -1905,7 +1980,18 @@ impl Editor {
         for index in 0..self.buffers.len() {
             let is_current = index == self.current_buffer_index;
             if !is_current && !self.buffer_is_open_in_ui(index) {
-                continue;
+                // A hidden buffer the server already has open (its text was
+                // changed by a workspace edit, an autoread...) must not leave
+                // the server with a stale copy: later versioned edits are
+                // checked against what the server last received (OV-00475).
+                // Never `didOpen` a hidden buffer here.
+                let opened_on_server = self.buffers[index]
+                    .file_path()
+                    .and_then(|path| self.lsp.state.document_sync.get(path))
+                    .is_some_and(|state| state.did_open_sent);
+                if !opened_on_server {
+                    continue;
+                }
             }
             let buffer = &self.buffers[index];
             if super::buffer_manager::is_scratch_buffer(buffer) {
@@ -2826,6 +2912,37 @@ mod tests {
         );
     }
 
+    /// OV-00470: a definition whose URI is not `file:` (a server's own
+    /// scheme) is fetched from the server and shown read-only and
+    /// unmodifiable, never opened as an editable file.
+    #[tokio::test(flavor = "current_thread")]
+    async fn virtual_document_opens_unmodifiable_at_the_definition() {
+        let mut editor = Editor::with_content("class Caller {}\n");
+        let document = crate::editor::lsp_slot::VirtualDocumentResult {
+            uri: "jdt://contents/java.base/java.util/ArrayList.class"
+                .parse()
+                .unwrap(),
+            text: "package java.util;\npublic class ArrayList {\n}\n".into(),
+            range: lsp_types::Range {
+                start: lsp_types::Position::new(1, 13),
+                end: lsp_types::Position::new(1, 22),
+            },
+        };
+        assert!(editor.open_virtual_document_result(Ok(document)));
+        assert!(editor.buffer().is_read_only());
+        assert!(!editor.buffer().is_modifiable());
+        assert_eq!(editor.buffer().cursor().line(), 1);
+        assert!(editor.buffer().rope().to_string().contains("ArrayList"));
+        let before = editor.buffer().rope().to_string();
+        for ch in "ixdd".chars() {
+            let _ = crate::editor::InputHandler::handle_key_event(
+                &mut editor,
+                crate::KeyEvent::new(crate::KeyCode::Char(ch), crate::Modifiers::NONE),
+            );
+        }
+        assert_eq!(editor.buffer().rope().to_string(), before);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn poll_pending_inlay_hint_response_drops_stale_buffer_result() {
         // OV-00258: when the buffer version has advanced since the LSP
@@ -3198,6 +3315,54 @@ mod tests {
             editor.buffer().rope().to_string(),
             "self.foo_bar()\n",
             "stale textEdit range must not leave orphaned typed characters"
+        );
+    }
+
+    /// OV-00474: accepting a method completion whose snippet leaves the cursor
+    /// inside `name(|)` brings the parameter popup up at once; a completion
+    /// that ends after its `)` does not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn accepting_a_method_snippet_requests_signature_help() {
+        let mut editor = Editor::with_content("list.ad");
+        editor.set_file_path("/tmp/a.java".to_string());
+        editor.set_mode(crate::mode::Mode::Insert);
+        editor
+            .buffer_mut()
+            .set_cursor_char_col(0, crate::unicode::CharCol(7));
+        let method = CompletionItem {
+            label: "add(E e)".to_string(),
+            insert_text: Some("add(${1:e})".to_string()),
+            insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
+            ..Default::default()
+        };
+        editor
+            .completion_menu_mut()
+            .show(vec![method], 5, "ad".to_string());
+        editor.accept_completion();
+        assert_eq!(editor.buffer().rope().to_string(), "list.add(e)\n");
+        assert!(
+            editor.lsp.intents.signature_help,
+            "cursor is inside add(...)"
+        );
+
+        let mut editor = Editor::with_content("list.si");
+        editor.set_file_path("/tmp/a.java".to_string());
+        editor.set_mode(crate::mode::Mode::Insert);
+        editor
+            .buffer_mut()
+            .set_cursor_char_col(0, crate::unicode::CharCol(7));
+        let finished = CompletionItem {
+            label: "size()".to_string(),
+            insert_text: Some("size()".to_string()),
+            ..Default::default()
+        };
+        editor
+            .completion_menu_mut()
+            .show(vec![finished], 5, "si".to_string());
+        editor.accept_completion();
+        assert!(
+            !editor.lsp.intents.signature_help,
+            "the cursor is after `size()`, not inside a call"
         );
     }
 }

@@ -339,16 +339,19 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // Case change operations
         // =====================================================================
         (Operator::Lowercase, KeyCode::Char('u')) => {
+            let count = editor.linewise_count_over_folds(count);
             case::change_case_line(editor, count, case::CaseChange::Lowercase)?;
             editor.clear_count();
             true
         }
         (Operator::Uppercase, KeyCode::Char('U')) => {
+            let count = editor.linewise_count_over_folds(count);
             case::change_case_line(editor, count, case::CaseChange::Uppercase)?;
             editor.clear_count();
             true
         }
         (Operator::ToggleCase, KeyCode::Char('~')) => {
+            let count = editor.linewise_count_over_folds(count);
             case::change_case_line(editor, count, case::CaseChange::Toggle)?;
             editor.clear_count();
             true
@@ -495,6 +498,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // Indent operations
         // =====================================================================
         (Operator::Indent, KeyCode::Char('>')) => {
+            let count = editor.linewise_count_over_folds(count);
             let cursor = editor.buffer().cursor();
             let cursor_before = CursorPos::new(cursor.line(), cursor.col());
             let start_line = cursor.line();
@@ -504,6 +508,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             true
         }
         (Operator::Indent, KeyCode::Char('j')) | (Operator::Indent, KeyCode::Down) => {
+            let count = editor.down_count_over_folds(count);
             let cursor = editor.buffer().cursor();
             let cursor_before = CursorPos::new(cursor.line(), cursor.col());
             let start_line = cursor.line();
@@ -527,6 +532,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // Auto-indent operations
         // =====================================================================
         (Operator::AutoIndent, KeyCode::Char('=')) => {
+            let count = editor.linewise_count_over_folds(count);
             let cursor = editor.buffer().cursor();
             let start_line = cursor.line();
             let end_line = start_line + count;
@@ -536,6 +542,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             true
         }
         (Operator::AutoIndent, KeyCode::Char('j')) | (Operator::AutoIndent, KeyCode::Down) => {
+            let count = editor.down_count_over_folds(count);
             let cursor = editor.buffer().cursor();
             let start_line = cursor.line();
             let end_line = start_line + count + 1;
@@ -559,6 +566,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // Dedent operations
         // =====================================================================
         (Operator::Dedent, KeyCode::Char('<')) => {
+            let count = editor.linewise_count_over_folds(count);
             let cursor = editor.buffer().cursor();
             let cursor_before = CursorPos::new(cursor.line(), cursor.col());
             let start_line = cursor.line();
@@ -568,6 +576,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             true
         }
         (Operator::Dedent, KeyCode::Char('j')) | (Operator::Dedent, KeyCode::Down) => {
+            let count = editor.down_count_over_folds(count);
             let cursor = editor.buffer().cursor();
             let cursor_before = CursorPos::new(cursor.line(), cursor.col());
             let start_line = cursor.line();
@@ -851,6 +860,11 @@ fn handle_dd(editor: &mut Editor, count: usize) -> Result<()> {
 }
 
 fn handle_dl(editor: &mut Editor, count: usize) -> Result<()> {
+    if editor.closed_fold_at_cursor().is_some() {
+        // Vim: a characterwise motion on a closed fold covers the fold.
+        let lines = editor.linewise_count_over_folds(1);
+        return handle_dd(editor, lines);
+    }
     let deleted = editor.record_operation(
         |buf| buf.delete_chars_forward(count),
         Some(RepeatAction::DeleteCharForward { count }),
@@ -875,6 +889,10 @@ fn handle_dw(editor: &mut Editor, count: usize) -> Result<()> {
 }
 
 fn handle_d_dollar(editor: &mut Editor) -> Result<()> {
+    if editor.closed_fold_at_cursor().is_some() {
+        let lines = editor.linewise_count_over_folds(1);
+        return handle_dd(editor, lines);
+    }
     let deleted = editor.record_operation(
         |buf| buf.delete_to_end_of_line(),
         Some(RepeatAction::DeleteToEndOfLine),
@@ -887,6 +905,7 @@ fn handle_d_dollar(editor: &mut Editor) -> Result<()> {
 }
 
 fn handle_dj(editor: &mut Editor, count: usize) -> Result<()> {
+    let count = editor.down_count_over_folds(count);
     let deleted = editor.record_operation(
         |buf| buf.delete_line_down(count),
         Some(RepeatAction::DeleteLineDown { count }),
@@ -956,6 +975,7 @@ fn handle_d_percent(editor: &mut Editor) -> Result<()> {
 }
 
 fn handle_yj(editor: &mut Editor, count: usize) -> Result<()> {
+    let count = editor.down_count_over_folds(count);
     let start_line = editor.buffer().cursor().line();
     let end_line = (start_line + count + 1).min(editor.buffer().line_count());
 
@@ -1162,6 +1182,7 @@ pub(super) fn change_lines(
 }
 
 fn handle_cc(editor: &mut Editor, count: usize) -> Result<()> {
+    let count = editor.linewise_count_over_folds(count);
     let start = editor.buffer().cursor().line();
     let end = (start + count).min(editor.buffer().line_count());
     change_lines(editor, start, end, RepeatAction::DeleteLines { count })
@@ -1180,12 +1201,16 @@ fn handle_c_dollar(editor: &mut Editor) -> Result<()> {
 }
 
 fn handle_cl(editor: &mut Editor, count: usize) -> Result<()> {
+    if editor.closed_fold_at_cursor().is_some() {
+        return handle_cc(editor, 1);
+    }
     change_with(editor, RepeatAction::DeleteCharForward { count }, |buf| {
         buf.change_chars_forward(count)
     })
 }
 
 fn handle_cj(editor: &mut Editor, count: usize) -> Result<()> {
+    let count = editor.down_count_over_folds(count);
     let start = editor.buffer().cursor().line();
     let end = (start + count + 1).min(editor.buffer().line_count());
     change_lines(editor, start, end, RepeatAction::DeleteLineDown { count })

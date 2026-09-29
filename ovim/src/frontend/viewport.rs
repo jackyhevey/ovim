@@ -111,10 +111,15 @@ pub fn compute_text_width(editor: &Editor, content_width: u16) -> usize {
         0
     };
 
+    let fold_width = if split_review {
+        0
+    } else {
+        editor.fold_column_width()
+    };
     let gutter_width = if split_review {
         0
     } else {
-        blame_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING
+        blame_width + fold_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING
     };
 
     // Apply textwidth narrowing (OV-00019: must match renderer's BufferLayout

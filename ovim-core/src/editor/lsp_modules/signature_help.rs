@@ -119,7 +119,101 @@ fn parameter_char_range(
     }
 }
 
+/// Words that put a `(` in front of a condition, not an argument list.
+const NON_CALL_KEYWORDS: &[&str] = &[
+    "if",
+    "for",
+    "while",
+    "switch",
+    "catch",
+    "synchronized",
+    "return",
+    "else",
+    "match",
+    "with",
+    "await",
+    "in",
+    "and",
+    "or",
+    "not",
+    "using",
+    "lock",
+    "foreach",
+    "when",
+];
+
+/// Whether `before_cursor` (the text up to the cursor, possibly several lines)
+/// ends inside the argument list of a call: an unclosed `(` whose left
+/// neighbour is an identifier, `>` (generic call) or `]`. Balanced groups are
+/// skipped; a `;` or brace at nesting level 0 means the statement ended.
+pub(crate) fn text_ends_inside_call(before_cursor: &str) -> bool {
+    let chars: Vec<char> = before_cursor.chars().collect();
+    let mut depth = 0usize;
+    let mut index = chars.len();
+    while index > 0 {
+        index -= 1;
+        match chars[index] {
+            ')' => depth += 1,
+            '(' if depth > 0 => depth -= 1,
+            '(' => {
+                let mut left = index;
+                while left > 0 && chars[left - 1].is_whitespace() {
+                    left -= 1;
+                }
+                let is_call = match left.checked_sub(1).map(|i| chars[i]) {
+                    Some(c) if c.is_alphanumeric() || c == '_' || c == '$' => {
+                        let word: String = chars[..left]
+                            .iter()
+                            .rev()
+                            .take_while(|c| c.is_alphanumeric() || **c == '_' || **c == '$')
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .collect();
+                        !NON_CALL_KEYWORDS.contains(&word.as_str())
+                    }
+                    Some('>') | Some(']') => true,
+                    _ => false,
+                };
+                if is_call {
+                    return true;
+                }
+                // A grouping paren: an enclosing call may still be open.
+            }
+            ';' | '{' | '}' if depth == 0 => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 impl Editor {
+    /// Whether the cursor sits inside the argument list of an unfinished call
+    /// (looks back over at most 20 lines).
+    pub(crate) fn cursor_in_unfinished_call(&self) -> bool {
+        let cursor = self.buffer().cursor();
+        let line = cursor.line();
+        let first = line.saturating_sub(20);
+        let rope = self.buffer().rope();
+        let start = rope.line_to_char(first);
+        let end = rope.line_to_char(line) + self.buffer().cursor_char_col().0;
+        text_ends_inside_call(&rope.slice(start..end.max(start)).to_string())
+    }
+
+    /// Insert mode: shows the signature popup when the cursor is (back) inside
+    /// an unfinished call, like VS Code after moving into the arguments or
+    /// accepting a method completion. Does nothing while the popup is already
+    /// open (edits re-ask on their own).
+    pub(crate) fn request_signature_help_if_in_call(&mut self) {
+        if self.mode() != crate::mode::Mode::Insert
+            || self.signature_help_active()
+            || !self.cursor_in_unfinished_call()
+        {
+            return;
+        }
+        self.request_signature_help();
+    }
+
     /// Ask the server for signature help at the cursor.
     pub fn request_signature_help(&mut self) {
         self.lsp.intents.signature_help = true;

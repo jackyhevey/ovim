@@ -37,6 +37,9 @@ pub struct BufferLayout {
     pub line_num_width: usize,
     /// Width of the blame column (0 when blame is off).
     pub blame_width: usize,
+    /// Width of the fold marker column (0 when hidden), between the blame
+    /// column and the sign column.
+    pub fold_width: usize,
     pub scrollbar_area: Option<Rect>,
 }
 
@@ -85,11 +88,17 @@ impl BufferLayout {
             0
         };
 
+        let fold_width = if split_review {
+            0
+        } else {
+            editor.fold_column_width()
+        };
+
         // Sign column is always present (git signs, diagnostics).
         let gutter_width = if split_review {
             0
         } else {
-            blame_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING
+            blame_width + fold_width + SIGN_WIDTH + line_num_width + GUTTER_SPACING
         };
         let text_width = (area.width as usize).saturating_sub(gutter_width);
 
@@ -100,6 +109,7 @@ impl BufferLayout {
             text_width,
             line_num_width,
             blame_width,
+            fold_width,
             scrollbar_area,
         }
     }

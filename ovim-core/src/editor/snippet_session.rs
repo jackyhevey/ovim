@@ -14,7 +14,7 @@ struct Stop {
     index: u32,
     /// Absolute char ranges in the buffer; the first is the primary.
     ranges: Vec<(usize, usize)>,
-    #[allow(dead_code)]
+    /// `${1|a,b,c|}` choices; the first is inserted, the chooser offers all.
     choices: Vec<String>,
 }
 
@@ -121,6 +121,56 @@ impl Editor {
     /// Whether tab stops of an expanded snippet are being navigated.
     pub fn snippet_active(&self) -> bool {
         self.editing.snippet.is_some()
+    }
+
+    /// Opens the chooser (the completion popup) when the current stop is a
+    /// `${1|a,b,c|}` choice stop. Enter/Tab accepts the highlighted choice
+    /// over the placeholder, typing filters, Esc leaves the first choice.
+    pub(crate) fn snippet_show_choices(&mut self) {
+        let Some(session) = self.editing.snippet.as_ref() else {
+            return;
+        };
+        let stop = &session.stops[session.current];
+        if stop.choices.len() < 2 || !session.select_pending {
+            return;
+        }
+        let (start, _) = stop.ranges[0];
+        let choices = stop.choices.clone();
+        let rope = self.buffer().rope();
+        let line = rope.char_to_line(start.min(rope.len_chars()));
+        let col = start - rope.line_to_char(line);
+        let version = self.buffer().version();
+        self.completion_menu
+            .show_snippet_choices(&choices, col, version);
+    }
+
+    /// Enter/Tab in the chooser: the highlighted choice replaces the
+    /// placeholder text; the stop stays current (the next Tab moves on).
+    pub(crate) fn accept_snippet_choice(&mut self) {
+        let Some(choice) = self
+            .completion_menu
+            .selected_item()
+            .map(|item| item.label.clone())
+        else {
+            return;
+        };
+        let Some(session) = self.editing.snippet.as_mut() else {
+            return;
+        };
+        let (start, end) = session.current_range();
+        let new_len = choice.chars().count();
+        let current = session.current;
+        session.resize(current, 0, new_len);
+        session.select_pending = false;
+        session.doc_len = (session.doc_len + new_len).saturating_sub(end - start);
+        self.apply_offset_edits_as_one_undo(
+            vec![PlannedEdit {
+                start,
+                end,
+                text: choice,
+            }],
+            start + new_len,
+        );
     }
 
     /// Ends tab-stop navigation (Esc, cursor left the stop, last stop reached).
@@ -247,6 +297,7 @@ impl Editor {
         };
         self.buffer_mut()
             .set_cursor_char_col(line, crate::unicode::CharCol(col));
+        self.snippet_show_choices();
         true
     }
 

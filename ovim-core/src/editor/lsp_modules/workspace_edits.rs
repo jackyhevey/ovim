@@ -254,27 +254,28 @@ impl Editor {
     /// OV-00330 (version-guard leg): returns false when a versioned document
     /// edit no longer matches our view of the document.
     ///
-    /// Only the current file's LSP document version is tracked synchronously
-    /// on the editor side (`lsp.state.current_file_lsp_version`, refreshed on
-    /// each sync tick). `LspManager::get_document_version` is async and this
-    /// apply path is sync, so for OTHER files the edit is accepted unchecked
-    /// rather than blocking the editor thread — the current file is where
-    /// staleness bites (the user typing while a slow rename resolves).
+    /// The current file's LSP document version is tracked synchronously on the
+    /// editor side (`lsp.state.current_file_lsp_version`, refreshed on each
+    /// sync tick). Every other open buffer carries its own last-flushed
+    /// version and content in `lsp.state.document_sync`, so an edit addressed
+    /// to a hidden buffer is checked the same way (OV-00475): it must carry the
+    /// version the server last received AND the buffer must still hold exactly
+    /// the text the server saw. A hidden buffer nobody synced is compared with
+    /// the disk instead: unsaved edits mean the server never saw the text the
+    /// edit was computed for.
     fn workspace_edit_version_current(&self, uri: &lsp_types::Uri, version: i32) -> bool {
         let Some(edit_path) = uri_to_file_path(uri) else {
             return true;
         };
-        let Some(current_path) = self.buffer().file_path() else {
+        let Some(edit_path_text) = edit_path.to_str() else {
             return true;
         };
-        let current_path = std::path::Path::new(current_path);
-        let is_current_file = current_path == edit_path
-            || match (current_path.canonicalize(), edit_path.canonicalize()) {
-                (Ok(current), Ok(edit)) => current == edit,
-                _ => false,
-            };
-        if !is_current_file {
+        let Some(index) = self.find_buffer_by_path(edit_path_text) else {
+            // Not open in the editor: the edit is applied to what is on disk.
             return true;
+        };
+        if index != self.current_buffer_index {
+            return self.hidden_buffer_edit_version_current(index, version);
         }
         // A local edit marks sync dirty BEFORE the version counter advances
         // (the bump happens on the next sync tick), and server workspace
@@ -293,6 +294,34 @@ impl Editor {
             return true;
         }
         version == known_version
+    }
+
+    /// The version check for a buffer that is open but not the current one.
+    fn hidden_buffer_edit_version_current(&self, index: usize, version: i32) -> bool {
+        let Some(buffer) = self.buffers.get(index) else {
+            return true;
+        };
+        let state = buffer
+            .file_path()
+            .and_then(|path| self.lsp.state.document_sync.get(path));
+        // A pending full resend means the buffer's text changed behind the
+        // server's back (reload from disk): whatever version it holds is stale.
+        if state.is_some_and(|state| state.force_full_resend) {
+            return false;
+        }
+        match state.and_then(|state| state.flushed_content().map(|text| (state, text))) {
+            Some((state, flushed)) => {
+                // The server's copy must be the buffer's text...
+                if buffer.rope() != flushed {
+                    return false;
+                }
+                // ...at the version the edit was computed for.
+                state.flushed_lsp_version <= 0 || state.flushed_lsp_version == version
+            }
+            // The server was never told about this buffer's text: it can only
+            // have read the file, so unsaved changes make the edit stale.
+            None => !buffer.is_modified(),
+        }
     }
 
     /// Track a modified file by URI into the list.
@@ -818,6 +847,87 @@ mod tests {
         assert!(
             editor.lsp_status().contains("discarded: document changed"),
             "status must explain the discard, got: {:?}",
+            editor.lsp_status()
+        );
+    }
+
+    /// OV-00475: a versioned edit to a HIDDEN buffer was applied unchecked. The
+    /// hidden buffer's synced version and text are tracked per document now:
+    /// a version mismatch, or a buffer that changed since the server saw it,
+    /// discards the edit; a matching one still applies.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn versioned_edit_to_a_hidden_buffer_is_checked_against_its_own_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hidden = dir.path().join("hidden.rs");
+        let opened = dir.path().join("opened.rs");
+        fs::write(&hidden, "fn helper() {}\n").unwrap();
+        fs::write(&opened, "fn main() {}\n").unwrap();
+
+        let mut editor = Editor::default();
+        editor.open_file(&hidden).unwrap();
+        editor.open_file(&opened).unwrap(); // `hidden` is switched away
+        let hidden_path = editor
+            .buffers
+            .iter()
+            .find_map(|b| b.file_path().filter(|p| p.ends_with("hidden.rs")))
+            .unwrap()
+            .to_string();
+        // The server last received version 4 with exactly this text.
+        let sync = editor
+            .lsp
+            .state
+            .document_sync
+            .entry(hidden_path.clone())
+            .or_default();
+        sync.did_open_sent = true;
+        sync.mark_change_flushed(std::sync::Arc::from("fn helper() {}\n"), 4, None);
+
+        // Wrong version: stale.
+        let stale = versioned_edit(file_uri(&hidden), Some(3), vec![replace_edit(3, 9, "old")]);
+        assert!(!editor.apply_workspace_edit(stale).unwrap());
+        assert!(!editor.any_buffer_modified(), "a stale edit must not land");
+        assert!(
+            editor.lsp_status().contains("discarded"),
+            "{:?}",
+            editor.lsp_status()
+        );
+
+        // Matching version and text: applied (kept in memory, not written).
+        let fresh = versioned_edit(file_uri(&hidden), Some(4), vec![replace_edit(3, 9, "new")]);
+        assert!(editor.apply_workspace_edit(fresh).unwrap());
+        assert!(editor.any_buffer_modified());
+        assert_eq!(fs::read_to_string(&hidden).unwrap(), "fn helper() {}\n");
+
+        // The buffer now differs from what the server saw (version 4): the
+        // next versioned edit, even with the same number, is stale.
+        let again = versioned_edit(file_uri(&hidden), Some(4), vec![replace_edit(3, 6, "x")]);
+        assert!(!editor.apply_workspace_edit(again).unwrap());
+        // Unversioned edits keep working.
+        let plain = changes_edit(file_uri(&hidden), vec![replace_edit(3, 6, "y")]);
+        assert!(editor.apply_workspace_edit(plain).unwrap());
+    }
+
+    /// OV-00475: a hidden buffer the server never saw, with unsaved edits, is
+    /// stale for any versioned edit; a clean one accepts it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn versioned_edit_to_an_unsynced_dirty_hidden_buffer_is_discarded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hidden = dir.path().join("hidden.rs");
+        let opened = dir.path().join("opened.rs");
+        fs::write(&hidden, "fn helper() {}\n").unwrap();
+        fs::write(&opened, "fn main() {}\n").unwrap();
+        let mut editor = Editor::default();
+        editor.open_file(&hidden).unwrap();
+        editor
+            .buffer_mut()
+            .insert_text_at(0, crate::unicode::CharCol(0), "// unsaved\n");
+        editor.open_file(&opened).unwrap();
+
+        let edit = versioned_edit(file_uri(&hidden), Some(2), vec![replace_edit(3, 9, "x")]);
+        assert!(!editor.apply_workspace_edit(edit).unwrap());
+        assert!(
+            editor.lsp_status().contains("discarded"),
+            "{:?}",
             editor.lsp_status()
         );
     }

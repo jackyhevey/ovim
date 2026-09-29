@@ -542,6 +542,13 @@ pub struct FoldingRangesResult {
     pub buffer_version: usize,
 }
 
+/// Text of a document the server addresses with a non-`file:` URI.
+pub struct VirtualDocumentResult {
+    pub uri: lsp_types::Uri,
+    pub text: String,
+    pub range: lsp_types::Range,
+}
+
 /// Result of a signature help request.
 pub struct SignatureHelpResult {
     pub help: Option<lsp_types::SignatureHelp>,
@@ -688,6 +695,7 @@ pub struct LspSlots {
     pub goto_type_definition: Slot<GotoLocationResult>,
     pub hover: Slot<HoverResult>,
     pub signature_help: Slot<SignatureHelpResult>,
+    pub virtual_document: Slot<VirtualDocumentResult>,
     pub folding_ranges: Slot<FoldingRangesResult>,
     // -- Query (Step 4) --
     pub completion: Slot<CompletionResult>,
@@ -716,6 +724,7 @@ impl LspSlots {
         self.goto_type_definition.cancel();
         self.hover.cancel();
         self.signature_help.cancel();
+        self.virtual_document.cancel();
         self.folding_ranges.cancel();
         self.completion.cancel();
         self.completion_resolve.cancel();
@@ -741,6 +750,7 @@ impl LspSlots {
             || self.goto_type_definition.is_pending()
             || self.hover.is_pending()
             || self.signature_help.is_pending()
+            || self.virtual_document.is_pending()
             || self.folding_ranges.is_pending()
             || self.completion.is_pending()
             || self.inlay_hints.is_pending()
@@ -767,6 +777,7 @@ impl Default for LspSlots {
             goto_type_definition: Slot::new(),
             hover: Slot::new(),
             signature_help: Slot::new(),
+            virtual_document: Slot::new(),
             folding_ranges: Slot::new(),
             completion: Slot::new(),
             completion_resolve: Slot::new(),

@@ -19,21 +19,51 @@ pub(crate) fn is_scratch_path(path: &str) -> bool {
 /// Directory the language server materializes library (jar) sources into.
 const MATERIALIZED_SOURCES_DIR: &str = "hyperion-materialized-sources";
 
-/// True for decompiled/extracted library sources: navigating into a
-/// dependency must not leave an editable buffer whose edits can never land
-/// anywhere useful (OV-00458).
+/// Directories (relative to the user's home) whose files are managed by a
+/// package manager or toolchain: dependency and standard-library sources that
+/// language servers navigate into. Editing them in place is never what the
+/// user wants (a crate registry checkout is re-extracted, a Gradle cache entry
+/// is content-addressed).
+const MANAGED_SOURCE_DIRS: &[&[&str]] = &[
+    &[".cargo", "registry"],
+    &[".cargo", "git", "checkouts"],
+    &[".rustup", "toolchains"],
+    &[".gradle", "caches"],
+    &[".m2", "repository"],
+];
+
+/// True when `path` has `dir` (a chain of directory names) as consecutive
+/// components.
+fn contains_component_chain(path: &std::path::Path, dir: &[&str]) -> bool {
+    let names: Vec<&str> = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect();
+    names.windows(dir.len()).any(|window| window == dir)
+}
+
+/// True for decompiled/extracted library sources and package-manager caches:
+/// navigating into a dependency must not leave an editable buffer whose edits
+/// can never land anywhere useful (OV-00458, OV-00470).
 pub(crate) fn is_library_source_path(path: &str) -> bool {
-    std::path::Path::new(path).components().any(|component| {
+    let path = std::path::Path::new(path);
+    path.components().any(|component| {
         component
             .as_os_str()
             .to_str()
             .is_some_and(|name| name.starts_with(MATERIALIZED_SOURCES_DIR))
-    })
+    }) || MANAGED_SOURCE_DIRS
+        .iter()
+        .any(|dir| contains_component_chain(path, dir))
 }
 
+/// Library sources open read-only AND not modifiable: `read_only` alone would
+/// only refuse `:w` (Vim's `readonly`), the buffer must refuse the edit itself
+/// (`E21`, Vim's `nomodifiable`).
 pub(crate) fn mark_library_source_read_only(buffer: &mut Buffer) {
     if buffer.file_path().is_some_and(is_library_source_path) {
         buffer.set_read_only(true);
+        buffer.set_modifiable(false);
     }
 }
 
@@ -938,6 +968,85 @@ mod tests {
         assert!(editor.buffer().is_read_only());
         assert!(is_library_source_path(&library.to_string_lossy()));
         assert!(!is_library_source_path(&own.to_string_lossy()));
+    }
+
+    /// OV-00470: `read_only` only refused `:w`; library sources (and the
+    /// class-file stub Hyperion serves for classes without sources) must
+    /// refuse the edit itself, whatever key tries it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn library_source_buffers_refuse_every_edit() {
+        use crate::editor::InputHandler;
+        use crate::{KeyCode, KeyEvent, Modifiers};
+        let handle_key_event = InputHandler::handle_key_event;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sources = dir
+            .path()
+            .join("hyperion-materialized-sources-v1")
+            .join("files");
+        fs::create_dir_all(&sources).unwrap();
+        let stub = sources.join("246c58.java");
+        fs::write(&stub, "// Generated stub\nclass Stub {}\nint x;\n").unwrap();
+
+        let mut editor = Editor::default();
+        editor.open_file(&stub).unwrap();
+        let before = editor.buffer().rope().to_string();
+        assert!(!editor.buffer().is_modifiable());
+
+        for keys in [
+            "ix", "Ax", "ox", "Ox", "x", "dd", "D", "cwfoo", "p", "P", "rx", "J", ">>", "~", "3x",
+            "ddP",
+        ] {
+            for ch in keys.chars() {
+                let _ = handle_key_event(
+                    &mut editor,
+                    KeyEvent::new(KeyCode::Char(ch), Modifiers::NONE),
+                );
+            }
+            let _ = handle_key_event(&mut editor, KeyEvent::new(KeyCode::Esc, Modifiers::NONE));
+            assert_eq!(
+                editor.buffer().rope().to_string(),
+                before,
+                "keys {keys:?} changed a library source"
+            );
+            assert_eq!(editor.mode(), crate::mode::Mode::Normal, "keys {keys:?}");
+        }
+        assert!(!editor.buffer().is_modified());
+        // `i` explains why nothing happened.
+        let _ = handle_key_event(
+            &mut editor,
+            KeyEvent::new(KeyCode::Char('i'), Modifiers::NONE),
+        );
+        assert!(editor.status_message().contains("E21"));
+
+        // The user can opt in explicitly, as in Vim.
+        crate::commands::execute_command(&mut editor, "set modifiable");
+        let _ = handle_key_event(
+            &mut editor,
+            KeyEvent::new(KeyCode::Char('x'), Modifiers::NONE),
+        );
+        assert_ne!(editor.buffer().rope().to_string(), before);
+    }
+
+    #[test]
+    fn package_manager_caches_count_as_library_sources() {
+        for path in [
+            "/home/u/.cargo/registry/src/index.crates.io-1/serde-1.0/src/lib.rs",
+            "/home/u/.cargo/git/checkouts/x-abc/123/src/lib.rs",
+            "/home/u/.rustup/toolchains/stable/lib/rustlib/src/rust/library/std/src/lib.rs",
+            "/home/u/.gradle/caches/modules-2/files-2.1/a/b/c.java",
+            "/home/u/.m2/repository/org/x/y/1.0/y-1.0-sources/Y.java",
+            "/tmp/hyperion-materialized-sources-v1/session-1/files/a.java",
+        ] {
+            assert!(is_library_source_path(path), "{path}");
+        }
+        for path in [
+            "/home/u/proj/src/lib.rs",
+            "/home/u/.cargo/config.toml",
+            "/home/u/proj/registry/mod.rs",
+        ] {
+            assert!(!is_library_source_path(path), "{path}");
+        }
     }
 
     #[test]

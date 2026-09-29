@@ -97,6 +97,12 @@ const BOOL_OPTIONS: &[BoolOption] = &[
         set: |e, v| e.options.backup = v,
     },
     BoolOption {
+        name: "modifiable",
+        alias: "ma",
+        get: |e| e.buffer().is_modifiable(),
+        set: |e, v| e.buffer_mut().set_modifiable(v),
+    },
+    BoolOption {
         name: "wrap",
         alias: "",
         get: |e| e.options.wrap,
@@ -175,6 +181,7 @@ fn query_option(name: &str, editor: &Editor) -> Option<CommandResult> {
                 .unwrap_or_else(|| "auto".to_string()),
         ),
         "scrolloff" => format!("  scrolloff={}", opts.scrolloff),
+        "foldcolumn" | "fdc" => format!("  foldcolumn={}", foldcolumn_text(opts)),
         "autocompletemin" | "acm" => {
             format!("  autocompletemin={}", opts.autocomplete_min_chars)
         }
@@ -308,6 +315,14 @@ fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
     Some((r, g, b))
 }
 
+fn foldcolumn_text(opts: &crate::editor::EditorOptions) -> String {
+    if opts.foldcolumn_auto {
+        format!("auto:{}", opts.foldcolumn)
+    } else {
+        opts.foldcolumn.to_string()
+    }
+}
+
 fn handle_value_option(name: &str, value: &str, editor: &mut Editor) -> Option<CommandResult> {
     let result = match name {
         "tabstop" | "ts" => match value.parse::<usize>() {
@@ -363,6 +378,28 @@ fn handle_value_option(name: &str, value: &str, editor: &mut Editor) -> Option<C
             }
             Err(_) => err(format!("Invalid number: {}", value)),
         },
+        "foldcolumn" | "fdc" => {
+            // `N`, `auto` or `auto:N` (nvim); at most 12 columns.
+            let (auto, digits) = match value.strip_prefix("auto") {
+                Some("") => (true, "1"),
+                Some(rest) => match rest.strip_prefix(':') {
+                    Some(digits) => (true, digits),
+                    None => return Some(err(format!("Invalid value: {}", value))),
+                },
+                None => (false, value),
+            };
+            match digits.parse::<usize>() {
+                Ok(n) if n <= 12 => {
+                    editor.options.foldcolumn = n;
+                    editor.options.foldcolumn_auto = auto;
+                    ok(Some(format!(
+                        "  foldcolumn={}",
+                        foldcolumn_text(&editor.options)
+                    )))
+                }
+                _ => err("foldcolumn must be between 0 and 12 (or auto[:N])"),
+            }
+        }
         "scrolloff" => match value.parse::<usize>() {
             Ok(n) => {
                 editor.options.scrolloff = n;
