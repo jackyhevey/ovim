@@ -534,6 +534,21 @@ pub struct HoverResult {
     pub hover_text: Option<String>,
 }
 
+/// Result of a foldingRange request.
+pub struct FoldingRangesResult {
+    pub ranges: Vec<lsp_types::FoldingRange>,
+    pub file_path: String,
+    /// Buffer version the request was made against; stale answers are dropped.
+    pub buffer_version: usize,
+}
+
+/// Result of a signature help request.
+pub struct SignatureHelpResult {
+    pub help: Option<lsp_types::SignatureHelp>,
+    /// File the request was made for; late answers for another file drop.
+    pub file_path: String,
+}
+
 /// Result of a completion request.
 #[derive(Debug)]
 pub struct CompletionResult {
@@ -656,6 +671,8 @@ pub struct LspSlots {
     pub goto_implementation: Slot<GotoLocationResult>,
     pub goto_type_definition: Slot<GotoLocationResult>,
     pub hover: Slot<HoverResult>,
+    pub signature_help: Slot<SignatureHelpResult>,
+    pub folding_ranges: Slot<FoldingRangesResult>,
     // -- Query (Step 4) --
     pub completion: Slot<CompletionResult>,
     pub inlay_hints: TrackedSlot<InlayHintResult>,
@@ -681,6 +698,8 @@ impl LspSlots {
         self.goto_implementation.cancel();
         self.goto_type_definition.cancel();
         self.hover.cancel();
+        self.signature_help.cancel();
+        self.folding_ranges.cancel();
         self.completion.cancel();
         self.inlay_hints.cancel();
         self.diagnostics.cancel();
@@ -703,6 +722,8 @@ impl LspSlots {
             || self.goto_implementation.is_pending()
             || self.goto_type_definition.is_pending()
             || self.hover.is_pending()
+            || self.signature_help.is_pending()
+            || self.folding_ranges.is_pending()
             || self.completion.is_pending()
             || self.inlay_hints.is_pending()
             || self.diagnostics.is_pending()
@@ -727,6 +748,8 @@ impl Default for LspSlots {
             goto_implementation: Slot::new(),
             goto_type_definition: Slot::new(),
             hover: Slot::new(),
+            signature_help: Slot::new(),
+            folding_ranges: Slot::new(),
             completion: Slot::new(),
             // Match CHANGE_DEBOUNCE_MS (150ms) so the first refresh fires
             // promptly after the last edit lands on the server rather

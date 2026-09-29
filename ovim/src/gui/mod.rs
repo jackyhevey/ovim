@@ -389,6 +389,8 @@ pub struct GuiSnapshot {
     pub picker: Option<GuiPicker>,
     pub completion: Option<GuiCompletion>,
     pub hover: Option<GuiHover>,
+    /// Parameter hints for the call being typed (insert mode).
+    pub signature_help: Option<GuiSignatureHelp>,
     pub file_tree: Option<GuiFileTree>,
     pub ai_chat: Option<GuiAiChat>,
     pub test_panel: Option<GuiTestPanel>,
@@ -579,6 +581,20 @@ pub struct GuiCompletionItem {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuiSignatureHelp {
+    /// Signature text before / of / after the active parameter.
+    pub before: String,
+    pub active: String,
+    pub after: String,
+    pub documentation: Option<String>,
+    pub signature_index: usize,
+    pub signature_count: usize,
+    pub line: usize,
+    pub display_column: usize,
+}
+
 pub struct GuiHover {
     pub content: String,
     pub line: Option<usize>,
@@ -2561,6 +2577,7 @@ fn snapshot_with_cache(
         }),
         file_tree: file_tree(editor),
         ai_chat: ai_chat(editor),
+        signature_help: signature_help(editor, buffer, tab_width),
         test_panel: test_panel(editor),
         problems: problem_list(editor),
         search_replace: search_replace(editor),
@@ -3510,6 +3527,32 @@ fn completion(editor: &Editor) -> Option<GuiCompletion> {
         items: menu
             .items()
             .iter()
+fn signature_help(
+    editor: &Editor,
+    buffer: &crate::buffer::Buffer,
+    tab_width: usize,
+) -> Option<GuiSignatureHelp> {
+    if editor.mode() != Mode::Insert {
+        return None;
+    }
+    let signature = editor.signature_help()?;
+    let (before, active, after) = signature.label_segments();
+    let (line, column) = signature.anchor;
+    Some(GuiSignatureHelp {
+        before,
+        active,
+        after,
+        documentation: signature
+            .parameter_documentation
+            .clone()
+            .or_else(|| signature.documentation.clone()),
+        signature_index: signature.signature_index,
+        signature_count: signature.signature_count,
+        line,
+        display_column: display_column(buffer, line, column, tab_width),
+    })
+}
+
             .enumerate()
             .skip(start)
             .take(MAX_COMPLETION_ITEMS)

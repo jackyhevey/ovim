@@ -2394,6 +2394,27 @@ function App() {
         };
     };
 
+    /** Parameter hints sit ABOVE the cursor line (the completion menu opens below). */
+    const signatureOverlayStyle = (
+        line: number,
+        displayColumn: number,
+        rows: number,
+    ) => {
+        const height = rows * LINE_HEIGHT + 14;
+        const lineTop = Math.max(0, line - view().firstLine) * LINE_HEIGHT + 6;
+        const top = lineTop >= height ? lineTop - height : lineTop + LINE_HEIGHT;
+        const containerWidth = editorBody?.clientWidth || 960;
+        const width = Math.min(560, containerWidth - 24);
+        const anchorX =
+            Math.max(0, displayColumn - view().horizontalOffset) * cellWidth() +
+            66;
+        return {
+            left: `${Math.max(8, Math.min(anchorX, containerWidth - width - 8))}px`,
+            top: `${top}px`,
+            "max-width": `${width}px`,
+        };
+    };
+
     const InlineSelectionComposer = (props: { pane: GuiPane }) => (
         <Show
             when={
@@ -4598,6 +4619,46 @@ function App() {
                                         hover().displayColumn ??
                                             view().cursor.displayColumn,
                                         520,
+                        <Show
+                            when={
+                                !view().aiChat ? view().signatureHelp : undefined
+                            }
+                        >
+                            {(signature) => (
+                                <section
+                                    class="signature-popover"
+                                    role="tooltip"
+                                    aria-label="Parameter hints"
+                                    style={signatureOverlayStyle(
+                                        signature().line,
+                                        signature().displayColumn,
+                                        signature().documentation ? 2 : 1,
+                                    )}
+                                >
+                                    <div class="signature-label">
+                                        <span>{signature().before}</span>
+                                        <strong class="signature-active">
+                                            {signature().active}
+                                        </strong>
+                                        <span>{signature().after}</span>
+                                        <Show when={signature().signatureCount > 1}>
+                                            <em class="signature-count">
+                                                {signature().signatureIndex + 1}/
+                                                {signature().signatureCount}
+                                            </em>
+                                        </Show>
+                                    </div>
+                                    <Show when={signature().documentation}>
+                                        {(doc) => (
+                                            <div class="signature-doc">
+                                                {doc().split("\n")[0]}
+                                            </div>
+                                        )}
+                                    </Show>
+                                </section>
+                            )}
+                        </Show>
+
                                         340,
                                     )}
                                 >

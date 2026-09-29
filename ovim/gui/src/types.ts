@@ -497,6 +497,16 @@ export interface GuiSnapshot {
     hover?: { content: string; line?: number; displayColumn?: number };
     fileTree?: {
         revealGeneration: number;
+    signatureHelp?: {
+        before: string;
+        active: string;
+        after: string;
+        documentation?: string;
+        signatureIndex: number;
+        signatureCount: number;
+        line: number;
+        displayColumn: number;
+    };
         root: string;
         selected: number;
         items: Array<{

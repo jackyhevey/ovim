@@ -17,4 +17,5 @@ mod hover;
 mod inlay_hints;
 pub(in crate::editor) mod navigation;
 mod references;
+mod signature_help;
 pub(in crate::editor) mod workspace_edits;

@@ -78,6 +78,7 @@ fn exit_insert_mode(editor: &mut Editor) {
 /// the buffer. Ctrl-O keeps the insertion position and starts a fresh undo
 /// unit when the normal command completes.
 fn finish_insert_mode(editor: &mut Editor, temporary: bool) {
+    editor.clear_signature_help();
     // Save last insert position BEFORE moving cursor (this is where we can continue inserting)
     let cursor = editor.buffer().cursor();
     editor.editing.last_insert_position = Some((cursor.line(), cursor.col().0));
@@ -346,6 +347,7 @@ pub fn handle_insert_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         return Ok(());
     }
 
+    let signature_help_was_active = editor.signature_help_active();
     match key_event.code {
         KeyCode::Esc => {
             if editor.completion_menu().is_visible() {
@@ -517,13 +519,91 @@ pub fn handle_insert_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         _ => {}
     }
+    request_signature_help_after_key(editor, &key_event, signature_help_was_active);
     Ok(())
+}
+
+/// Parameter hints: `(` and `,` open the popup; while it is open every edit or
+/// cursor move re-asks the server so the active parameter follows the cursor
+/// (the server answers with nothing once the cursor leaves the call).
+fn request_signature_help_after_key(
+    editor: &mut Editor,
+    key_event: &KeyEvent,
+    was_active: bool,
+) {
+    if editor.mode() != Mode::Insert {
+        return;
+    }
+    let retrigger = match key_event.code {
+        KeyCode::Char('(') | KeyCode::Char(',')
+            if !key_event.modifiers.contains(Modifiers::CONTROL) =>
+        {
+            true
+        }
+        KeyCode::Char(_)
+        | KeyCode::Backspace
+        | KeyCode::Delete
+        | KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Enter => was_active,
+        _ => false,
+    };
+    if retrigger {
+        editor.request_signature_help();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::editor::{ApplyPos, CursorPos, PendingChangeRepeat};
+
+    fn type_key(editor: &mut Editor, code: KeyCode) {
+        handle_insert_mode(editor, KeyEvent::new(code, Modifiers::NONE)).unwrap();
+    }
+
+    /// OV-00451: `(` and `,` open signature help; while it is open every edit
+    /// retriggers (the active parameter follows the cursor); Esc dismisses.
+    #[test]
+    fn signature_help_triggers_retriggers_and_dismisses() {
+        let mut editor = Editor::with_content("");
+        editor.start_change_building(editor.cursor_position());
+        editor.set_mode(Mode::Insert);
+
+        type_key(&mut editor, KeyCode::Char('f'));
+        assert!(!editor.lsp.intents.signature_help, "plain letters do not trigger");
+
+        type_key(&mut editor, KeyCode::Char('('));
+        assert!(editor.lsp.intents.signature_help, "`(` triggers");
+        editor.lsp.intents.signature_help = false;
+
+        // Simulate the popup being visible.
+        editor.lsp.state.signature_help = Some(crate::editor::SignatureHelpState {
+            label: "f(int a, int b)".into(),
+            active_param: Some((2, 7)),
+            active_param_index: Some(0),
+            signature_index: 0,
+            signature_count: 1,
+            documentation: None,
+            parameter_documentation: None,
+            anchor: (0, 2),
+        });
+        type_key(&mut editor, KeyCode::Char('1'));
+        assert!(editor.lsp.intents.signature_help, "typing retriggers while open");
+        editor.lsp.intents.signature_help = false;
+        type_key(&mut editor, KeyCode::Char(','));
+        assert!(editor.lsp.intents.signature_help, "`,` retriggers");
+        editor.lsp.intents.signature_help = false;
+        type_key(&mut editor, KeyCode::Backspace);
+        assert!(editor.lsp.intents.signature_help, "backspace retriggers while open");
+        editor.lsp.intents.signature_help = false;
+
+        type_key(&mut editor, KeyCode::Esc);
+        assert!(editor.signature_help().is_none(), "Esc dismisses the popup");
+        assert!(!editor.lsp.intents.signature_help);
+    }
 
     #[test]
     fn exit_insert_mode_pending_change_repeat_no_insert_no_delete_keeps_prior_undo() {

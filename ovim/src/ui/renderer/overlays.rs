@@ -343,6 +343,124 @@ pub fn render_completion_menu(frame: &mut Frame, editor: &Editor, ctx: &OverlayC
     frame.render_widget(paragraph, menu_area);
 }
 
+/// Parameter-hints popup for the call being typed: the signature on one line
+/// with the active parameter highlighted, an `(n/m)` overload marker and the
+/// active parameter's documentation underneath. Sits above the cursor line so
+/// it never covers the completion menu (which opens below).
+pub fn render_signature_help(frame: &mut Frame, editor: &Editor, ctx: &OverlayContext) {
+    let Some(signature) = editor.signature_help() else {
+        return;
+    };
+    let layout = ctx.layout;
+    let buffer_area = layout.buffer_area;
+    if buffer_area.width < 12 || buffer_area.height < 4 {
+        return;
+    }
+
+    let (before, active, after) = signature.label_segments();
+    let overload = if signature.signature_count > 1 {
+        format!(
+            "  ({}/{})",
+            signature.signature_index + 1,
+            signature.signature_count
+        )
+    } else {
+        String::new()
+    };
+    let doc_line = signature
+        .parameter_documentation
+        .as_deref()
+        .or(signature.documentation.as_deref())
+        .and_then(|doc| doc.lines().find(|line| !line.trim().is_empty()))
+        .map(|line| line.trim().to_string());
+
+    let max_inner = (buffer_area.width as usize).saturating_sub(4).clamp(8, 110);
+    // Keep the active parameter in view when the label is wider than the popup:
+    // drop characters from the head (`...`) until it fits.
+    let mut head: Vec<char> = before.chars().collect();
+    let mut tail: Vec<char> = after.chars().collect();
+    let active_chars: Vec<char> = active.chars().collect();
+    let width_of = |chars: &[char]| chars.iter().collect::<String>().width();
+    while width_of(&head) + width_of(&active_chars) + width_of(&tail) + overload.width()
+        > max_inner
+    {
+        if head.len() > 4 {
+            head.remove(0);
+        } else if !tail.is_empty() {
+            tail.pop();
+        } else {
+            break;
+        }
+    }
+    let head_text: String = head.iter().collect();
+    let head_text = if head_text.chars().count() < before.chars().count() {
+        format!("…{}", head_text.chars().skip(1).collect::<String>())
+    } else {
+        head_text
+    };
+    let tail_text: String = tail.iter().collect();
+    let tail_text = if tail.len() < after.chars().count() {
+        format!("{}…", tail_text)
+    } else {
+        tail_text
+    };
+
+    let bg = Color::Rgb(40, 44, 52);
+    let base = Style::default().bg(bg).fg(Color::White);
+    let active_style = Style::default()
+        .bg(bg)
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mut lines = vec![Line::from(vec![
+        Span::styled(head_text, base),
+        Span::styled(active.clone(), active_style),
+        Span::styled(tail_text, base),
+        Span::styled(overload.clone(), Style::default().bg(bg).fg(Color::DarkGray)),
+    ])];
+    if let Some(doc) = doc_line {
+        lines.push(Line::from(Span::styled(
+            truncate_to_width(&doc, max_inner),
+            Style::default().bg(bg).fg(Color::Gray),
+        )));
+    }
+
+    let content_width = lines
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.width()).sum::<usize>())
+        .max()
+        .unwrap_or(10);
+    let width = ((content_width + 4) as u16).min(buffer_area.width);
+    let height = (lines.len() as u16 + 2).min(buffer_area.height);
+
+    let (anchor_line, anchor_col) = signature.anchor;
+    let (screen_line, visual_col) = cursor_screen_position(
+        editor,
+        anchor_line,
+        ovim_core::unicode::GraphemeCol(anchor_col),
+        ctx.viewport_start,
+        layout.text_width,
+    );
+    let cursor_y = buffer_area.y + screen_line as u16;
+    let cursor_x = buffer_area.x + layout.gutter_width as u16 + visual_col as u16;
+    let x = cursor_x
+        .min(buffer_area.right().saturating_sub(width))
+        .max(buffer_area.x);
+    let y = if cursor_y >= buffer_area.y + height {
+        cursor_y - height
+    } else {
+        // No room above: drop below the line instead.
+        (cursor_y + 1).min(buffer_area.bottom().saturating_sub(height))
+    };
+
+    let area = Rect::new(x, y, width, height);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(bg));
+    frame.render_widget(ratatui::widgets::Clear, area);
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
 /// Compact floating help card for AI chat review mode.
 ///
 /// Uses a rounded border and transparent panel background while clearing

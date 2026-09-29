@@ -156,7 +156,9 @@ pub use input_state::{CharMotion, InputState, TextObjectPrefix};
 pub use keymap::{KeyMapManager, KeyMapping, MapMode};
 pub use launch_flow::{LaunchRequest, LaunchSource};
 pub use lsp_manager_panel::LspManagerPanel;
-pub use lsp_state::{HoverContentType, LspIntents, LspResultType, LspState, ProjectedDiagnostics};
+pub use lsp_state::{
+    HoverContentType, LspIntents, LspResultType, LspState, ProjectedDiagnostics, SignatureHelpState,
+};
 pub use lsp_ui::LspUi;
 pub use macros::MacroManager;
 pub use marks::{GlobalMark, JumpList, Mark, MarkManager, TagEntry, TagStack};

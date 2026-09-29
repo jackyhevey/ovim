@@ -374,6 +374,8 @@ impl Editor {
 
         // --- Navigation ---
         changed |= self.poll_hover_slot();
+        changed |= self.poll_signature_help_slot();
+        changed |= self.poll_folding_slot();
         changed |= self.poll_goto_slots();
 
         // --- Completion ---
@@ -1075,6 +1077,7 @@ impl Editor {
         self.lsp.state.diagnostic_count = (0, 0, 0, 0);
         self.lsp.state.blame_mouse_hover = false;
         self.lsp.state.hover_info = None;
+        self.lsp.state.signature_help = None;
         self.lsp.state.hover_scroll = 0;
         self.lsp.state.hover_h_scroll = 0;
         self.lsp.state.hover_position = None;
@@ -2204,6 +2207,13 @@ impl Editor {
         }
         if std::mem::take(&mut self.lsp.intents.hover) {
             let _ = self.hover_impl().await;
+        }
+        if std::mem::take(&mut self.lsp.intents.folding_ranges) {
+            self.request_folding_ranges().await;
+        }
+        self.maintain_folds().await;
+        if std::mem::take(&mut self.lsp.intents.signature_help) {
+            let _ = self.signature_help_impl().await;
         }
         if std::mem::take(&mut self.lsp.intents.completion) {
             let _ = self.completion_impl().await;

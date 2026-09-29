@@ -2786,7 +2786,19 @@ button:focus-visible {
 }
 
 .completion-popover,
-.hover-popover {
+.hover-popover,
+.fold-marker {
+    margin-left: 10px;
+    padding: 0 8px;
+    border-radius: 9px;
+    background: var(--surface-2);
+    color: var(--text-secondary);
+    font: italic 11px/16px var(--editor-font);
+    white-space: nowrap;
+    display: inline-block;
+    vertical-align: middle;
+}
+.signature-popover {
     position: absolute;
     z-index: var(--layer-inline);
     background: var(--surface-2);
@@ -2831,6 +2843,28 @@ button:focus-visible {
 }
 .hover-popover {
     overflow: auto;
+}
+.signature-popover {
+    padding: 5px 10px;
+    font: 12px/1.4 var(--editor-font);
+    color: var(--text-primary);
+    pointer-events: none;
+    white-space: pre;
+}
+.signature-active {
+    color: var(--accent);
+    text-decoration: underline;
+    font-weight: 700;
+}
+.signature-count {
+    margin-left: 10px;
+    color: var(--text-secondary);
+    font-style: normal;
+}
+.signature-doc {
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 .popover-label {
     padding: 6px 10px;
