@@ -248,6 +248,7 @@ impl InputHandler {
         // Folds: keep ranges aligned with the text, keep the cursor out of
         // closed folds, refresh the header markers.
         editor.sync_folds_after_key(fold_prev.0, fold_prev.1);
+        editor.report_refused_edit();
 
         let is_viewport_pending = matches!(editor.pending_command(), Some('z') | Some('Z'));
         let preserve_viewport = editor.viewport.take_preserve_after_input();

@@ -97,6 +97,12 @@ const BOOL_OPTIONS: &[BoolOption] = &[
         set: |e, v| e.options.backup = v,
     },
     BoolOption {
+        name: "modifiable",
+        alias: "ma",
+        get: |e| e.buffer().is_modifiable(),
+        set: |e, v| e.buffer_mut().set_modifiable(v),
+    },
+    BoolOption {
         name: "wrap",
         alias: "",
         get: |e| e.options.wrap,

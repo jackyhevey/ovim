@@ -130,6 +130,8 @@ impl Buffer {
             change_manager: ChangeManager::new(),
             file_mtime,
             read_only,
+            modifiable: true,
+            refused_edit: false,
             semantic_highlights: None,
             version: 0,
             code_block_cache: None,

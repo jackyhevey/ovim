@@ -478,7 +478,75 @@ impl Editor {
             changed |= self.handle_goto_slot_result(result, "Type", "LSP-TYPE");
         }
 
+        if let Some(result) = self.lsp.slots.virtual_document.poll_with_timeout(timeout) {
+            changed |= self.open_virtual_document_result(result);
+        }
+
         changed
+    }
+
+    /// A definition in a document with no `file:` location: fetch its text
+    /// from the server (`workspace/textDocumentContent`) and show it in a
+    /// read-only buffer (OV-00470).
+    fn request_virtual_document(&mut self, location: lsp_types::Location) -> bool {
+        let uri_text = location.uri.as_str().to_string();
+        let language_id = self
+            .buffer()
+            .file_path()
+            .and_then(|path| self.language_id_for_path(path));
+        let (Some(lsp), Some(language_id)) = (self.lsp.state.lsp_manager.clone(), language_id)
+        else {
+            self.set_lsp_status(format!("Cannot open {uri_text}: no language server"));
+            return false;
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let uri = location.uri.clone();
+        let range = location.range;
+        let task = tokio::spawn(async move {
+            let result = lsp.text_document_content(&uri, &language_id).await;
+            let _ = tx.send(
+                result.map(|text| crate::editor::lsp_slot::VirtualDocumentResult {
+                    uri,
+                    text,
+                    range,
+                }),
+            );
+        });
+        self.lsp.slots.virtual_document.fire(task, rx);
+        self.set_lsp_status(format!("Fetching {uri_text}..."));
+        false
+    }
+
+    fn open_virtual_document_result(
+        &mut self,
+        result: anyhow::Result<crate::editor::lsp_slot::VirtualDocumentResult>,
+    ) -> bool {
+        let document = match result {
+            Ok(document) => document,
+            Err(error) => {
+                self.set_lsp_status(format!("Cannot open document: {error}"));
+                return false;
+            }
+        };
+        let title = document
+            .uri
+            .as_str()
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("document")
+            .to_string();
+        self.open_scratch_buffer(&title, &document.text);
+        self.buffer_mut().set_modifiable(false);
+        let line = document.range.start.line as usize;
+        let col = self.utf16_to_grapheme_col(line, document.range.start.character);
+        self.buffer_mut()
+            .cursor_mut()
+            .set_position(line, crate::unicode::GraphemeCol(col));
+        self.buffer_mut().validate_cursor_position();
+        self.center_cursor_in_viewport();
+        self.set_lsp_status(format!("{title}: {}", document.uri.as_str()));
+        true
     }
 
     /// Apply the result from a goto slot — shared logic for definition,
@@ -515,6 +583,13 @@ impl Editor {
                 crate::lsp_debug!(log_tag, "Received {} response", label.to_lowercase());
 
                 let Some(path) = crate::lsp::uri_to_file_path(&location.uri) else {
+                    if location
+                        .uri
+                        .scheme()
+                        .is_some_and(|scheme| scheme.as_str() != "file")
+                    {
+                        return self.request_virtual_document(location);
+                    }
                     self.set_lsp_status("Invalid file path in LSP response".to_string());
                     return false;
                 };
@@ -2824,6 +2899,37 @@ mod tests {
             sync_state.last_flushed_content.as_deref(),
             Some("class Test {}\n")
         );
+    }
+
+    /// OV-00470: a definition whose URI is not `file:` (a server's own
+    /// scheme) is fetched from the server and shown read-only and
+    /// unmodifiable, never opened as an editable file.
+    #[tokio::test(flavor = "current_thread")]
+    async fn virtual_document_opens_unmodifiable_at_the_definition() {
+        let mut editor = Editor::with_content("class Caller {}\n");
+        let document = crate::editor::lsp_slot::VirtualDocumentResult {
+            uri: "jdt://contents/java.base/java.util/ArrayList.class"
+                .parse()
+                .unwrap(),
+            text: "package java.util;\npublic class ArrayList {\n}\n".into(),
+            range: lsp_types::Range {
+                start: lsp_types::Position::new(1, 13),
+                end: lsp_types::Position::new(1, 22),
+            },
+        };
+        assert!(editor.open_virtual_document_result(Ok(document)));
+        assert!(editor.buffer().is_read_only());
+        assert!(!editor.buffer().is_modifiable());
+        assert_eq!(editor.buffer().cursor().line(), 1);
+        assert!(editor.buffer().rope().to_string().contains("ArrayList"));
+        let before = editor.buffer().rope().to_string();
+        for ch in "ixdd".chars() {
+            let _ = crate::editor::InputHandler::handle_key_event(
+                &mut editor,
+                crate::KeyEvent::new(crate::KeyCode::Char(ch), crate::Modifiers::NONE),
+            );
+        }
+        assert_eq!(editor.buffer().rope().to_string(), before);
     }
 
     #[tokio::test(flavor = "current_thread")]

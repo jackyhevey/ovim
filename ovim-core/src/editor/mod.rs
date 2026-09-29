@@ -779,6 +779,18 @@ impl Editor {
 
     /// Sets the mode
     pub fn set_mode(&mut self, mode: Mode) {
+        // A buffer that is not modifiable (library source, virtual document)
+        // cannot be typed into: `i`, `a`, `o`, `c...` stay in Normal mode.
+        let mode = if matches!(mode, Mode::Insert | Mode::Replace) && !self.buffer().is_modifiable()
+        {
+            self.report_unmodifiable();
+            // Insert-entering commands opened a change session first.
+            self.finalize_change_building();
+            self.editing.pending_change_repeat = None;
+            Mode::Normal
+        } else {
+            mode
+        };
         self.mode = mode;
         // Clear count and pending operator when changing modes
         self.input.count = None;
@@ -791,6 +803,18 @@ impl Editor {
         // Clear visual selection when leaving visual modes
         if !matches!(mode, Mode::Visual | Mode::VisualLine | Mode::VisualBlock) {
             self.visual.visual_start = None;
+        }
+    }
+
+    /// Vim's E21, shown when an edit is refused by a `nomodifiable` buffer.
+    pub(crate) fn report_unmodifiable(&mut self) {
+        self.set_status_message("E21: Cannot make changes, 'modifiable' is off");
+    }
+
+    /// Reports (once) an edit that the buffer refused during the last key.
+    pub(crate) fn report_refused_edit(&mut self) {
+        if self.buffer_mut().take_refused_edit() {
+            self.report_unmodifiable();
         }
     }
 

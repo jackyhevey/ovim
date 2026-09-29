@@ -1021,6 +1021,27 @@ impl LspManager {
         Ok(response.unwrap_or_default())
     }
 
+    /// Fetches the text of a document that has no `file:` location (LSP 3.18
+    /// `workspace/textDocumentContent`), e.g. a class file or a library source
+    /// a server addresses by its own URI scheme.
+    pub async fn text_document_content(&self, uri: &Uri, language_id: &str) -> Result<String> {
+        let server = self
+            .servers
+            .get(language_id)
+            .ok_or_else(|| anyhow::anyhow!("No server for language: {}", language_id))?;
+        let result = server
+            .request(
+                "workspace/textDocumentContent",
+                serde_json::json!({ "uri": uri.as_str() }),
+            )
+            .await?;
+        result
+            .get("text")
+            .and_then(|text| text.as_str())
+            .map(str::to_string)
+            .ok_or_else(|| anyhow::anyhow!("server returned no text for {}", uri.as_str()))
+    }
+
     /// Prepares call hierarchy for a position in a document
     /// Returns call hierarchy items at the cursor position (typically one item)
     pub async fn prepare_call_hierarchy(
