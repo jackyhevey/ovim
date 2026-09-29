@@ -8,6 +8,8 @@ mod ai_chat_exa;
 mod ai_chat_images;
 pub mod ai_chat_input;
 mod ai_chat_mutations;
+#[cfg(test)]
+mod ai_chat_parked_tests;
 mod ai_chat_presentation;
 mod ai_chat_queue;
 mod ai_chat_review;
