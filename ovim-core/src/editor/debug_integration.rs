@@ -180,6 +180,8 @@ impl Editor {
         self.dap_manager.state.stack_frames = frames;
         self.dap_manager.state.selected_frame = 0;
         self.dap_manager.state.update_execution_position();
+        // Show where the debuggee stopped, even in a file that is not open.
+        self.show_frame_source(0);
         self.mark_dirty();
         Ok(())
     }
@@ -624,24 +626,30 @@ impl Editor {
             self.dap_manager.state.selected_frame = index;
             self.dap_manager.state.update_execution_position();
 
-            // Navigate to the frame's source location.
-            if let Some(frame) = self.dap_manager.state.stack_frames.get(index) {
-                let line = frame.line.saturating_sub(1) as usize;
-                let path = frame.source.as_ref().and_then(|s| s.path.clone());
-                if let Some(path) = path {
-                    if self.load_file(&path).is_ok() {
-                        self.buffer_mut()
-                            .cursor_mut()
-                            .set_position(line, crate::unicode::GraphemeCol::ZERO);
-                        self.buffer_mut().validate_cursor_position();
-                    }
-                }
-            }
+            self.show_frame_source(index);
 
             // Queue scopes + variables refresh for the new frame.
             self.dap_manager.pending_action =
                 Some(crate::dap::PendingDebugAction::SelectFrame { index });
             self.mark_dirty();
+        }
+    }
+
+    /// Opens the frame's source file (when it has one) and puts the cursor on
+    /// its line.
+    fn show_frame_source(&mut self, index: usize) {
+        let Some(frame) = self.dap_manager.state.stack_frames.get(index) else {
+            return;
+        };
+        let line = frame.line.saturating_sub(1) as usize;
+        let Some(path) = frame.source.as_ref().and_then(|s| s.path.clone()) else {
+            return;
+        };
+        if self.load_file(&path).is_ok() {
+            self.buffer_mut()
+                .cursor_mut()
+                .set_position(line, crate::unicode::GraphemeCol::ZERO);
+            self.buffer_mut().validate_cursor_position();
         }
     }
 
@@ -697,6 +705,14 @@ impl Editor {
         let reg = crate::language_config::LanguageRegistry::try_get()?;
         let lang = reg.detect(fp)?;
         lang.dap.as_ref()
+    }
+
+    /// The 1-based execution line when the debuggee is stopped in the file of
+    /// the buffer being shown (the marker belongs to that buffer only).
+    pub fn execution_line_in_current_buffer(&self) -> Option<u64> {
+        let (file, line) = self.execution_position()?;
+        let current = Path::new(self.buffer().file_path()?);
+        (file == current).then_some(line)
     }
 
     /// Returns the current execution file and line (1-based), if any.

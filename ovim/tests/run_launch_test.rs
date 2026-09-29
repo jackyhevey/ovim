@@ -1631,3 +1631,42 @@ async fn eval_command_uses_the_repl_context_and_hover_uses_hover() {
     assert!(!contexts.contains(&json!("hover")), "{contexts:?}");
     d.inner.stop_lsp().await;
 }
+
+/// OV-00442: stopping in a file other than the open buffer opens that file
+/// and the execution marker belongs to that buffer only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_in_another_file_opens_it_and_marks_only_that_buffer() {
+    let mut d = stopped_session(|root| {
+        std::fs::write(root.join("Other.controlled"), "a\nb\nc\n").unwrap();
+        let mut scenario = stopped_scenario(root);
+        scenario["frames"] = json!([{
+            "id": 1, "name": "label", "line": 3, "column": 1,
+            "source": {"name": "Other.controlled", "path": root.join("Other.controlled")}
+        }]);
+        scenario
+    })
+    .await;
+    let other = d.inner.root.join("Other.controlled");
+    assert_eq!(
+        d.inner.test.editor.buffer().file_path(),
+        Some(other.to_str().unwrap()),
+        "the stop opens the file"
+    );
+    assert_eq!(d.inner.test.editor.buffer().cursor().line(), 2);
+    assert_eq!(d.inner.test.editor.execution_line_in_current_buffer(), Some(3));
+
+    // Back in the original file the marker must not show up on line 3.
+    let main = d.inner.root.join("Main.controlled");
+    d.inner.test.command(&format!("e {}", main.display()));
+    d.inner
+        .until("Main to be shown", |s| {
+            s.test
+                .editor
+                .buffer()
+                .file_path()
+                .is_some_and(|p| p.ends_with("Main.controlled"))
+        })
+        .await;
+    assert_eq!(d.inner.test.editor.execution_line_in_current_buffer(), None);
+    d.inner.stop_lsp().await;
+}
