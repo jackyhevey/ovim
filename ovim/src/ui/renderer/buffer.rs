@@ -663,9 +663,7 @@ fn build_gutter_line(
     let line_1based = (line_idx + 1) as u64;
     let breakpoint = editor.breakpoint_marker_at(line_1based);
     let has_breakpoint = breakpoint.is_some();
-    let is_exec_line = editor
-        .execution_position()
-        .is_some_and(|(_, exec_line)| exec_line == line_1based);
+    let is_exec_line = editor.execution_line_in_current_buffer() == Some(line_1based);
 
     let buffer_id = buffer.id();
     let is_agent_edit = editor

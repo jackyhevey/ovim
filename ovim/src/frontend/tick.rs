@@ -200,6 +200,15 @@ async fn process_pending_debug_action(editor: &mut Editor) {
         editor.mark_dirty();
         return;
     }
+    if editor.dap_manager_mut().take_breakpoint_sync_request() && editor.is_debug_active() {
+        let paths: Vec<std::path::PathBuf> =
+            editor.debug_state().breakpoints.keys().cloned().collect();
+        for path in &paths {
+            let _ = editor.debug_sync_breakpoints(path).await;
+        }
+        let _ = editor.dap_manager().sync_exception_breakpoints().await;
+        editor.mark_dirty();
+    }
     let Some(action) = editor.dap_manager_mut().pending_action.take() else {
         return;
     };
@@ -265,15 +274,6 @@ async fn process_pending_debug_action(editor: &mut Editor) {
             }
             editor.mark_dirty();
         }
-        PendingDebugAction::UpdateBreakpoints => {
-            let paths: Vec<std::path::PathBuf> =
-                editor.debug_state().breakpoints.keys().cloned().collect();
-            for path in &paths {
-                let _ = editor.debug_sync_breakpoints(path).await;
-            }
-            let _ = editor.dap_manager().sync_exception_breakpoints().await;
-            editor.mark_dirty();
-        }
         PendingDebugAction::RefreshWatches => {
             editor.debug_refresh_watches().await;
         }
@@ -308,6 +308,8 @@ async fn process_pending_debug_action(editor: &mut Editor) {
         }
         PendingDebugAction::FetchState => {
             let _ = editor.debug_fetch_stack_trace().await;
+            editor.debug_fetch_exception_info().await;
+            editor.debug_fetch_threads().await;
             let _ = editor.debug_fetch_scopes().await;
             let scope_refs: Vec<u64> = editor
                 .debug_state()
@@ -345,7 +347,7 @@ async fn process_pending_debug_action(editor: &mut Editor) {
             let frame_id = editor.selected_frame_id();
             match editor
                 .dap_manager()
-                .evaluate(&expression, frame_id, Some("hover"))
+                .evaluate(&expression, frame_id, Some("repl"))
                 .await
             {
                 Ok((result, _type, _var_ref)) => {

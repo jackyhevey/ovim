@@ -9,6 +9,13 @@ use crate::dap::DapManager;
 use crate::language_config::DapConfig;
 use std::path::Path;
 
+/// What `:DebugLogpoint` / `:DebugHitCount` attach to a breakpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakpointExtra {
+    Logpoint,
+    HitCount,
+}
+
 /// How a breakpoint is drawn in the gutter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BreakpointMarker {
@@ -48,8 +55,7 @@ impl Editor {
         let lines = self.dap_manager.state.toggle_breakpoint(&path, line);
         if self.dap_manager.is_active() {
             // A live session must learn about the change immediately.
-            self.dap_manager.pending_action =
-                Some(crate::dap::PendingDebugAction::UpdateBreakpoints);
+            self.dap_manager.request_breakpoint_sync();
         }
         self.mark_dirty();
         Some(lines)
@@ -97,7 +103,7 @@ impl Editor {
             .find(|bp| bp.line == line_1based)?;
         Some(if !bp.enabled {
             BreakpointMarker::Disabled
-        } else if bp.condition.is_some() {
+        } else if bp.condition.is_some() || bp.log_message.is_some() || bp.hit_condition.is_some() {
             BreakpointMarker::Conditional
         } else {
             BreakpointMarker::Enabled
@@ -180,8 +186,49 @@ impl Editor {
         self.dap_manager.state.stack_frames = frames;
         self.dap_manager.state.selected_frame = 0;
         self.dap_manager.state.update_execution_position();
+        // Show where the debuggee stopped, even in a file that is not open.
+        self.show_frame_source(0);
         self.mark_dirty();
         Ok(())
+    }
+
+    /// Lists the debuggee's threads for the panel (best effort).
+    pub async fn debug_fetch_threads(&mut self) {
+        if let Ok(threads) = self.dap_manager.threads().await {
+            // Not if the debuggee resumed in the meantime.
+            if !self.dap_manager.state.is_running {
+                self.dap_manager.state.threads = threads;
+            }
+        }
+        self.mark_dirty();
+    }
+
+    /// When the debuggee stopped on an exception: ask the adapter what was
+    /// thrown and show it in the panel, the status line and the console.
+    /// The stop event's own description is the fallback.
+    pub async fn debug_fetch_exception_info(&mut self) {
+        if self.dap_manager.state.stop_reason.as_deref() != Some("exception") {
+            return;
+        }
+        let thread_id = self.dap_manager.state.event_thread.unwrap_or(1);
+        if self.dap_manager.state.stopped_thread.unwrap_or(thread_id) != thread_id {
+            return;
+        }
+        let summary = match self.dap_manager.exception_info(thread_id).await {
+            Ok(info) => Some(info.summary()),
+            Err(_) => self.dap_manager.state.exception.clone(),
+        };
+        // The debuggee may have been resumed while the request was in flight.
+        if self.dap_manager.state.stop_reason.as_deref() != Some("exception") {
+            return;
+        }
+        if let Some(summary) = summary {
+            self.set_status_message(format!("Exception: {summary}"));
+            self.dap_manager
+                .log_console(format!("Stopped on exception: {summary}"));
+            self.dap_manager.state.exception = Some(summary);
+        }
+        self.mark_dirty();
     }
 
     /// Fetch and store scopes for the currently selected frame.
@@ -353,8 +400,24 @@ impl Editor {
             RowKind::Exception { index, .. } => {
                 self.toggle_exception_filter_at(index);
             }
+            RowKind::Thread { id, .. } => self.select_debug_thread(id),
             RowKind::Header | RowKind::Note => {}
         }
+        self.mark_dirty();
+    }
+
+    /// Inspects another thread: its stack and variables replace the shown ones.
+    pub fn select_debug_thread(&mut self, id: u64) {
+        let state = &mut self.dap_manager.state;
+        if state.is_running || state.stopped_thread == Some(id) {
+            return;
+        }
+        state.stopped_thread = Some(id);
+        state.stack_frames.clear();
+        state.scopes.clear();
+        state.variables.clear();
+        state.clear_watch_values();
+        self.dap_manager.pending_action = Some(crate::dap::PendingDebugAction::FetchState);
         self.mark_dirty();
     }
 
@@ -428,11 +491,51 @@ impl Editor {
         self.mark_dirty();
     }
 
+    /// `:PanelSize test|debug|console <+N|-N|N|reset>`: widens or narrows
+    /// (or heightens, for the console) a bottom/side panel. Returns what to
+    /// tell the user.
+    pub fn resize_panel(&mut self, panel: &str, amount: &str) -> Result<String, String> {
+        let amount = amount.trim();
+        let parse = |current: i16| -> Result<i16, String> {
+            if amount == "reset" || amount.is_empty() {
+                return Ok(0);
+            }
+            let n: i16 = amount
+                .trim_start_matches('+')
+                .parse()
+                .map_err(|_| format!("Not a number: '{amount}' (use +N, -N or reset)"))?;
+            Ok(if amount.starts_with('+') || amount.starts_with('-') {
+                current.saturating_add(n)
+            } else {
+                n
+            })
+        };
+        let message = match panel {
+            "test" | "tests" => {
+                let p = &mut self.build.test_panel;
+                p.width_delta = parse(p.width_delta)?.clamp(-20, 80);
+                format!("Test panel width offset {}", p.width_delta)
+            }
+            "debug" => {
+                let p = &mut self.dap_manager.state.panel;
+                p.width_delta = parse(p.width_delta)?.clamp(-20, 80);
+                format!("Debug panel width offset {}", p.width_delta)
+            }
+            "console" | "run" => {
+                let c = &mut self.launch.console;
+                c.height_delta = parse(c.height_delta)?.clamp(-10, 40);
+                format!("Run console height offset {}", c.height_delta)
+            }
+            other => return Err(format!("Unknown panel '{other}' (test, debug or console)")),
+        };
+        self.mark_dirty();
+        Ok(message)
+    }
+
     /// Tells a live session about changed breakpoints.
     fn after_breakpoint_change(&mut self) {
         if self.dap_manager.is_active() {
-            self.dap_manager.pending_action =
-                Some(crate::dap::PendingDebugAction::UpdateBreakpoints);
+            self.dap_manager.request_breakpoint_sync();
         }
         self.mark_dirty();
     }
@@ -624,24 +727,30 @@ impl Editor {
             self.dap_manager.state.selected_frame = index;
             self.dap_manager.state.update_execution_position();
 
-            // Navigate to the frame's source location.
-            if let Some(frame) = self.dap_manager.state.stack_frames.get(index) {
-                let line = frame.line.saturating_sub(1) as usize;
-                let path = frame.source.as_ref().and_then(|s| s.path.clone());
-                if let Some(path) = path {
-                    if self.load_file(&path).is_ok() {
-                        self.buffer_mut()
-                            .cursor_mut()
-                            .set_position(line, crate::unicode::GraphemeCol::ZERO);
-                        self.buffer_mut().validate_cursor_position();
-                    }
-                }
-            }
+            self.show_frame_source(index);
 
             // Queue scopes + variables refresh for the new frame.
             self.dap_manager.pending_action =
                 Some(crate::dap::PendingDebugAction::SelectFrame { index });
             self.mark_dirty();
+        }
+    }
+
+    /// Opens the frame's source file (when it has one) and puts the cursor on
+    /// its line.
+    fn show_frame_source(&mut self, index: usize) {
+        let Some(frame) = self.dap_manager.state.stack_frames.get(index) else {
+            return;
+        };
+        let line = frame.line.saturating_sub(1) as usize;
+        let Some(path) = frame.source.as_ref().and_then(|s| s.path.clone()) else {
+            return;
+        };
+        if self.load_file(&path).is_ok() {
+            self.buffer_mut()
+                .cursor_mut()
+                .set_position(line, crate::unicode::GraphemeCol::ZERO);
+            self.buffer_mut().validate_cursor_position();
         }
     }
 
@@ -691,12 +800,54 @@ impl Editor {
         self.mark_dirty();
     }
 
+    /// `:DebugLogpoint <message>` / `:DebugHitCount <n>`: attaches a log
+    /// message or a hit condition to the breakpoint at the cursor (creating
+    /// it); an empty value removes it. Returns what to tell the user.
+    pub fn set_cursor_breakpoint_extra(&mut self, kind: BreakpointExtra, value: &str) -> String {
+        let Some(file_path) = self.buffer().file_path().map(|s| s.to_string()) else {
+            return "Save the buffer to a file first".to_string();
+        };
+        let line = self.buffer().cursor().line() as u64 + 1;
+        let path = std::path::PathBuf::from(&file_path);
+        let value = Some(value.trim().to_string()).filter(|v| !v.is_empty());
+        let supported = match kind {
+            BreakpointExtra::Logpoint => self.dap_manager.supports_log_points(),
+            BreakpointExtra::HitCount => self.dap_manager.supports_hit_conditions(),
+        };
+        let state = &mut self.dap_manager.state;
+        let removed = value.is_none();
+        match kind {
+            BreakpointExtra::Logpoint => state.set_breakpoint_log_message(&path, line, value),
+            BreakpointExtra::HitCount => state.set_breakpoint_hit_condition(&path, line, value),
+        }
+        self.after_breakpoint_change();
+        let what = match kind {
+            BreakpointExtra::Logpoint => "Logpoint",
+            BreakpointExtra::HitCount => "Hit count",
+        };
+        match (removed, supported) {
+            (true, _) => format!("{what} removed"),
+            (false, Some(false)) => format!(
+                "{what} set, but the running debug adapter does not support it (the breakpoint is not set until it does)"
+            ),
+            (false, _) => format!("{what} set at line {line}"),
+        }
+    }
+
     /// Returns the DAP config for the current buffer's language, if any.
     pub fn dap_config_for_current_file(&self) -> Option<&'static DapConfig> {
         let fp = self.buffer().file_path()?;
         let reg = crate::language_config::LanguageRegistry::try_get()?;
         let lang = reg.detect(fp)?;
         lang.dap.as_ref()
+    }
+
+    /// The 1-based execution line when the debuggee is stopped in the file of
+    /// the buffer being shown (the marker belongs to that buffer only).
+    pub fn execution_line_in_current_buffer(&self) -> Option<u64> {
+        let (file, line) = self.execution_position()?;
+        let current = Path::new(self.buffer().file_path()?);
+        (file == current).then_some(line)
     }
 
     /// Returns the current execution file and line (1-based), if any.

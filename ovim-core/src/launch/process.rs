@@ -254,6 +254,42 @@ where
     })
 }
 
+/// A free local TCP port (best effort: it is released before use).
+pub fn free_port() -> Option<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").ok()?;
+    Some(listener.local_addr().ok()?.port())
+}
+
+/// Whether some process listens on local TCP `port`. On Linux this reads
+/// `/proc/net/tcp*` and never connects: a stray connection would look like a
+/// debugger handshake to a JDWP agent and could end its listening. Elsewhere
+/// a connection attempt is the only portable probe.
+pub fn port_is_listening(port: u16) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let want = format!(":{port:04X}");
+        ["/proc/net/tcp", "/proc/net/tcp6"].iter().any(|table| {
+            std::fs::read_to_string(table).is_ok_and(|text| {
+                text.lines().skip(1).any(|line| {
+                    let mut cols = line.split_whitespace().skip(1);
+                    let local = cols.next().unwrap_or("");
+                    let _remote = cols.next();
+                    // st == 0A is LISTEN.
+                    cols.next() == Some("0A") && local.ends_with(&want)
+                })
+            })
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(200),
+        )
+        .is_ok()
+    }
+}
+
 #[cfg(unix)]
 fn terminate_group(pid: Option<u32>, force: bool) {
     let Some(pid) = pid else { return };
@@ -324,6 +360,15 @@ mod tests {
         let out: Vec<String> = lines.into_iter().map(|(_, t)| t).collect();
         assert_eq!(out, vec!["got:one", "got:two words", "eof"]);
         assert_eq!(exit.code, Some(0));
+    }
+
+    #[test]
+    fn a_listening_port_is_seen_without_connecting_to_it() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(port_is_listening(port));
+        drop(listener);
+        assert!(!port_is_listening(port));
     }
 
     #[tokio::test]

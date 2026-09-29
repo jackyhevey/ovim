@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use super::types::{DapBreakpoint, DapScope, DapStackFrame, DapVariable};
+use super::types::{DapBreakpoint, DapScope, DapStackFrame, DapThread, DapVariable};
 
 /// Per-line breakpoint state.
 #[derive(Debug, Clone)]
@@ -18,6 +18,11 @@ pub struct BreakpointState {
     pub id: Option<u64>,
     /// Condition expression for conditional breakpoints (None = unconditional).
     pub condition: Option<String>,
+    /// Logpoint: print this message (with `{expression}` interpolation)
+    /// instead of stopping.
+    pub log_message: Option<String>,
+    /// Hit-count condition (`5`, `>3`, `%2`): stop only when it holds.
+    pub hit_condition: Option<String>,
     /// Disabled breakpoints stay in the list (and the gutter, hollow) but are
     /// not sent to the adapter.
     pub enabled: bool,
@@ -65,8 +70,15 @@ pub struct DebugState {
     // ---- Stop state ----
     /// Thread that is currently stopped (if any).
     pub stopped_thread: Option<u64>,
+    /// The thread the adapter reported the stop on (`stopped_thread` is the
+    /// one being inspected, which the user can change).
+    pub event_thread: Option<u64>,
+    /// Threads of the debuggee as of the last stop.
+    pub threads: Vec<DapThread>,
     /// Reason for the stop (e.g., "breakpoint", "step", "exception").
     pub stop_reason: Option<String>,
+    /// What was thrown (`Type: message`) when the stop reason is "exception".
+    pub exception: Option<String>,
 
     // ---- Breakpoints ----
     /// Breakpoints per file path.
@@ -123,7 +135,10 @@ impl DebugState {
             session_active: false,
             is_running: false,
             stopped_thread: None,
+            event_thread: None,
+            threads: Vec::new(),
             stop_reason: None,
+            exception: None,
             breakpoints: HashMap::new(),
             stack_frames: Vec::new(),
             selected_frame: 0,
@@ -154,6 +169,8 @@ impl DebugState {
                 verified: false,
                 id: None,
                 condition: None,
+                log_message: None,
+                hit_condition: None,
                 enabled: true,
             });
         }
@@ -240,16 +257,16 @@ impl DebugState {
         entry.extend(old_entries.iter().filter(|bp| !bp.enabled).cloned());
         for bp in dap_bps {
             if let Some(line) = bp.line {
-                // Preserve existing condition if the breakpoint was already there.
-                let existing_condition = old_entries
-                    .iter()
-                    .find(|old| old.line == line)
-                    .and_then(|old| old.condition.clone());
+                // Keep what the user attached to the breakpoint (the reply
+                // knows nothing of it).
+                let old = old_entries.iter().find(|old| old.line == line);
                 entry.push(BreakpointState {
                     line,
                     verified: bp.verified,
                     id: bp.id,
-                    condition: existing_condition,
+                    condition: old.and_then(|o| o.condition.clone()),
+                    log_message: old.and_then(|o| o.log_message.clone()),
+                    hit_condition: old.and_then(|o| o.hit_condition.clone()),
                     enabled: true,
                 });
             }
@@ -274,18 +291,51 @@ impl DebugState {
 
     /// Set a condition on a breakpoint. If the breakpoint doesn't exist, creates it.
     pub fn set_breakpoint_condition(&mut self, path: &Path, line: u64, condition: Option<String>) {
+        self.edit_breakpoint(path, line, |bp| bp.condition = condition);
+    }
+
+    /// Makes the breakpoint at `line` a logpoint (`None` makes it a plain
+    /// breakpoint again). Creates the breakpoint when there is none.
+    pub fn set_breakpoint_log_message(&mut self, path: &Path, line: u64, message: Option<String>) {
+        self.edit_breakpoint(path, line, |bp| bp.log_message = message);
+    }
+
+    /// Sets the hit-count condition of the breakpoint at `line`.
+    pub fn set_breakpoint_hit_condition(
+        &mut self,
+        path: &Path,
+        line: u64,
+        hit_condition: Option<String>,
+    ) {
+        self.edit_breakpoint(path, line, |bp| bp.hit_condition = hit_condition);
+    }
+
+    fn edit_breakpoint(&mut self, path: &Path, line: u64, edit: impl FnOnce(&mut BreakpointState)) {
         let entry = self.breakpoints.entry(path.to_path_buf()).or_default();
         if let Some(bp) = entry.iter_mut().find(|bp| bp.line == line) {
-            bp.condition = condition;
+            edit(bp);
         } else {
-            entry.push(BreakpointState {
+            let mut bp = BreakpointState {
                 line,
                 verified: false,
                 id: None,
-                condition,
+                condition: None,
+                log_message: None,
+                hit_condition: None,
                 enabled: true,
-            });
+            };
+            edit(&mut bp);
+            entry.push(bp);
+            entry.sort_by_key(|bp| bp.line);
         }
+    }
+
+    /// The breakpoint at `line`, if any.
+    pub fn breakpoint_at(&self, path: &Path, line: u64) -> Option<&BreakpointState> {
+        self.breakpoints
+            .get(path)?
+            .iter()
+            .find(|bp| bp.line == line)
     }
 
     /// Get the condition for a breakpoint at a given line, if any.
@@ -316,7 +366,10 @@ impl DebugState {
         self.session_active = false;
         self.is_running = false;
         self.stopped_thread = None;
+        self.event_thread = None;
+        self.threads.clear();
         self.stop_reason = None;
+        self.exception = None;
         self.stack_frames.clear();
         self.selected_frame = 0;
         self.scopes.clear();

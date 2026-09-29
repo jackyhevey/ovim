@@ -27,7 +27,15 @@ for Java and Kotlin and fill the test panel with a result per test.
 
 While a debug session is stopped: `F5` continue, `F10` step over, `F11` step
 in, `Shift-F11` step out, `F9` toggle breakpoint (also while running),
-`Shift-F9` conditional breakpoint, `:eval expr`.
+`Shift-F9` conditional breakpoint, `:eval expr` (explicit evaluation, method
+calls run). The function keys work from the buffer, the debug panel and the run
+console alike. When the debuggee stops in another file, that file is opened and
+the marker is drawn there.
+
+For Java and Kotlin `main`s the language server's root is the outermost build
+root: the `settings.gradle(.kts)` above the file, or the Maven reactor (the
+topmost `pom.xml` whose `<modules>` lead down to the module). All modules of a
+build share one server, so Run/Debug see the sibling modules and dependencies.
 
 "The code at the cursor" is decided by the language server
 (`hyperion.resolveLaunch`): inside a test method or class it is the test,
@@ -69,7 +77,13 @@ around them (`Outer$Inner` for `@Nested`), the nearest `build.gradle(.kts)` /
 | Build tool | Run | Debug |
 |------------|-----|-------|
 | Gradle | `gradle :app:cleanTest :app:test --tests pkg.Class.method` | same plus `--debug-jvm` |
-| Maven | `mvn -Dtest=pkg.Class#method [-pl module -am] test` | same plus `-Dmaven.surefire.debug` |
+| Maven | `mvn -Dtest=pkg.Class#method [-pl module -am] test` | same plus `-Dmaven.surefire.debug=-agentlib:jdwp=...address=127.0.0.1:<free port>` |
+
+`<Space>tn` with the cursor on a class declaration line runs that class (and
+its nested classes). Parameterized invocations are listed as
+`method [1] arg`. Surefire swallows the JVM's `Listening for transport` line,
+so for Maven ovim gives the JVM a free port itself and attaches as soon as it
+listens; Stop takes the whole process group down.
 
 `cleanTest` runs first so an unchanged rerun is not skipped as UP-TO-DATE.
 `./gradlew` / `./mvnw` are used only when the wrapper is really there. The
@@ -89,9 +103,16 @@ of every run, with stdout, stderr, build output and editor notes in separate
 colours. It stays after the process exits and shows the exit code and how long
 it ran. It keeps the last eight runs.
 
-Programs that read `System.in` work with Run: in the console `i` (or `:RunInput text`)
-sends a line to the program (echoed as `» text`), `D` (or `:RunEof`) ends the input.
-Debug sessions and test tasks do not take input.
+Programs that read `System.in` work with Run and with Debug (ovim starts the
+JVM itself, suspended on a free JDWP port, and the debugger attaches): in the
+console `i` (or `:RunInput text`) sends a line to the program (echoed as
+`» text`), `D` (or `:RunEof`) ends the input. Test tasks do not take input.
+
+`Space r f` focuses it; `+` / `-` make it taller / shorter (`:PanelSize console +3`).
+The test panel and debug panel are resized with `:PanelSize test +6` /
+`:PanelSize debug -4` (`reset` restores the default; the debug panel also
+takes `<` / `>` when focused). When both side panels are open they share the
+width so neither is squeezed and the editor keeps at least 40 columns.
 
 `Space r f` focuses it: `j`/`k` move, `Ctrl-d`/`Ctrl-u` page, `g`/`G` top/bottom
 (`G` follows live output again), `[` / `]` switch between runs, `r` rerun,
@@ -161,9 +182,23 @@ the adapter offers. `Space d f` (or `:DebugPanel`) focuses it:
 | `e` `t` | enable/disable the breakpoint (or filter) |
 | `a` | add a watch (`:DebugWatch`) |
 | `E` | toggle "break on exceptions" (first filter) |
+| `F5` `F9` `F10` `F11` | continue, breakpoint, step over/in (`Shift-F11` out) |
 | `<` `>` | narrower / wider panel |
 | `c` `n` `i` `o` `s` | continue, step over/in/out, stop |
 | `q` `Esc` | back to the buffer |
+
+When the debuggee stops on an exception, the panel, the status line and the
+run console show its type and message (from the adapter's `exceptionInfo`).
+With more than one thread a *Threads* section lists them (JVM housekeeping
+threads are hidden); `Enter` on one shows its stack and variables, and
+stepping then steps that thread.
+
+`:DebugLogpoint <message>` (log `{expr}`s instead of stopping) and
+`:DebugHitCount <n|>n|%n>` attach to the breakpoint at the cursor (empty
+argument removes them). They are sent only when the adapter advertises
+`supportsLogPoints` / `supportsHitConditionalBreakpoints`; otherwise the
+breakpoint is not set (a bare line would stop on every hit) and the console
+says so. Hyperion does not advertise them yet.
 
 Commands: `:DebugWatch <expr>` (re-evaluated at every stop; a result with
 children can be expanded), `:DebugUnwatch [n|expr]`, `:DebugBreakpoints

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use super::state::DebugState;
-use super::types::DapVariable;
+use super::types::{DapThread, DapVariable};
 
 /// What a row is, and therefore what Enter / `d` / `e` do to it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +40,11 @@ pub enum RowKind {
     Exception {
         index: usize,
         enabled: bool,
+    },
+    /// A thread of the debuggee; Enter shows its stack.
+    Thread {
+        id: u64,
+        selected: bool,
     },
 }
 
@@ -112,6 +117,38 @@ fn push_variables(
     }
 }
 
+/// Threads worth listing: the JVM's own housekeeping threads are hidden
+/// (unless one is the thread being inspected).
+fn visible_threads(state: &DebugState) -> Vec<&DapThread> {
+    const INTERNAL: &[&str] = &[
+        "Reference Handler",
+        "Finalizer",
+        "Signal Dispatcher",
+        "Common-Cleaner",
+        "Notification Thread",
+        "Attach Listener",
+        "Service Thread",
+        "Monitor Deflation Thread",
+        "Monitor Ctrl-Break",
+        "Sweeper thread",
+        "Process reaper",
+        "JDWP",
+        "Cleaner-",
+        "C1 CompilerThread",
+        "C2 CompilerThread",
+        "Compiler",
+        "Notification",
+    ];
+    state
+        .threads
+        .iter()
+        .filter(|t| {
+            state.stopped_thread == Some(t.id)
+                || !INTERNAL.iter().any(|name| t.name.starts_with(name))
+        })
+        .collect()
+}
+
 /// The whole panel, top to bottom.
 pub fn rows(state: &DebugState) -> Vec<PanelRow> {
     let mut rows = Vec::new();
@@ -128,6 +165,13 @@ pub fn rows(state: &DebugState) -> Vec<PanelRow> {
         RowKind::Header,
         format!("Call Stack ({status})"),
     ));
+    if let Some(exception) = state
+        .exception
+        .as_deref()
+        .filter(|_| !state.is_running && state.stopped_thread == state.event_thread)
+    {
+        rows.push(PanelRow::new(RowKind::Note, format!("! {exception}")));
+    }
     if state.stack_frames.is_empty() {
         rows.push(PanelRow::new(
             RowKind::Note,
@@ -153,6 +197,27 @@ pub fn rows(state: &DebugState) -> Vec<PanelRow> {
             },
             format!("{} {}:{}", frame.name, source, frame.line),
         ));
+    }
+
+    // ---- Threads ----
+    let threads = visible_threads(state);
+    if threads.len() > 1 {
+        rows.push(PanelRow::new(RowKind::Header, "Threads"));
+        for thread in threads {
+            let selected = state.stopped_thread == Some(thread.id);
+            let mut row = PanelRow::new(
+                RowKind::Thread {
+                    id: thread.id,
+                    selected,
+                },
+                format!("{} ({})", thread.name, thread.id),
+            );
+            row.depth = 1;
+            if state.event_thread == Some(thread.id) {
+                row.value = Some("stopped here".to_string());
+            }
+            rows.push(row);
+        }
     }
 
     // ---- Variables ----
@@ -216,12 +281,24 @@ pub fn rows(state: &DebugState) -> Vec<PanelRow> {
                 line: bp.line,
                 enabled: bp.enabled,
                 verified: bp.verified,
-                conditional: bp.condition.is_some(),
+                conditional: bp.condition.is_some()
+                    || bp.log_message.is_some()
+                    || bp.hit_condition.is_some(),
             },
             format!("{name}:{}", bp.line),
         );
         row.depth = 1;
-        row.value = bp.condition.as_ref().map(|c| format!("if {c}"));
+        let mut notes = Vec::new();
+        if let Some(condition) = &bp.condition {
+            notes.push(format!("if {condition}"));
+        }
+        if let Some(count) = &bp.hit_condition {
+            notes.push(format!("hits {count}"));
+        }
+        if let Some(message) = &bp.log_message {
+            notes.push(format!("log \"{message}\""));
+        }
+        row.value = (!notes.is_empty()).then(|| notes.join("  "));
         rows.push(row);
     }
 

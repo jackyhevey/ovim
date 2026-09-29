@@ -134,6 +134,9 @@ struct LaunchJob {
     session_end: Option<crate::dap::SessionEnd>,
     /// A test run shown in the test panel that has not been finalised yet.
     panel_run: bool,
+    /// While waiting for a debug JVM that will not print its port (Maven
+    /// surefire): the port to watch.
+    debug_port: Option<u16>,
 }
 
 fn append_capped(log: &mut String, text: &str) {
@@ -279,7 +282,7 @@ impl Editor {
             self.log_console(run_id, LineKind::System, format!("» {text}"));
         } else {
             self.set_status_message(
-                "The running program does not take input (only Run, not Debug or tests, feeds stdin)",
+                "The running program does not take input (only a Run or Debug of a main feeds stdin, not tests)",
             );
         }
     }
@@ -519,6 +522,7 @@ impl Editor {
             stopping: false,
             session_end: None,
             panel_run: false,
+            debug_port: None,
         });
         self.log_console(run_id, LineKind::System, "Looking up run configurations...");
     }
@@ -736,7 +740,11 @@ impl Editor {
             ".git",
         ];
         let markers: Vec<String> = MARKERS.iter().map(|m| m.to_string()).collect();
-        let root = crate::language_config::find_project_root(&file, &markers);
+        let outermost: Vec<String> = ["settings.gradle.kts", "settings.gradle", "pom.xml"]
+            .map(String::from)
+            .into();
+        let root =
+            crate::language_config::find_project_root_with_outermost(&file, &markers, &outermost);
         if root.as_os_str().is_empty() {
             file.parent()
                 .map(Path::to_path_buf)
@@ -818,6 +826,7 @@ impl Editor {
             stopping: false,
             session_end: None,
             panel_run: false,
+            debug_port: None,
         };
 
         match request.source.clone() {
@@ -1163,11 +1172,7 @@ impl Editor {
             }
             (PlanKind::Main, _) if plan.build.is_some() => self.start_build(job),
             (PlanKind::Main, LaunchMode::Run) => self.start_run_process(job),
-            (PlanKind::Main, LaunchMode::Debug) => {
-                let launch = plan.launch.as_ref().expect("main plans carry launch");
-                let request = DapLaunchRequest::Launch(launch.dap_arguments.clone());
-                self.begin_debugger(job, request);
-            }
+            (PlanKind::Main, LaunchMode::Debug) => self.start_debug_process(job),
             (PlanKind::Test | PlanKind::Task, LaunchMode::Run) => self.start_run_process(job),
             (PlanKind::Test | PlanKind::Task, LaunchMode::Debug) => self.start_debug_task(job),
         }
@@ -1188,8 +1193,8 @@ impl Editor {
         stage: Stage,
     ) {
         // Only the program itself reads stdin, not builds or test tasks.
-        let interactive =
-            stage == Stage::Running && job.plan.as_ref().is_some_and(|p| p.kind == PlanKind::Main);
+        let interactive = matches!(stage, Stage::Running | Stage::AwaitingDebugPort { .. })
+            && job.plan.as_ref().is_some_and(|p| p.kind == PlanKind::Main);
         self.log_console(
             job.run_id,
             LineKind::System,
@@ -1238,13 +1243,38 @@ impl Editor {
         self.spawn_step(job, &spec, RunPhase::Running, Stage::Running);
     }
 
+    /// Debugging a `main`: ovim starts the JVM itself (suspended, listening
+    /// on a free port) so the program has the same stdin, output and process
+    /// group handling as Run; the adapter then attaches.
+    fn start_debug_process(&mut self, job: &mut LaunchJob) {
+        let Some(launch) = job.plan.as_ref().and_then(|p| p.launch.clone()) else {
+            return;
+        };
+        job.started_wall = SystemTime::now();
+        self.spawn_step(
+            job,
+            &launch.debug_command(),
+            RunPhase::WaitingForDebugger,
+            Stage::AwaitingDebugPort {
+                deadline: Instant::now() + self.launch.debug_port_timeout,
+            },
+        );
+    }
+
     fn start_debug_task(&mut self, job: &mut LaunchJob) {
         let Some(task) = job.plan.as_ref().and_then(|p| p.task.clone()) else {
             return;
         };
-        let Some(argv) = task.debug_argv.clone() else {
+        let Some(mut argv) = task.debug_argv.clone() else {
             return;
         };
+        job.debug_port = plan::surefire_debug_port(&argv);
+        if let Some(port) = crate::launch::process::free_port() {
+            if let Some(pinned) = plan::pin_surefire_debug_port(&argv, port) {
+                argv = pinned;
+                job.debug_port = Some(port);
+            }
+        }
         let spec = CommandSpec {
             argv,
             cwd: task.cwd.clone(),
@@ -1569,11 +1599,7 @@ impl Editor {
         job.clear_log();
         match (plan.kind, job.request.mode) {
             (_, LaunchMode::Run) => self.start_run_process(job),
-            (_, LaunchMode::Debug) => {
-                let launch = plan.launch.as_ref().expect("built plans are main plans");
-                let request = DapLaunchRequest::Launch(launch.dap_arguments.clone());
-                self.begin_debugger(job, request);
-            }
+            (_, LaunchMode::Debug) => self.start_debug_process(job),
         }
     }
 
@@ -1653,13 +1679,21 @@ impl Editor {
             self.finish_test_panel_run(job, exit_ok, Vec::new(), None, Vec::new());
             return;
         };
-        let cases = junit::read_reports_dir(&dir, job.started_wall - Duration::from_secs(2));
-        let summary = junit::summary_text(&cases);
+        let mut cases = junit::read_reports_dir(&dir, job.started_wall - Duration::from_secs(2));
         let roots = job
             .plan
             .as_ref()
             .map(|p| p.source_roots())
             .unwrap_or_default();
+        let method_hint = job
+            .plan
+            .as_ref()
+            .and_then(|p| p.task.as_ref())
+            .and_then(|t| t.method_name.clone());
+        junit::restore_parameterized_names(&mut cases, method_hint.as_deref(), |class| {
+            parameterized_methods_in_source(class, &roots)
+        });
+        let summary = junit::summary_text(&cases);
         let Some(summary_text) = summary.clone() else {
             self.finish_test_panel_run(job, exit_ok, cases, None, Vec::new());
             return;
@@ -1815,6 +1849,12 @@ impl Editor {
                 return true;
             }
         }
+        if let (Stage::AwaitingDebugPort { .. }, Some(port)) = (job.stage, job.debug_port) {
+            if crate::launch::process::port_is_listening(port) {
+                self.attach_to_listening_jvm(job, port);
+                return true;
+            }
+        }
         if !matches!(job.stage, Stage::StartingDebugger | Stage::Debugging { .. }) {
             return changed;
         }
@@ -1830,31 +1870,43 @@ impl Editor {
         } = job.stage
         {
             let child_running = job.proc.is_some();
-            if child_running && at.elapsed() > POST_SESSION_GRACE {
+            let crashed = job
+                .session_end
+                .as_ref()
+                .is_some_and(|end| end.adapter_crash.is_some());
+            // A JVM that lost its debugger to a crash has nobody left to
+            // drive it (it would run on, suspended or unobserved).
+            if child_running && (crashed || at.elapsed() > POST_SESSION_GRACE) {
                 if let Some(proc) = job.proc.as_mut() {
                     proc.kill();
                 }
             }
             if !child_running {
-                let end = job
-                    .session_end
-                    .unwrap_or(crate::dap::SessionEnd { exit_code: None });
+                let end = job.session_end.clone().unwrap_or(crate::dap::SessionEnd {
+                    exit_code: None,
+                    adapter_crash: None,
+                });
+                if let (Some(detail), false) = (&end.adapter_crash, job.stopping) {
+                    let message = format!("The debug adapter crashed ({detail})");
+                    self.fail_job(job, message);
+                    return true;
+                }
+                let exit = end.exit_code.or(job.proc_exit.and_then(|p| p.code));
                 let outcome = if job.stopping {
                     RunOutcome::Stopped
                 } else {
-                    match end.exit_code {
+                    match exit {
                         Some(0) => RunOutcome::Succeeded,
                         Some(_) => RunOutcome::Failed,
                         None => RunOutcome::Ended,
                     }
                 };
-                let text = match (job.stopping, end.exit_code) {
+                let text = match (job.stopping, exit) {
                     (true, _) => "Debug session stopped".to_string(),
                     (false, Some(code)) => format!("Debug session ended (exit code {code})"),
                     (false, None) => "Debug session ended".to_string(),
                 };
                 self.log_console(job.run_id, LineKind::System, text);
-                let exit = end.exit_code.or(job.proc_exit.and_then(|p| p.code));
                 self.finish_job(job, outcome, exit);
                 changed = true;
             }
@@ -2005,6 +2057,44 @@ impl Editor {
 
 /// One block per test for the test panel: `✓ Class.name (12ms)`, failures
 /// with message and the stack, skips dimmed by their `○` marker.
+/// The parameterized test methods of `class` (binary name, `$` for nested
+/// classes) as found in its source file under `roots`.
+fn parameterized_methods_in_source(class: &str, roots: &[PathBuf]) -> Vec<String> {
+    use crate::editor::test_runner::nearest::{discover_tests, TestFlavor};
+    let (package_class, chain) = match class.split_once('$') {
+        Some((outer, nested)) => (
+            outer,
+            std::iter::once(outer.rsplit('.').next().unwrap_or(outer))
+                .chain(nested.split('$'))
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        ),
+        None => (
+            class,
+            vec![class.rsplit('.').next().unwrap_or(class).to_string()],
+        ),
+    };
+    let simple = package_class.rsplit('.').next().unwrap_or(package_class);
+    for (ext, language) in [
+        ("java", crate::syntax::Language::Java),
+        ("kt", crate::syntax::Language::Kotlin),
+    ] {
+        let file = format!("{simple}.{ext}");
+        let Some(path) = stacktrace::resolve_frame_source(package_class, &file, roots) else {
+            continue;
+        };
+        let Ok(source) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        return discover_tests(language, &source)
+            .into_iter()
+            .filter(|t| t.flavor == TestFlavor::Parameterized && t.namespaces == chain)
+            .map(|t| t.name)
+            .collect();
+    }
+    Vec::new()
+}
+
 fn junit_panel_lines(cases: &[junit::TestCaseResult]) -> Vec<String> {
     let mut lines = Vec::new();
     for case in cases {
@@ -2062,4 +2152,32 @@ fn junit_panel_lines(cases: &[junit::TestCaseResult]) -> Vec<String> {
 fn last_lines(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
     lines[lines.len().saturating_sub(n)..].join(" | ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parameterized_methods_are_read_from_the_class_source_including_nested_classes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let pkg = root.join("src/test/java/p");
+        std::fs::create_dir_all(&pkg).unwrap();
+        std::fs::write(
+            pkg.join("OrdersTest.java"),
+            "package p;\nclass OrdersTest {\n  @Test void plain() {}\n  @ParameterizedTest @ValueSource(ints = {1}) void totals(int n) {}\n  @Nested class Empty {\n    @ParameterizedTest @ValueSource(ints = {1}) void zero(int n) {}\n  }\n}\n",
+        )
+        .unwrap();
+        let roots = [root];
+        assert_eq!(
+            parameterized_methods_in_source("p.OrdersTest", &roots),
+            vec!["totals"]
+        );
+        assert_eq!(
+            parameterized_methods_in_source("p.OrdersTest$Empty", &roots),
+            vec!["zero"]
+        );
+        assert!(parameterized_methods_in_source("p.Missing", &roots).is_empty());
+    }
 }

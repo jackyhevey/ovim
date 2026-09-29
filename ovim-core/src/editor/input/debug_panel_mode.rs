@@ -18,6 +18,10 @@ use crate::mode::Mode;
 
 pub fn handle_debug_panel_mode(editor: &mut Editor, key: KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(Modifiers::CONTROL);
+    if matches!(key.code, KeyCode::F(_)) && super::debug_keys::try_handle(editor, key)? {
+        editor.mark_dirty();
+        return Ok(());
+    }
     let half = (editor.debug_state().panel.view_height.get() / 2).max(1) as isize;
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => editor.set_mode(Mode::Normal),

@@ -24,7 +24,9 @@ use super::DapEvent;
 /// A running debug adapter process.
 pub struct DebugAdapterClient {
     /// The spawned process (held for lifetime management and `kill`).
-    process: std::sync::Mutex<Child>,
+    process: Arc<std::sync::Mutex<Child>>,
+    /// Set when we end the adapter ourselves, so its EOF is not a crash.
+    killed: Arc<std::sync::atomic::AtomicBool>,
     /// Stdin writer channel.
     writer_tx: mpsc::Sender<DapRequest>,
     /// Monotonically increasing sequence number.
@@ -54,7 +56,35 @@ impl DebugAdapterClient {
             .map_err(|e| anyhow!("failed to spawn debug adapter '{}': {}", command, e))?;
 
         let child_stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+        let child_stderr = child.stderr.take();
         let child_stdin = child.stdin.take().ok_or_else(|| anyhow!("no stdin"))?;
+
+        let process = Arc::new(std::sync::Mutex::new(child));
+        let killed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Keep the tail of the adapter's stderr: it is the only explanation
+        // when the adapter dies (and an undrained pipe would block it).
+        let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
+        if let Some(stderr) = child_stderr {
+            let tail = stderr_tail.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Ok(mut tail) = tail.lock() {
+                        tail.push_str(&line);
+                        tail.push('\n');
+                        if tail.len() > 4096 {
+                            let cut = tail.len() - 2048;
+                            let cut = (cut..tail.len())
+                                .find(|i| tail.is_char_boundary(*i))
+                                .unwrap_or(tail.len());
+                            tail.drain(..cut);
+                        }
+                    }
+                }
+            });
+        }
 
         let pending: Arc<DashMap<u64, oneshot::Sender<Result<Value>>>> = Arc::new(DashMap::new());
 
@@ -72,6 +102,9 @@ impl DebugAdapterClient {
 
         // Reader task: read responses and events from stdout.
         let pending_clone = pending.clone();
+        let reader_process = process.clone();
+        let reader_killed = killed.clone();
+        let reader_tail = stderr_tail.clone();
         let reader_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(child_stdout);
             loop {
@@ -100,14 +133,13 @@ impl DebugAdapterClient {
                             }
                         }
                     }
-                    Ok(None) => {
-                        // EOF — adapter exited.
-                        let _ = event_tx.send(DapEvent::Terminated).await;
-                        break;
-                    }
-                    Err(e) => {
-                        eprintln!("DAP read error: {e}");
-                        let _ = event_tx.send(DapEvent::Terminated).await;
+                    Ok(None) | Err(_) => {
+                        // EOF: the adapter is gone. Unless we ended it, that
+                        // is a crash (a normal end sends `terminated` first).
+                        if !reader_killed.load(Ordering::SeqCst) {
+                            let detail = adapter_exit_detail(&reader_process, &reader_tail).await;
+                            let _ = event_tx.send(DapEvent::AdapterExited { detail }).await;
+                        }
                         break;
                     }
                 }
@@ -117,7 +149,8 @@ impl DebugAdapterClient {
         });
 
         Ok(Self {
-            process: std::sync::Mutex::new(child),
+            process,
+            killed,
             writer_tx,
             next_seq: AtomicU64::new(1),
             pending,
@@ -232,6 +265,13 @@ impl DebugAdapterClient {
         Ok(())
     }
 
+    /// What the thread stopped on (`exceptionInfo`).
+    pub async fn exception_info(&self, thread_id: u64) -> Result<DapExceptionInfo> {
+        let args = serde_json::json!({ "threadId": thread_id });
+        let result = self.request("exceptionInfo", Some(args)).await?;
+        Ok(serde_json::from_value(result)?)
+    }
+
     pub async fn threads(&self) -> Result<Vec<DapThread>> {
         let result = self.request("threads", None).await?;
         let threads: Vec<DapThread> = serde_json::from_value(
@@ -326,9 +366,57 @@ impl DebugAdapterClient {
 
     /// Kills the adapter process. Never blocks.
     pub fn kill(&self) {
+        self.killed.store(true, Ordering::SeqCst);
         if let Ok(mut child) = self.process.lock() {
             let _ = child.start_kill();
         }
+    }
+}
+
+impl Drop for DebugAdapterClient {
+    fn drop(&mut self) {
+        self.killed.store(true, Ordering::SeqCst);
+    }
+}
+
+/// How the adapter ended, for the message shown to the user: exit status
+/// plus the tail of its stderr.
+async fn adapter_exit_detail(
+    process: &std::sync::Mutex<Child>,
+    stderr_tail: &std::sync::Mutex<String>,
+) -> String {
+    let mut status = None;
+    for _ in 0..10 {
+        status = process
+            .lock()
+            .ok()
+            .and_then(|mut child| child.try_wait().ok().flatten());
+        if status.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let how = match status {
+        Some(status) => match status.code() {
+            Some(code) => format!("exit code {code}"),
+            None => format!("{status}"),
+        },
+        None => "closed its output".to_string(),
+    };
+    // Let the stderr reader catch up with what the adapter printed last.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let tail = stderr_tail
+        .lock()
+        .map(|t| t.trim().to_string())
+        .unwrap_or_default();
+    let tail: String = {
+        let lines: Vec<&str> = tail.lines().collect();
+        lines[lines.len().saturating_sub(3)..].join(" | ")
+    };
+    if tail.is_empty() {
+        how
+    } else {
+        format!("{how}: {tail}")
     }
 }
 
@@ -351,10 +439,17 @@ fn parse_dap_event(msg: &DapIncoming) -> Option<DapEvent> {
                 .and_then(|b| b.get("allThreadsStopped"))
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let description = ["description", "text"].iter().find_map(|key| {
+                body.and_then(|b| b.get(*key))
+                    .and_then(|v| v.as_str())
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_owned)
+            });
             Some(DapEvent::Stopped {
                 reason,
                 thread_id,
                 all_threads_stopped,
+                description,
             })
         }
         "continued" => {

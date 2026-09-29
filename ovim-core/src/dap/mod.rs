@@ -37,6 +37,9 @@ pub enum DapEvent {
         reason: String,
         thread_id: Option<u64>,
         all_threads_stopped: bool,
+        /// The adapter's `description`/`text` for the stop (for an exception
+        /// stop: `Type: message`).
+        description: Option<String>,
     },
     /// Debuggee continued execution.
     Continued { thread_id: u64 },
@@ -48,6 +51,9 @@ pub enum DapEvent {
     Exited { exit_code: Option<i32> },
     /// Debug session terminated.
     Terminated,
+    /// The adapter process went away without saying goodbye: it crashed or
+    /// was killed. `detail` is its exit status and last stderr lines.
+    AdapterExited { detail: String },
     /// Debug adapter initialized (ready for configuration).
     Initialized,
 }
@@ -91,9 +97,6 @@ pub enum PendingDebugAction {
     Evaluate { expression: String },
     /// Fetch variables for an expanded object reference.
     FetchVariables { var_ref: u64 },
-    /// Re-send breakpoints for every file to a live session (no
-    /// `configurationDone`).
-    UpdateBreakpoints,
     /// Re-evaluate the watch expressions in the selected frame.
     RefreshWatches,
     /// Evaluate an expression for the hover popup (`K`), with its children.
@@ -115,6 +118,10 @@ pub struct DapManager {
     /// Stop was requested. Kept apart from `pending_action` (a single slot
     /// that stop/step/fetch events overwrite) so a stop can never be lost.
     stop_requested: bool,
+    /// Breakpoints or exception filters changed and the live session has to
+    /// hear about it. Also its own flag: a session that keeps stopping queues
+    /// a state fetch every tick, which would overwrite a queued sync.
+    breakpoint_sync_requested: bool,
     /// The launch/attach request for the session being started.
     pub launch_request: Option<DapLaunchRequest>,
     /// Debuggee/adapter output not yet copied into the run console.
@@ -124,12 +131,16 @@ pub struct DapManager {
     session_end: Option<SessionEnd>,
     /// Exit code from the most recent `exited` event.
     exit_code: Option<i32>,
+    /// What the adapter said it can do (`initialize` response).
+    capabilities: Option<DapCapabilities>,
 }
 
 /// How a debug session ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEnd {
     pub exit_code: Option<i32>,
+    /// Set when the adapter died mid-session (what it left behind).
+    pub adapter_crash: Option<String>,
 }
 
 impl Default for DapManager {
@@ -148,10 +159,12 @@ impl DapManager {
             event_tx,
             pending_action: None,
             stop_requested: false,
+            breakpoint_sync_requested: false,
             launch_request: None,
             console_output: Vec::new(),
             session_end: None,
             exit_code: None,
+            capabilities: None,
         }
     }
 
@@ -185,6 +198,16 @@ impl DapManager {
         }
     }
 
+    /// Asks the event loop to re-send breakpoints and exception filters.
+    pub fn request_breakpoint_sync(&mut self) {
+        self.breakpoint_sync_requested = true;
+    }
+
+    /// True once after [`request_breakpoint_sync`](Self::request_breakpoint_sync).
+    pub fn take_breakpoint_sync_request(&mut self) -> bool {
+        std::mem::take(&mut self.breakpoint_sync_requested)
+    }
+
     /// True once after [`request_stop`](Self::request_stop).
     pub fn take_stop_request(&mut self) -> bool {
         std::mem::take(&mut self.stop_requested)
@@ -194,6 +217,13 @@ impl DapManager {
     /// console yet, as `(DAP category, text)`.
     pub fn take_console_output(&mut self) -> Vec<(String, String)> {
         std::mem::take(&mut self.console_output)
+    }
+
+    /// Adds a line to the debug console (shown in the run console).
+    pub fn log_console(&mut self, text: String) {
+        self.state.output_lines.push(format!("[console] {text}"));
+        self.console_output
+            .push(("console".to_string(), format!("{text}\n")));
     }
 
     /// Returns (once) how the last session ended.
@@ -209,6 +239,7 @@ impl DapManager {
             .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
         let caps = client.initialize().await?;
         self.adopt_exception_filters(&caps.exception_breakpoint_filters);
+        self.capabilities = Some(caps);
         Ok(())
     }
 
@@ -228,6 +259,19 @@ impl DapManager {
                 label: f.label.clone(),
             })
             .collect();
+    }
+
+    /// Whether the running adapter supports logpoints (`None` before it has
+    /// answered `initialize`).
+    pub fn supports_log_points(&self) -> Option<bool> {
+        self.capabilities.as_ref().map(|c| c.supports_log_points)
+    }
+
+    /// Whether the running adapter supports hit-count conditions.
+    pub fn supports_hit_conditions(&self) -> Option<bool> {
+        self.capabilities
+            .as_ref()
+            .map(|c| c.supports_hit_conditional_breakpoints)
     }
 
     /// Sends the enabled exception filters (`setExceptionBreakpoints`). A
@@ -286,32 +330,69 @@ impl DapManager {
         path: &Path,
         lines: &[u64],
     ) -> Result<Vec<DapBreakpoint>> {
-        let client = self
-            .client
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
+        if self.client.is_none() {
+            anyhow::bail!("no debug adapter running");
+        }
 
         let source = DapSource {
             name: path.file_name().map(|n| n.to_string_lossy().to_string()),
             path: Some(path.to_string_lossy().to_string()),
         };
 
-        // Include conditions from state when syncing breakpoints.
-        let source_bps: Vec<DapSourceBreakpoint> = lines
-            .iter()
-            .map(|&line| DapSourceBreakpoint {
+        // Conditions, logpoints and hit counts ride along. An adapter that
+        // cannot honour a logpoint / hit count must not get the bare line
+        // (it would stop on every hit), so those are left out and said so.
+        let log_ok = self.supports_log_points() != Some(false);
+        let hit_ok = self.supports_hit_conditions() != Some(false);
+        let mut skipped = Vec::new();
+        let mut source_bps: Vec<DapSourceBreakpoint> = Vec::new();
+        for &line in lines {
+            let bp = self.state.breakpoint_at(path, line);
+            let log_message = bp.and_then(|b| b.log_message.clone());
+            let hit_condition = bp.and_then(|b| b.hit_condition.clone());
+            if (log_message.is_some() && !log_ok) || (hit_condition.is_some() && !hit_ok) {
+                skipped.push(line);
+                continue;
+            }
+            source_bps.push(DapSourceBreakpoint {
                 line,
-                condition: self
-                    .state
-                    .breakpoint_condition(path, line)
-                    .map(|s| s.to_owned()),
-            })
-            .collect();
+                condition: bp.and_then(|b| b.condition.clone()),
+                hit_condition,
+                log_message,
+            });
+        }
+        if !skipped.is_empty() {
+            let file = path.file_name().map(|n| n.to_string_lossy().into_owned());
+            self.log_console(format!(
+                "The debug adapter does not support logpoints / hit counts: not set at {}:{}",
+                file.unwrap_or_default(),
+                skipped
+                    .iter()
+                    .map(|l| l.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
 
+        let kept_back: Vec<state::BreakpointState> = skipped
+            .iter()
+            .filter_map(|&line| self.state.breakpoint_at(path, line).cloned())
+            .collect();
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
         let result = client.set_breakpoints(&source, &source_bps).await?;
 
-        // Update state.
+        // Update state (the ones we did not send stay, unverified).
         self.state.update_breakpoints(path, &result);
+        if let Some(entry) = self.state.breakpoints.get_mut(path) {
+            for mut bp in kept_back {
+                bp.verified = false;
+                entry.push(bp);
+            }
+            entry.sort_by_key(|bp| bp.line);
+        }
 
         Ok(result)
     }
@@ -354,6 +435,24 @@ impl DapManager {
             .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
         client.step_out(thread_id).await?;
         Ok(())
+    }
+
+    /// The debuggee's threads.
+    pub async fn threads(&self) -> Result<Vec<DapThread>> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
+        client.threads().await
+    }
+
+    /// What the stopped thread threw.
+    pub async fn exception_info(&self, thread_id: u64) -> Result<DapExceptionInfo> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no debug adapter running"))?;
+        client.exception_info(thread_id).await
     }
 
     /// Get stack trace for a thread.
@@ -416,6 +515,7 @@ impl DapManager {
         if had_session && self.session_end.is_none() {
             self.session_end = Some(SessionEnd {
                 exit_code: self.exit_code,
+                adapter_crash: None,
             });
         }
         result
@@ -434,6 +534,7 @@ impl DapManager {
         if self.session_end.is_none() {
             self.session_end = Some(SessionEnd {
                 exit_code: self.exit_code,
+                adapter_crash: None,
             });
         }
     }
@@ -447,16 +548,24 @@ impl DapManager {
                     reason,
                     thread_id,
                     all_threads_stopped: _,
+                    description,
                 } => {
                     self.state.stopped_thread = *thread_id;
+                    self.state.event_thread = *thread_id;
                     self.state.stop_reason = Some(reason.clone());
+                    self.state.exception = (reason == "exception")
+                        .then(|| description.clone())
+                        .flatten();
                     self.state.is_running = false;
                     self.state.panels_visible = true;
                 }
                 DapEvent::Continued { thread_id: _ } => {
                     self.state.is_running = true;
                     self.state.stopped_thread = None;
+                    self.state.event_thread = None;
+                    self.state.threads.clear();
                     self.state.stop_reason = None;
+                    self.state.exception = None;
                     // Clear stale frame/variable data.
                     self.state.stack_frames.clear();
                     self.state.scopes.clear();
@@ -485,6 +594,18 @@ impl DapManager {
                     self.end_session();
                 }
                 DapEvent::Terminated => self.end_session(),
+                DapEvent::AdapterExited { detail } => {
+                    if self.state.session_active || self.client.is_some() {
+                        self.end_session();
+                        if let Some(end) = self.session_end.as_mut() {
+                            end.adapter_crash = Some(detail.clone());
+                        }
+                        self.console_output.push((
+                            "console".to_string(),
+                            format!("Debug adapter crashed ({detail})\n"),
+                        ));
+                    }
+                }
                 DapEvent::Initialized => {
                     // The adapter is ready: send launch/attach first, then
                     // breakpoints and configurationDone.
@@ -521,6 +642,16 @@ mod tests {
         dap.pending_action = Some(PendingDebugAction::FetchState);
         assert!(dap.take_stop_request());
         assert!(!dap.take_stop_request(), "reported once");
+    }
+
+    #[test]
+    fn a_breakpoint_sync_request_survives_the_pending_slot_being_overwritten() {
+        let mut dap = DapManager::new();
+        dap.request_breakpoint_sync();
+        // A session that keeps stopping queues a state fetch every tick.
+        dap.pending_action = Some(PendingDebugAction::FetchState);
+        assert!(dap.take_breakpoint_sync_request());
+        assert!(!dap.take_breakpoint_sync_request(), "reported once");
     }
 
     #[test]

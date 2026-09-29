@@ -884,6 +884,51 @@ fn jvm_local_plan_filters_gradle_by_nearest_method() {
     assert!(argv.contains(&"com.example.app.CalcTest$Inner.nestedCase".to_string()));
 }
 
+/// OV-00448: on a class declaration line the nearest test is the class.
+#[test]
+fn jvm_nearest_on_a_class_declaration_runs_the_whole_class() {
+    use super::jvm::local_test_plan;
+    let (_dir, file) = gradle_project();
+    let filters = |line: usize| -> (Vec<String>, (usize, usize), bool) {
+        let local =
+            local_test_plan(TestScope::Nearest, &file, JAVA_SRC, line, Language::Java).unwrap();
+        let task = local.plan.task.unwrap();
+        let filters = task
+            .argv
+            .iter()
+            .skip_while(|a| *a != "--tests")
+            .filter(|a| !a.starts_with("--"))
+            .cloned()
+            .collect();
+        (filters, local.anchor, local.cursor_inside)
+    };
+    let class_line = JAVA_SRC
+        .lines()
+        .position(|l| l.contains("class CalcTest"))
+        .unwrap();
+    let (all, anchor, inside) = filters(class_line);
+    assert_eq!(
+        all,
+        vec!["com.example.app.CalcTest", "com.example.app.CalcTest$Inner"],
+        "the class and its nested classes, not the first method"
+    );
+    assert_eq!(anchor.0, class_line, "the server is asked about the class");
+    assert!(!inside);
+
+    // The nested class line runs just the nested class.
+    let inner_line = JAVA_SRC
+        .lines()
+        .position(|l| l.contains("class Inner"))
+        .unwrap();
+    let (nested, _, _) = filters(inner_line);
+    assert_eq!(nested, vec!["com.example.app.CalcTest$Inner"]);
+
+    // A method line still runs that method.
+    let (method, _, inside) = filters(9);
+    assert_eq!(method, vec!["com.example.app.CalcTest.adds"]);
+    assert!(inside);
+}
+
 #[test]
 fn jvm_local_plan_file_scope_selects_every_test_class() {
     use super::jvm::local_test_plan;

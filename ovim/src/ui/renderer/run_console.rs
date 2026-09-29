@@ -34,11 +34,13 @@ mod colors {
 const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Height of the console panel for a content area of `content_height` rows.
-pub fn panel_height(content_height: u16) -> u16 {
+pub fn panel_height(content_height: u16, delta: i16) -> u16 {
     if content_height < 10 {
         return 0;
     }
-    (content_height / 3).clamp(6, 20).min(content_height / 2)
+    let base = i32::from((content_height / 3).clamp(6, 20));
+    let wanted = (base + i32::from(delta)).max(4) as u16;
+    wanted.min(content_height * 2 / 3)
 }
 
 fn status_style(run: &RunRecord) -> (String, Color) {

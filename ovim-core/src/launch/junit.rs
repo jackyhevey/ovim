@@ -253,6 +253,40 @@ pub fn parse_junit_xml(xml: &str) -> Vec<TestCaseResult> {
 
 /// Reads every `*.xml` in `dir` modified at or after `since` (results from
 /// earlier runs are stale) and returns all test cases, ordered by file name.
+/// JUnit 5 reports a parameterized invocation by its display name
+/// (`[1] 5`), which drops the method name. Put it back: from the method the
+/// run was limited to, else from a stack frame of the failure that names one
+/// of the class's parameterized methods, else when the class has exactly one.
+/// `parameterized_methods(class)` lists the class's parameterized test
+/// methods as found in its source.
+pub fn restore_parameterized_names(
+    cases: &mut [TestCaseResult],
+    method_hint: Option<&str>,
+    parameterized_methods: impl Fn(&str) -> Vec<String>,
+) {
+    for case in cases.iter_mut().filter(|c| c.name.starts_with('[')) {
+        let candidates = parameterized_methods(&case.class_name);
+        let from_frame = case.details.as_deref().and_then(|details| {
+            let prefix = format!("{}.", case.class_name);
+            details.lines().find_map(|line| {
+                let frame = line.trim().strip_prefix("at ")?.strip_prefix(&prefix)?;
+                let method = frame.split('(').next()?;
+                candidates
+                    .iter()
+                    .any(|c| c == method)
+                    .then(|| method.to_string())
+            })
+        });
+        let method = method_hint
+            .map(str::to_string)
+            .or(from_frame)
+            .or_else(|| (candidates.len() == 1).then(|| candidates[0].clone()));
+        if let Some(method) = method {
+            case.name = format!("{method} {}", case.name);
+        }
+    }
+}
+
 pub fn read_reports_dir(dir: &Path, since: SystemTime) -> Vec<TestCaseResult> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -278,6 +312,45 @@ pub fn read_reports_dir(dir: &Path, since: SystemTime) -> Vec<TestCaseResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn case(class: &str, name: &str, details: Option<&str>) -> TestCaseResult {
+        TestCaseResult {
+            class_name: class.into(),
+            name: name.into(),
+            status: CaseStatus::Passed,
+            message: None,
+            details: details.map(str::to_string),
+            seconds: 0.0,
+        }
+    }
+
+    /// OV-00449: parameterized invocations keep their method name.
+    #[test]
+    fn parameterized_invocations_get_their_method_name_back() {
+        let methods = |_: &str| vec!["totals".to_string(), "sizes".to_string()];
+        let mut cases = vec![
+            case("p.OrdersTest", "[1] 1", None),
+            case("p.OrdersTest", "plain()", None),
+            case(
+                "p.OrdersTest",
+                "[2] 5",
+                Some("AssertionError\n\tat p.OrdersTest.helper(OrdersTest.java:5)\n\tat p.OrdersTest.sizes(OrdersTest.java:9)"),
+            ),
+        ];
+        // Two parameterized methods and no other hint: only the stack tells.
+        restore_parameterized_names(&mut cases, None, methods);
+        assert_eq!(cases[0].name, "[1] 1", "ambiguous stays as reported");
+        assert_eq!(cases[1].name, "plain()");
+        assert_eq!(cases[2].name, "sizes [2] 5");
+
+        // A single candidate, or the method the run was limited to, is enough.
+        let mut cases = vec![case("p.T", "[1] a", None)];
+        restore_parameterized_names(&mut cases, None, |_| vec!["only".to_string()]);
+        assert_eq!(cases[0].name, "only [1] a");
+        let mut cases = vec![case("p.T", "[1] a", None)];
+        restore_parameterized_names(&mut cases, Some("picked"), |_| vec![]);
+        assert_eq!(cases[0].name, "picked [1] a");
+    }
 
     const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <testsuite name="com.example.FooTest" tests="4" skipped="1" failures="1" errors="0">

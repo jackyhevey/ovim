@@ -589,14 +589,38 @@ async fn a_broken_debug_toml_is_reported_not_silently_ignored() {
 struct DebugSession {
     inner: Session,
     dap_dir: PathBuf,
+    _jdk: tokio::sync::MutexGuard<'static, ()>,
 }
 
+/// Port the fake JVM claims to listen on (the fake adapter does not connect).
+const FAKE_JDWP_PORT: u16 = 41999;
+
 impl DebugSession {
+    /// The debuggee is a fake JVM that announces its JDWP port and then
+    /// echoes its stdin until EOF.
     async fn new(commands: &[&str]) -> Self {
+        Self::with_jvm(
+            commands,
+            "while read line; do echo \"in:$line\"; done\nexit 0",
+        )
+        .await
+    }
+
+    /// `after_listening` is the fake JVM's script after it has printed the
+    /// `Listening for transport` line.
+    async fn with_jvm(commands: &[&str], after_listening: &str) -> Self {
+        let jdk = JDK_LOCK.lock().await;
         let inner = Session::new(commands).await;
+        inner.fake_java(&format!(
+            "echo 'Listening for transport dt_socket at address: {FAKE_JDWP_PORT}'\n{after_listening}"
+        ));
         let dap_dir = inner.root.join("dap");
         std::fs::create_dir_all(&dap_dir).unwrap();
-        Self { inner, dap_dir }
+        Self {
+            inner,
+            dap_dir,
+            _jdk: jdk,
+        }
     }
 
     fn adapter(&self, scenario: Value) -> (String, Vec<String>) {
@@ -643,15 +667,17 @@ async fn wait_gone(pid: i64) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn debug_at_cursor_launches_through_the_adapter_and_keeps_output_after_it_ends() {
-    let mut d = DebugSession::new(&resolve_commands()).await;
+async fn debug_at_cursor_starts_the_jvm_itself_attaches_the_adapter_and_keeps_output_after_it_ends()
+{
+    let mut d = DebugSession::with_jvm(
+        &resolve_commands(),
+        "echo hello\necho boom >&2\nsleep 0.5\nexit 2",
+    )
+    .await;
     let adapter = d.adapter(json!({
         "on_configuration_done": [
-            {"event": "output", "body": {"category": "stdout", "output": "hello\nwor"}},
-            {"event": "output", "body": {"category": "stdout", "output": "ld\n"}},
-            {"event": "output", "body": {"category": "stderr", "output": "boom\n"}},
-            {"event": "exited", "body": {"exitCode": 2}, "delay": 0.2},
-            {"event": "terminated"}
+            {"event": "output", "body": {"category": "stdout", "output": "adapter chatter\n"}, "delay": 0.1},
+            {"event": "terminated", "delay": 0.2}
         ]
     }));
     d.inner.script_resolve(d.inner.main_plan(None));
@@ -664,27 +690,19 @@ async fn debug_at_cursor_launches_through_the_adapter_and_keeps_output_after_it_
         .until("the session to end", |s| s.run_finished())
         .await;
 
-    let launch = d.requests("launch");
-    assert_eq!(launch.len(), 1);
-    let arguments = &launch[0]["arguments"];
-    assert_eq!(arguments["mainClass"], "com.example.Main");
-    assert_eq!(arguments["classpath"], "/cp/classes");
-    assert_eq!(arguments["projectRoot"], d.inner.root.to_str().unwrap());
-    assert_eq!(arguments["env"]["GREETING"], "hi");
-    let order: Vec<String> = [
-        "initialize",
-        "launch",
-        "setBreakpoints",
-        "configurationDone",
-    ]
-    .iter()
-    .filter(|c| !d.requests(c).is_empty())
-    .map(|c| c.to_string())
-    .collect();
+    // ovim owns the JVM; the adapter attaches to the port it announced.
     assert!(
-        order.contains(&"initialize".to_string())
-            && order.contains(&"configurationDone".to_string())
+        d.requests("launch").is_empty(),
+        "no DAP launch: ovim spawns the JVM"
     );
+    let attach = d.requests("attach");
+    assert_eq!(attach.len(), 1);
+    assert_eq!(attach[0]["arguments"]["port"], FAKE_JDWP_PORT);
+    assert_eq!(
+        attach[0]["arguments"]["projectRoot"],
+        d.inner.root.to_str().unwrap()
+    );
+    assert!(!d.requests("configurationDone").is_empty());
 
     let run = d.inner.test.editor.run_console().viewed().unwrap();
     let out: Vec<(LineKind, &str)> = run
@@ -693,12 +711,8 @@ async fn debug_at_cursor_launches_through_the_adapter_and_keeps_output_after_it_
         .map(|l| (l.kind, l.text.as_str()))
         .collect();
     assert!(out.contains(&(LineKind::Stdout, "hello")), "{out:?}");
-    assert!(
-        out.contains(&(LineKind::Stdout, "world")),
-        "split chunks are joined: {out:?}"
-    );
     assert!(out.contains(&(LineKind::Stderr, "boom")), "{out:?}");
-    assert_eq!(run.exit_code, Some(2), "the exited event's code is shown");
+    assert_eq!(run.exit_code, Some(2), "the JVM's own exit code is shown");
     assert_eq!(d.inner.outcome(), RunOutcome::Failed);
 
     // Output survives the session; the adapter and UI state are gone.
@@ -711,6 +725,38 @@ async fn debug_at_cursor_launches_through_the_adapter_and_keeps_output_after_it_
         !process_alive(pid),
         "the adapter process must not linger after terminate"
     );
+    d.inner.stop_lsp().await;
+}
+
+/// OV-00444: a debugged program reads the same stdin as a run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_debugged_program_takes_run_input_and_eof() {
+    let mut d = DebugSession::new(&resolve_commands()).await;
+    let adapter = d.adapter(json!({}));
+    d.inner.script_resolve(d.inner.main_plan(None));
+    d.inner
+        .test
+        .editor
+        .launch_at_cursor_with(ovim_core::launch::LaunchMode::Debug, Some(adapter));
+    let dap_dir = d.dap_dir.clone();
+    d.inner
+        .until("configurationDone", |_| {
+            !dap_requests(&dap_dir, "configurationDone").is_empty()
+        })
+        .await;
+    d.inner.test.command("RunInput hi there");
+    d.inner
+        .until("the echo", |s| s.console_text().contains("in:hi there"))
+        .await;
+    assert!(d.inner.console_text().contains("» hi there"));
+    d.inner.test.command("RunEof");
+    d.inner
+        .until("the program to end", |s| {
+            s.console_text().contains("Process finished")
+        })
+        .await;
+    d.inner.test.keys(" ds");
+    d.inner.until("stopped", |s| s.run_finished()).await;
     d.inner.stop_lsp().await;
 }
 
@@ -892,6 +938,57 @@ async fn test_debug_waits_for_the_listening_line_on_stdout_or_stderr_and_attache
         assert!(!d.inner.test.editor.is_debug_active());
         d.inner.stop_lsp().await;
     }
+}
+
+/// OV-00445: surefire swallows the JVM's `Listening for transport` line, so
+/// ovim gives the JVM its own address and watches that port instead of
+/// waiting for text that never comes (it used to hang for the whole timeout).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn maven_test_debug_attaches_when_the_pinned_port_listens_without_any_output() {
+    let mut d = DebugSession::new(&resolve_commands()).await;
+    let adapter = d.adapter(json!({}));
+    // Plays mvn: prints nothing about JDWP, but the "forked JVM" listens on the
+    // address handed to -Dmaven.surefire.debug.
+    let script = d.inner.write_script(
+        "mvn-fake.sh",
+        "echo '[INFO] T E S T S'\nport=$(echo \"$2\" | sed 's/.*address=127.0.0.1://')\necho \"$2\" > args.txt\nexec python3 -c \"import socket,time; s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(('127.0.0.1', $port)); s.listen(1); time.sleep(300)\"",
+    );
+    let mut plan = test_plan(&d.inner, &script);
+    plan["test"]["debugArgv"] = json!([script, "-Dtest=FooTest", "-Dmaven.surefire.debug", "test"]);
+    d.inner.script_resolve(plan);
+    d.inner
+        .test
+        .editor
+        .set_debug_port_timeout(Duration::from_secs(20));
+    d.inner
+        .test
+        .editor
+        .launch_at_cursor_with(ovim_core::launch::LaunchMode::Debug, Some(adapter));
+    let dap_dir = d.dap_dir.clone();
+    d.inner
+        .until("attach", |_| !dap_requests(&dap_dir, "attach").is_empty())
+        .await;
+    let port = d.requests("attach")[0]["arguments"]["port"]
+        .as_u64()
+        .unwrap();
+    assert_ne!(port, 5005, "not the hardcoded surefire default");
+    let args = std::fs::read_to_string(d.inner.root.join("args.txt")).unwrap();
+    assert!(
+        args.contains(&format!("address=127.0.0.1:{port}")),
+        "{args}"
+    );
+
+    // Stop takes the whole process tree down, including the listener.
+    d.inner.test.keys(" rs");
+    d.inner.until("stopped", |s| s.run_finished()).await;
+    for _ in 0..100 {
+        if !ovim_core::launch::process::port_is_listening(port as u16) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!ovim_core::launch::process::port_is_listening(port as u16));
+    d.inner.stop_lsp().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1593,4 +1690,331 @@ async fn run_input_feeds_the_programs_stdin_and_eof_ends_it() {
         .status_message()
         .contains("No program is running"));
     s.stop_lsp().await;
+}
+
+/// Starts a stopped debug session against the scripted adapter and waits for
+/// the frame/variables to load. `scenario` gets the project root.
+async fn stopped_session(scenario: impl FnOnce(&Path) -> Value) -> DebugSession {
+    let mut d = DebugSession::new(&resolve_commands()).await;
+    let adapter = d.adapter(scenario(&d.inner.root));
+    d.inner.script_resolve(d.inner.main_plan(None));
+    d.inner
+        .test
+        .editor
+        .launch_at_cursor_with(ovim_core::launch::LaunchMode::Debug, Some(adapter));
+    d.inner
+        .until("the stop to be loaded", |s| {
+            s.test.editor.debug_state().variables.contains_key(&10)
+        })
+        .await;
+    d
+}
+
+/// OV-00441: `:eval` is explicit evaluation ("repl", which may run method
+/// calls); only `K` hover is a side-effect-free "hover" evaluation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn eval_command_uses_the_repl_context_and_hover_uses_hover() {
+    let mut d = stopped_session(stopped_scenario).await;
+    d.inner.test.command("eval n * 2");
+    d.inner
+        .until("the eval", |s| {
+            s.test.editor.status_message().contains("= 6")
+        })
+        .await;
+    let contexts: Vec<Value> = d
+        .requests("evaluate")
+        .iter()
+        .map(|r| r["arguments"]["context"].clone())
+        .collect();
+    assert!(contexts.contains(&json!("repl")), "{contexts:?}");
+    assert!(!contexts.contains(&json!("hover")), "{contexts:?}");
+    d.inner.stop_lsp().await;
+}
+
+/// OV-00442: stopping in a file other than the open buffer opens that file
+/// and the execution marker belongs to that buffer only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_in_another_file_opens_it_and_marks_only_that_buffer() {
+    let mut d = stopped_session(|root| {
+        std::fs::write(root.join("Other.controlled"), "a\nb\nc\n").unwrap();
+        let mut scenario = stopped_scenario(root);
+        scenario["frames"] = json!([{
+            "id": 1, "name": "label", "line": 3, "column": 1,
+            "source": {"name": "Other.controlled", "path": root.join("Other.controlled")}
+        }]);
+        scenario
+    })
+    .await;
+    let other = d.inner.root.join("Other.controlled");
+    assert_eq!(
+        d.inner.test.editor.buffer().file_path(),
+        Some(other.to_str().unwrap()),
+        "the stop opens the file"
+    );
+    assert_eq!(d.inner.test.editor.buffer().cursor().line(), 2);
+    assert_eq!(
+        d.inner.test.editor.execution_line_in_current_buffer(),
+        Some(3)
+    );
+
+    // Back in the original file the marker must not show up on line 3.
+    let main = d.inner.root.join("Main.controlled");
+    d.inner.test.command(&format!("e {}", main.display()));
+    d.inner
+        .until("Main to be shown", |s| {
+            s.test
+                .editor
+                .buffer()
+                .file_path()
+                .is_some_and(|p| p.ends_with("Main.controlled"))
+        })
+        .await;
+    assert_eq!(d.inner.test.editor.execution_line_in_current_buffer(), None);
+    d.inner.stop_lsp().await;
+}
+
+/// OV-00443: an exception stop asks for `exceptionInfo` and shows type and
+/// message in the panel, the status line and the console.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_exception_stop_shows_the_exception_type_and_message() {
+    let mut d = stopped_session(|root| {
+        let mut scenario = stopped_scenario(root);
+        scenario["on_configuration_done"] = json!([
+            {"event": "stopped", "body": {"reason": "exception", "threadId": 1, "allThreadsStopped": true}}
+        ]);
+        scenario["exception_info"] = json!({
+            "exceptionId": "java.lang.ArrayIndexOutOfBoundsException",
+            "description": "java.lang.ArrayIndexOutOfBoundsException: Index 5 out of bounds for length 2",
+            "breakMode": "unhandled",
+            "details": {"message": "Index 5 out of bounds for length 2",
+                        "typeName": "java.lang.ArrayIndexOutOfBoundsException"}
+        });
+        scenario
+    })
+    .await;
+    d.inner
+        .until("exception info", |s| {
+            s.test.editor.debug_state().exception.is_some()
+        })
+        .await;
+    assert!(!d.requests("exceptionInfo").is_empty());
+    let want = "java.lang.ArrayIndexOutOfBoundsException: Index 5 out of bounds for length 2";
+    assert!(
+        panel_labels(&d.inner).iter().any(|l| l.contains(want)),
+        "{:?}",
+        panel_labels(&d.inner)
+    );
+    assert!(d.inner.test.editor.status_message().contains(want));
+    d.inner
+        .until("the console line", |s| s.console_text().contains(want))
+        .await;
+    d.inner.stop_lsp().await;
+}
+
+/// OV-00446: an adapter that dies mid-session is a failure with its exit
+/// status and last words, not a successful "exit 0" ending; the JVM it was
+/// driving is stopped too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crashing_adapter_is_reported_as_a_crash_and_takes_the_jvm_down() {
+    let mut d = DebugSession::new(&resolve_commands()).await;
+    let adapter = d.adapter(json!({
+        "on_configuration_done": [
+            {"event": "crash", "message": "thread 'main' panicked at jdwp.rs:1", "code": 101, "delay": 0.2}
+        ]
+    }));
+    d.inner.script_resolve(d.inner.main_plan(None));
+    d.inner
+        .test
+        .editor
+        .launch_at_cursor_with(ovim_core::launch::LaunchMode::Debug, Some(adapter));
+    d.inner
+        .until("the session to end", |s| s.run_finished())
+        .await;
+    match d.inner.outcome() {
+        RunOutcome::Error(message) => {
+            assert!(message.contains("crashed"), "{message}");
+            assert!(message.contains("101"), "{message}");
+            assert!(message.contains("panicked at jdwp.rs:1"), "{message}");
+        }
+        other => panic!("expected an error outcome, got {other:?}"),
+    }
+    assert!(d.inner.test.editor.status_message().contains("crashed"));
+    assert!(!d.inner.test.editor.is_debug_active());
+    d.inner.stop_lsp().await;
+}
+
+/// OV-00447: the debug function keys work whichever panel has the keyboard
+/// focus, and an exception filter toggled at a stop reaches the adapter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn function_keys_work_from_the_debug_panel_and_the_run_console() {
+    let mut d = stopped_session(stopped_scenario).await;
+    d.inner.test.keys(" df");
+    assert_eq!(d.inner.test.editor.mode(), Mode::DebugPanel);
+    d.inner.test.press_key(ovim_core::KeyCode::F(10));
+    d.inner
+        .until("next", |s| {
+            !dap_requests(&s.root.join("dap"), "next").is_empty()
+        })
+        .await;
+    d.inner.test.press_key(ovim_core::KeyCode::F(11));
+    d.inner
+        .until("stepIn", |s| {
+            !dap_requests(&s.root.join("dap"), "stepIn").is_empty()
+        })
+        .await;
+    d.inner.test.keys("q");
+    d.inner.test.keys(" rf");
+    assert_eq!(d.inner.test.editor.mode(), Mode::RunConsole);
+    d.inner.test.press_key(ovim_core::KeyCode::F(5));
+    d.inner
+        .until("continue", |s| {
+            !dap_requests(&s.root.join("dap"), "continue").is_empty()
+        })
+        .await;
+    d.inner.test.keys("q");
+    d.inner.stop_lsp().await;
+}
+
+/// OV-00449: the panel lists the threads and Enter on one shows its stack.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_panel_lists_threads_and_switches_the_inspected_one() {
+    let mut d = stopped_session(|root| {
+        std::fs::write(root.join("Other.controlled"), "a\nb\nc\n").unwrap();
+        let mut scenario = stopped_scenario(root);
+        scenario["threads"] = json!([
+            {"id": 1, "name": "main"},
+            {"id": 2, "name": "worker-1"},
+            {"id": 3, "name": "Reference Handler"}
+        ]);
+        scenario["frames_by_thread"] = json!({
+            "2": [{"id": 7, "name": "runWorker", "line": 2, "column": 1,
+                   "source": {"name": "Other.controlled", "path": root.join("Other.controlled")}}]
+        });
+        scenario
+    })
+    .await;
+    d.inner
+        .until("the thread list", |s| {
+            panel_labels(s).contains(&"worker-1 (2)".to_string())
+        })
+        .await;
+    let labels = panel_labels(&d.inner);
+    assert!(labels.contains(&"main (1)".to_string()), "{labels:?}");
+    assert!(
+        !labels.iter().any(|l| l.contains("Reference Handler")),
+        "JVM housekeeping threads are hidden: {labels:?}"
+    );
+
+    d.inner.test.keys(" df");
+    for _ in 0..20 {
+        let cursor = d.inner.test.editor.debug_state().panel.cursor;
+        if d.inner.test.editor.debug_panel_rows()[cursor].label == "worker-1 (2)" {
+            break;
+        }
+        d.inner.test.keys("j");
+    }
+    d.inner.test.keys("<CR>");
+    d.inner
+        .until("the other thread's stack", |s| {
+            panel_labels(s).contains(&"runWorker Other.controlled:2".to_string())
+        })
+        .await;
+    assert_eq!(d.inner.test.editor.debug_state().stopped_thread, Some(2));
+    assert!(d
+        .inner
+        .test
+        .editor
+        .buffer()
+        .file_path()
+        .is_some_and(|p| p.ends_with("Other.controlled")));
+    // Stepping now steps the inspected thread.
+    d.inner.test.keys("n");
+    d.inner
+        .until("next on thread 2", |s| {
+            dap_requests(&s.root.join("dap"), "next")
+                .last()
+                .is_some_and(|r| r["arguments"]["threadId"] == 2)
+        })
+        .await;
+    d.inner.test.keys("q");
+    d.inner.stop_lsp().await;
+}
+
+/// OV-00449: logpoints and hit counts are sent when the adapter supports
+/// them; when it does not, the line is not sent bare (it would stop on every
+/// hit) and the console says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn logpoints_and_hit_counts_follow_the_adapters_capabilities() {
+    for supported in [true, false] {
+        let mut d = stopped_session(|root| {
+            let mut scenario = stopped_scenario(root);
+            scenario["capabilities"] = json!({
+                "supportsLogPoints": supported,
+                "supportsHitConditionalBreakpoints": supported
+            });
+            scenario
+        })
+        .await;
+        let baseline = d.requests("setBreakpoints").len();
+        d.inner.test.set_cursor(0, 0);
+        d.inner.test.command("DebugLogpoint value is {n}");
+        d.inner
+            .until("the logpoint sync", |s| {
+                dap_requests(&s.root.join("dap"), "setBreakpoints").len() > baseline
+            })
+            .await;
+        let last = d.requests("setBreakpoints").last().unwrap().clone();
+        let sent = &last["arguments"]["breakpoints"];
+        if supported {
+            assert_eq!(sent[0]["logMessage"], "value is {n}", "{last}");
+            d.inner.test.command("DebugHitCount >3");
+            d.inner
+                .until("the hit count sync", |s| {
+                    dap_requests(&s.root.join("dap"), "setBreakpoints")
+                        .last()
+                        .is_some_and(|r| r["arguments"]["breakpoints"][0]["hitCondition"] == ">3")
+                })
+                .await;
+            let labels = d
+                .inner
+                .test
+                .editor
+                .debug_panel_rows()
+                .into_iter()
+                .filter_map(|r| r.value)
+                .collect::<Vec<_>>();
+            assert!(labels
+                .iter()
+                .any(|v| v.contains("hits >3") && v.contains("log")));
+        } else {
+            assert_eq!(sent, &json!([]), "not sent bare: {last}");
+            d.inner
+                .until("the explanation", |s| {
+                    s.console_text().contains("does not support logpoints")
+                })
+                .await;
+            assert_eq!(
+                d.inner.test.editor.debug_state().all_breakpoints().len(),
+                1,
+                "the breakpoint stays listed"
+            );
+        }
+        d.inner.stop_lsp().await;
+    }
+}
+
+/// OV-00449: panels can be resized (`:PanelSize`, `+`/`-` in the console).
+#[test]
+fn panel_size_command_resizes_the_side_panels_and_the_console() {
+    let mut t = EditorTest::new("x\n");
+    t.command("PanelSize test +6");
+    assert_eq!(t.editor.test_panel().width_delta, 6);
+    t.command("PanelSize debug -4");
+    assert_eq!(t.editor.debug_state().panel.width_delta, -4);
+    t.command("PanelSize console +3");
+    assert_eq!(t.editor.run_console().height_delta, 3);
+    t.command("PanelSize test reset");
+    assert_eq!(t.editor.test_panel().width_delta, 0);
+    t.command("PanelSize nonsense +1");
+    assert!(t.editor.status_message().contains("Unknown panel"));
 }

@@ -8,9 +8,12 @@ argv[1] is a directory shared with the test:
       "initialize_error": message; respond to initialize with a failure
       "on_configuration_done": list of DAP event/response bodies to emit
           each item: {"event": "output", "body": {...}, "delay": 0.1}
+      "capabilities": extra capabilities advertised (supportsLogPoints, ...)
       "exception_filters": advertised exceptionBreakpointFilters
+      "threads": answer to threads; "frames_by_thread": {"<threadId>": [frame...]}
       "frames", "scopes": answers for stackTrace / scopes
       "variables": {"<variablesReference>": [variable, ...]}
+      "exception_info": body answered to exceptionInfo (else it fails)
       "evaluate": {"<expression>": {"result": ..., "type": ..., "variablesReference": ...}}
 """
 
@@ -78,6 +81,7 @@ while True:
         capabilities = {"supportsConfigurationDoneRequest": True}
         if "exception_filters" in scenario:
             capabilities["exceptionBreakpointFilters"] = scenario["exception_filters"]
+        capabilities.update(scenario.get("capabilities", {}))
         respond(request, capabilities)
         event("initialized")
     elif command in ("launch", "attach"):
@@ -92,11 +96,17 @@ while True:
         respond(request)
         for item in scenario.get("on_configuration_done", []):
             time.sleep(item.get("delay", 0))
+            if item["event"] == "crash":
+                sys.stderr.write(item.get("message", "boom") + "\n")
+                sys.stderr.flush()
+                os._exit(item.get("code", 101))
             event(item["event"], item.get("body"))
     elif command == "threads":
-        respond(request, {"threads": [{"id": 1, "name": "main"}]})
+        respond(request, {"threads": scenario.get("threads", [{"id": 1, "name": "main"}])})
     elif command == "stackTrace":
-        respond(request, {"stackFrames": scenario.get("frames", [])})
+        by_thread = scenario.get("frames_by_thread", {})
+        thread = str(request["arguments"].get("threadId"))
+        respond(request, {"stackFrames": by_thread.get(thread, scenario.get("frames", []))})
     elif command == "scopes":
         respond(request, {"scopes": scenario.get("scopes", [])})
     elif command == "variables":
@@ -109,6 +119,11 @@ while True:
             respond(request, known[expression])
         else:
             respond(request, success=False, message=f"cannot evaluate {expression}")
+    elif command == "exceptionInfo":
+        if "exception_info" in scenario:
+            respond(request, scenario["exception_info"])
+        else:
+            respond(request, success=False, message="no exception")
     elif command == "disconnect":
         respond(request)
         if scenario.get("linger_after_disconnect"):

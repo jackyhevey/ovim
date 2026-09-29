@@ -232,6 +232,8 @@ pub struct RunConsoleState {
     pub cursor: usize,
     /// Rows available for output in the last render (set by the frontend).
     pub view_height: usize,
+    /// Rows added to (or taken from) the default panel height.
+    pub height_delta: i16,
     next_id: u64,
 }
 

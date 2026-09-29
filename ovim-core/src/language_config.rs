@@ -840,22 +840,105 @@ pub fn find_project_root(file_path: &Path, markers: &[String]) -> PathBuf {
 /// Like [`find_project_root`], but a directory holding one of
 /// `outermost_markers` (searched from the top down) wins over a nearer
 /// `markers` match.
+///
+/// `pom.xml` is special in `outermost_markers`: an ancestor pom is not a
+/// root just for existing (an unrelated `~/pom.xml` must not capture every
+/// project below it). It only counts when it is the Maven reactor
+/// aggregator of the module below it, i.e. its `<modules>` list the module
+/// directory (or its pom file); the walk continues upwards so a nested
+/// aggregator chain resolves to the outermost reactor.
 pub fn find_project_root_with_outermost(
     file_path: &Path,
     markers: &[String],
     outermost_markers: &[String],
 ) -> PathBuf {
     if !outermost_markers.is_empty() {
+        let plain: Vec<&String> = outermost_markers
+            .iter()
+            .filter(|m| *m != "pom.xml")
+            .collect();
         let outermost = file_path
             .ancestors()
             .skip(1)
-            .filter(|dir| outermost_markers.iter().any(|m| dir.join(m).exists()))
+            .filter(|dir| plain.iter().any(|m| dir.join(m).exists()))
             .last();
         if let Some(dir) = outermost {
             return dir.to_path_buf();
         }
+        if outermost_markers.iter().any(|m| m == "pom.xml") {
+            if let Some(root) = maven_reactor_root(file_path) {
+                return root;
+            }
+        }
     }
     find_project_root(file_path, markers)
+}
+
+/// The outermost Maven reactor aggregator above `file_path`: start at the
+/// nearest module pom and climb while the parent directory's pom lists the
+/// current directory in `<modules>`. `None` when no pom encloses the file.
+fn maven_reactor_root(file_path: &Path) -> Option<PathBuf> {
+    let mut module = file_path
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.join("pom.xml").is_file())?
+        .to_path_buf();
+    while let Some(parent) = module.parent() {
+        let pom = parent.join("pom.xml");
+        let Ok(text) = std::fs::read_to_string(&pom) else {
+            break;
+        };
+        let lists_module = pom_modules(&text).iter().any(|entry| {
+            let entry = entry.trim_end_matches("pom.xml").trim_end_matches('/');
+            normalize_relative(&parent.join(entry)) == module
+        });
+        if !lists_module {
+            break;
+        }
+        module = parent.to_path_buf();
+    }
+    Some(module)
+}
+
+/// Lexically resolve `.` and `..` (module paths may be `../sibling`).
+fn normalize_relative(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// The `<module>` entries of a pom's `<modules>` sections (also inside
+/// profiles), ignoring XML comments.
+fn pom_modules(pom: &str) -> Vec<String> {
+    let mut text = String::with_capacity(pom.len());
+    let mut rest = pom;
+    while let Some(start) = rest.find("<!--") {
+        text.push_str(&rest[..start]);
+        rest = match rest[start..].find("-->") {
+            Some(end) => &rest[start + end + 3..],
+            None => "",
+        };
+    }
+    text.push_str(rest);
+    let mut modules = Vec::new();
+    let mut rest = text.as_str();
+    while let Some(start) = rest.find("<module>") {
+        let after = &rest[start + "<module>".len()..];
+        let Some(end) = after.find("</module>") else {
+            break;
+        };
+        modules.push(after[..end].trim().to_string());
+        rest = &after[end..];
+    }
+    modules
 }
 
 // ============================================================================
@@ -1009,6 +1092,11 @@ mod tests {
                 "{} needs the multi-module Gradle root rule",
                 language.id
             );
+            assert!(
+                lsp.outermost_root_markers.iter().any(|m| m == "pom.xml"),
+                "{} needs the Maven reactor root rule",
+                language.id
+            );
             seen += 1;
         }
         assert!(seen >= 4, "java, kotlin, groovy and scala use hyperion-lsp");
@@ -1033,6 +1121,48 @@ mod tests {
         assert_eq!(
             find_project_root_with_outermost(&file, &markers, &["nope".to_string()]),
             root.join("app")
+        );
+    }
+
+    #[test]
+    fn maven_root_is_the_outermost_reactor_aggregator() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("multi");
+        let file = root.join("app/src/main/java/demo/Main.java");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join("core")).unwrap();
+        std::fs::write(
+            root.join("pom.xml"),
+            "<project><modules><!-- <module>ghost</module> --><module>core</module><module>app/</module></modules></project>",
+        )
+        .unwrap();
+        std::fs::write(root.join("app/pom.xml"), "<project/>").unwrap();
+        let markers: Vec<String> = ["pom.xml"].map(String::from).into();
+        let outer: Vec<String> = ["settings.gradle", "pom.xml"].map(String::from).into();
+        assert_eq!(find_project_root(&file, &markers), root.join("app"));
+        assert_eq!(
+            find_project_root_with_outermost(&file, &markers, &outer),
+            root
+        );
+        // A pom that does not list the module is not its reactor.
+        std::fs::write(
+            root.join("pom.xml"),
+            "<project><modules><module>core</module></modules></project>",
+        )
+        .unwrap();
+        assert_eq!(
+            find_project_root_with_outermost(&file, &markers, &outer),
+            root.join("app")
+        );
+        // Nested aggregators and `../` module paths.
+        std::fs::write(
+            root.join("pom.xml"),
+            "<project><modules><module>../multi/app</module></modules></project>",
+        )
+        .unwrap();
+        assert_eq!(
+            find_project_root_with_outermost(&file, &markers, &outer),
+            root
         );
     }
 

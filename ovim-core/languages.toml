@@ -170,14 +170,14 @@ command = "hyperion-lsp"
 fallback_commands = [
 ]
 root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml", "build.gradle"]
-outermost_root_markers = ["settings.gradle", "settings.gradle.kts"]
+outermost_root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml"]
 install_hint = "hyperion-lsp not found in PATH. ovim does not download it: build it from the hyperion-ls repo (cargo build --release -p hyperion-lsp) and put the binary on PATH"
 
 [language.dap]
 command = "hyperion-lsp"
 args = ["dap"]
 root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml", "build.gradle"]
-outermost_root_markers = ["settings.gradle", "settings.gradle.kts"]
+outermost_root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml"]
 
 # ============================================================================
 # Kotlin
@@ -200,14 +200,14 @@ command = "hyperion-lsp"
 fallback_commands = [
 ]
 root_markers = ["settings.gradle.kts", "settings.gradle", "pom.xml", "build.gradle.kts", "build.gradle"]
-outermost_root_markers = ["settings.gradle", "settings.gradle.kts"]
+outermost_root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml"]
 install_hint = "hyperion-lsp not found in PATH. ovim does not download it: build it from the hyperion-ls repo (cargo build --release -p hyperion-lsp) and put the binary on PATH"
 
 [language.dap]
 command = "hyperion-lsp"
 args = ["dap"]
 root_markers = ["settings.gradle.kts", "settings.gradle", "pom.xml", "build.gradle.kts", "build.gradle"]
-outermost_root_markers = ["settings.gradle", "settings.gradle.kts"]
+outermost_root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml"]
 
 # ============================================================================
 # Groovy / Gradle (Groovy DSL)
@@ -228,14 +228,14 @@ command = "hyperion-lsp"
 fallback_commands = [
 ]
 root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml", "build.gradle", "build.gradle.kts"]
-outermost_root_markers = ["settings.gradle", "settings.gradle.kts"]
+outermost_root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml"]
 install_hint = "hyperion-lsp not found in PATH. ovim does not download it: build it from the hyperion-ls repo (cargo build --release -p hyperion-lsp) and put the binary on PATH"
 
 [language.dap]
 command = "hyperion-lsp"
 args = ["dap"]
 root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml", "build.gradle", "build.gradle.kts"]
-outermost_root_markers = ["settings.gradle", "settings.gradle.kts"]
+outermost_root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml"]
 
 # ============================================================================
 # Scala / SBT
@@ -256,14 +256,14 @@ command = "hyperion-lsp"
 fallback_commands = [
 ]
 root_markers = ["build.sbt", "settings.gradle", "settings.gradle.kts", "pom.xml", "build.gradle", "build.gradle.kts"]
-outermost_root_markers = ["settings.gradle", "settings.gradle.kts"]
+outermost_root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml"]
 install_hint = "hyperion-lsp not found in PATH. ovim does not download it: build it from the hyperion-ls repo (cargo build --release -p hyperion-lsp) and put the binary on PATH"
 
 [language.dap]
 command = "hyperion-lsp"
 args = ["dap"]
 root_markers = ["build.sbt", "settings.gradle", "settings.gradle.kts", "pom.xml", "build.gradle", "build.gradle.kts"]
-outermost_root_markers = ["settings.gradle", "settings.gradle.kts"]
+outermost_root_markers = ["settings.gradle", "settings.gradle.kts", "pom.xml"]
 
 # ============================================================================
 # Markdown (Syntax only - no LSP needed for most use cases)

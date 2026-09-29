@@ -107,8 +107,30 @@ fn select(
     package: Option<&str>,
     cursor_line: usize,
     file: &Path,
+    source: &str,
 ) -> Result<Selection, String> {
     match scope {
+        TestScope::Nearest if class_declared_at(source, tests, cursor_line).is_some() => {
+            // On a class declaration the nearest thing to run is that class
+            // (with its nested classes), not the first test method below it.
+            let (chain, _) = class_declared_at(source, tests, cursor_line).unwrap();
+            let mut chains: Vec<&Vec<String>> = Vec::new();
+            for test in tests {
+                if test.namespaces.starts_with(&chain) && !chains.contains(&&test.namespaces) {
+                    chains.push(&test.namespaces);
+                }
+            }
+            let filters: Vec<_> = chains
+                .iter()
+                .map(|c| (binary_class(package, c), None))
+                .collect();
+            Ok(Selection {
+                class_name: Some(binary_class(package, &chain)),
+                filters,
+                label: chain.last().cloned().unwrap_or_default(),
+                method_name: None,
+            })
+        }
         TestScope::Nearest => {
             let test = nearest_test(tests, cursor_line)
                 .ok_or_else(|| "No test found near cursor".to_string())?;
@@ -179,6 +201,50 @@ fn class_anchor(source: &str, name: &str) -> Option<(usize, usize)> {
     })
 }
 
+/// The test class (namespace chain, outermost first) whose declaration line
+/// (or the annotation lines right above it) holds `cursor_line`, with the
+/// class name's position.
+fn class_declared_at(
+    source: &str,
+    tests: &[DiscoveredTest],
+    cursor_line: usize,
+) -> Option<(Vec<String>, (usize, usize))> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut chains: Vec<&Vec<String>> = Vec::new();
+    for test in tests {
+        for end in 1..=test.namespaces.len() {
+            let prefix = &test.namespaces[..end];
+            if !chains.iter().any(|c| c.as_slice() == prefix) {
+                chains.push(&test.namespaces);
+            }
+        }
+    }
+    // Innermost declaration wins when annotation ranges could overlap.
+    let mut found: Option<(Vec<String>, (usize, usize))> = None;
+    for chain in chains {
+        for end in 1..=chain.len() {
+            let prefix = &chain[..end];
+            let Some(anchor) = class_anchor(source, &prefix[end - 1]) else {
+                continue;
+            };
+            let mut top = anchor.0;
+            while top > 0
+                && lines
+                    .get(top - 1)
+                    .is_some_and(|l| l.trim_start().starts_with('@'))
+            {
+                top -= 1;
+            }
+            if (top..=anchor.0).contains(&cursor_line)
+                && found.as_ref().is_none_or(|(c, _)| c.len() < prefix.len())
+            {
+                found = Some((prefix.to_vec(), anchor));
+            }
+        }
+    }
+    found
+}
+
 /// Composes a test plan for the file, or explains why it cannot.
 pub fn local_test_plan(
     scope: TestScope,
@@ -193,8 +259,13 @@ pub fn local_test_plan(
         "No Gradle or Maven project found for this file (looked for build.gradle(.kts) / pom.xml)"
             .to_string()
     })?;
-    let selection = select(scope, &tests, package.as_deref(), cursor_line, file)?;
+    let selection = select(scope, &tests, package.as_deref(), cursor_line, file, source)?;
+    let class_anchor_at_cursor = match scope {
+        TestScope::Nearest => class_declared_at(source, &tests, cursor_line).map(|(_, a)| a),
+        _ => None,
+    };
     let anchor = match scope {
+        TestScope::Nearest if class_anchor_at_cursor.is_some() => class_anchor_at_cursor,
         TestScope::Nearest => nearest_test(&tests, cursor_line).map(|t| {
             let indent = source
                 .lines()
@@ -209,8 +280,9 @@ pub fn local_test_plan(
             .and_then(|name| class_anchor(source, name)),
     }
     .unwrap_or((cursor_line, 0));
-    let cursor_inside = nearest_test(&tests, cursor_line)
-        .is_some_and(|t| t.line <= cursor_line && cursor_line <= t.end_line);
+    let cursor_inside = class_anchor_at_cursor.is_none()
+        && nearest_test(&tests, cursor_line)
+            .is_some_and(|t| t.line <= cursor_line && cursor_line <= t.end_line);
     let rel = module
         .dir
         .strip_prefix(&module.root)

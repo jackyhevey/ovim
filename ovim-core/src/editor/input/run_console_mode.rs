@@ -4,7 +4,8 @@
 //! the top/bottom (`G` resumes following live output), `Enter` opens the
 //! source location on the line (stack frames, compiler errors), `[`/`]`
 //! switch between runs, `r` reruns, `s` stops, `x` clears, `i` types a line for
-//! the program's stdin (`D` ends the input), `q`/`Esc` returns to the buffer.
+//! the program's stdin (`D` ends the input), `+`/`-` resize the panel,
+//! `q`/`Esc` returns to the buffer.
 
 use crate::{KeyCode, KeyEvent, Modifiers};
 use anyhow::Result;
@@ -15,10 +16,21 @@ use crate::mode::Mode;
 
 pub fn handle_run_console_mode(editor: &mut Editor, key: KeyEvent) -> Result<()> {
     let ctrl = key.modifiers.contains(Modifiers::CONTROL);
+    if matches!(key.code, KeyCode::F(_)) && super::debug_keys::try_handle(editor, key)? {
+        editor.mark_dirty();
+        return Ok(());
+    }
     let half = (editor.run_console().view_height / 2).max(1) as isize;
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             editor.set_mode(Mode::Normal);
+        }
+        // Taller / shorter console.
+        KeyCode::Char('+') | KeyCode::Char('=') => {
+            let _ = editor.resize_panel("console", "+3");
+        }
+        KeyCode::Char('-') => {
+            let _ = editor.resize_panel("console", "-3");
         }
         KeyCode::Char('j') | KeyCode::Down => editor.run_console_mut().move_cursor(1),
         KeyCode::Char('k') | KeyCode::Up => editor.run_console_mut().move_cursor(-1),
