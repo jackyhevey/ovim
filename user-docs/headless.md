@@ -123,6 +123,23 @@ ovim lsp status -s dev
 ovim lsp hover -s dev
 ```
 
+The position-based helpers (`hover`, `definition`, `references`, `diagnostics`,
+`symbols`, ...) come in two mutually exclusive forms:
+
+- `ovim lsp hover -s dev` acts at the live session's cursor. Move the cursor
+  first with `ovim send`/`ovim exec`, for example `ovim send -s dev "42G12|"`
+  for line 42, column 12.
+- `ovim lsp hover FILE:LINE:COL` needs no session: it starts a temporary
+  headless session, waits for the language server, runs the query and shuts the
+  session down. Combining `FILE` with `-s` is rejected by the argument parser.
+
+Inspect and recover language servers from a session:
+
+```bash
+ovim exec -s dev LspInfo      # servers, state, restarts (opens a scratch buffer)
+ovim exec -s dev LspRestart   # restart every server (or `LspRestart java`)
+```
+
 ## Session Files
 
 Session files are JSON and live in:

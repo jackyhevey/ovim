@@ -971,6 +971,43 @@ mod tests {
         assert!(registry.detect("unknown.xyz").is_none());
     }
 
+    /// OV-00407: hyperion-lsp is only looked up on PATH; the config must not
+    /// promise a download, and JVM projects need the multi-module root rule.
+    #[test]
+    fn hyperion_languages_are_honest_about_installation_and_find_gradle_roots() {
+        let (languages, _) =
+            LanguageRegistry::parse_configs(include_str!("../languages.toml"), None).unwrap();
+        let mut seen = 0;
+        for language in languages.iter().filter(|l| {
+            l.lsp
+                .as_ref()
+                .is_some_and(|lsp| lsp.command == "hyperion-lsp")
+        }) {
+            let lsp = language.lsp.as_ref().unwrap();
+            let hint = lsp.install_hint.as_deref().unwrap_or_default();
+            assert!(
+                hint.contains("not found in PATH"),
+                "{}: {hint}",
+                language.id
+            );
+            assert!(
+                !hint.to_lowercase().contains("automatic"),
+                "{}: must not claim an automatic download: {hint}",
+                language.id
+            );
+            assert!(lsp.auto_install.is_none(), "{}", language.id);
+            assert!(
+                lsp.outermost_root_markers
+                    .iter()
+                    .any(|m| m.starts_with("settings.gradle")),
+                "{} needs the multi-module Gradle root rule",
+                language.id
+            );
+            seen += 1;
+        }
+        assert!(seen >= 4, "java, kotlin, groovy and scala use hyperion-lsp");
+    }
+
     #[test]
     fn outermost_root_marker_beats_nearest_submodule() {
         let tmp = tempfile::tempdir().unwrap();
