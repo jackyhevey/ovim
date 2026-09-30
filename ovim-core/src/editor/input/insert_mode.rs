@@ -152,8 +152,6 @@ fn finish_insert_mode(editor: &mut Editor, temporary: bool) {
         _ => None,
     };
 
-    // Update the . register with the last inserted text
-    editor.update_last_inserted_register();
     if let Some(action) = open_line_repeat {
         editor.set_repeat_action(action);
     }

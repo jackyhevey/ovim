@@ -338,16 +338,6 @@ impl Editor {
             .jump_change_newer(count)
     }
 
-    /// Updates the . register with the last inserted text
-    pub fn update_last_inserted_register(&mut self) {
-        if let Some(change) = self.buffer().change_manager().last_change() {
-            let inserted_text = change.get_inserted_text();
-            if !inserted_text.is_empty() {
-                self.registers.set_last_inserted(inserted_text);
-            }
-        }
-    }
-
     /// Checks if buffer is modified relative to last save
     pub fn is_modified(&self) -> bool {
         self.buffer().is_modified() || !self.buffer().change_manager().is_at_save_point()

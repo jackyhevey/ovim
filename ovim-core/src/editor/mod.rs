@@ -2276,6 +2276,17 @@ impl Editor {
             return;
         }
 
+        // The `.` register: what was typed. For o/O the first edit is the
+        // opened line itself, not typed text.
+        let typed = match entry_mode {
+            InsertEntryMode::OpenBelow | InsertEntryMode::OpenAbove => &edits[1..],
+            _ => &edits[..],
+        };
+        let inserted = crate::edit::surviving_inserted_text(typed);
+        if !inserted.is_empty() {
+            self.registers.set_last_inserted(inserted);
+        }
+
         // Push the session as a mechanical-undo `Recorded` entry. The
         // `edit_start` override makes `g;` land at the first-edit cursor
         // (post-entry-mode) rather than the pre-entry-mode `cursor_before`

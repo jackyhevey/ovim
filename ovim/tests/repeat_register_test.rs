@@ -52,7 +52,6 @@ fn repeat_does_not_overwrite_registers_for_case_changes() {
 // ".: the text inserted by the last insert session, whichever command
 // opened it (nvim --clean on "abc def ghi"). OV-00489.
 #[test]
-#[ignore = "OV-00489: \". is stale after c/s/cc (read from last_change, cleared by the Change repeat action) and holds \"foo\\n\" after o"]
 fn dot_register_holds_the_text_of_the_last_insert() {
     for (keys, inserted) in [
         ("iAB<Esc>", "AB"),
