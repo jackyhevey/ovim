@@ -1636,10 +1636,8 @@ mod tests {
             crate::change::CursorPos::new(0, crate::unicode::GraphemeCol(2)),
             42,
         );
-        buf.change_manager_mut()
-            .push_undo_change_preserving_repeat(change1);
-        buf.change_manager_mut()
-            .push_undo_change_preserving_repeat(change2);
+        buf.change_manager_mut().push_change(change1);
+        buf.change_manager_mut().push_change(change2);
 
         // One undo should revert both grouped edits.
         assert!(buf.undo().0.is_done());

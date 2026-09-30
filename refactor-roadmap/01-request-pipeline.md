@@ -1,5 +1,7 @@
 # Phase 1: Request Pipeline
 
+> **HISTORICAL (2026-09).** This phase shipped or was overtaken by later work; the code is the source of truth. Kept for rationale only. The only active roadmap document is [17-multi-server-sync.md](./17-multi-server-sync.md).
+
 **Goal:** Make it structurally impossible to send a request without tracking it. Log dropped responses.
 
 **Fixes:** LSP stops working after first requests. Silent response drops.

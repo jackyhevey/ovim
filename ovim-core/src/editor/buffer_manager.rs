@@ -617,13 +617,12 @@ impl Editor {
             return all_applied;
         }
 
-        // LSP-applied edits should be undoable but should not become dot-repeat
-        // templates, so we push directly to undo/redo stacks without touching
-        // last_change/last_repeat_action.
+        // LSP-applied edits are undoable but do not become the dot-repeat
+        // target: push_change leaves last_repeat_action alone.
         let change = Change::recorded(recorded_edits, cursor_before, cursor_after);
         {
             let cm = self.buffers[buffer_index].change_manager_mut();
-            cm.push_undo_change_preserving_repeat(change);
+            cm.push_change(change);
         }
 
         // Ensure the edited document is re-synced to LSP. We do NOT set
@@ -1261,7 +1260,7 @@ mod tests {
         let first_index = editor.current_buffer_index();
         editor.open_file(&second).expect("open second");
 
-        let result = crate::cmd_set::handle_set_command(&mut editor, "shiftwidth=2");
+        let result = crate::commands::execute_command(&mut editor, "set shiftwidth=2");
         assert!(matches!(result, crate::CommandResult::Success(_)));
         assert_eq!(editor.indent_options().shift_width, 2);
 

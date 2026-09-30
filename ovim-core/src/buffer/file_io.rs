@@ -176,13 +176,9 @@ impl Buffer {
         Ok(())
     }
 
-    /// Saves the buffer to a specific file path (async version)
-    /// Overwrites file in place (open, truncate, write, fsync) to preserve
-    /// permissions, ownership, ACLs, hard links, and extended attributes.
-    /// This is the same strategy Vim and VS Code use for user-edited files.
+    /// Saves the buffer to a specific file path (async version), making it
+    /// the buffer's file. See [`Self::write_contents_to`] for how.
     pub async fn save_as_async<P: AsRef<Path>>(&mut self, path: P) -> Result<()> {
-        use tokio::io::AsyncWriteExt;
-
         let path_ref = path.as_ref();
         let path_str_input = path_ref.to_string_lossy();
 
@@ -204,45 +200,7 @@ impl Buffer {
 
         let path_ref = absolute_path.as_path();
         let path_str = path_ref.to_string_lossy().to_string();
-
-        // Get content and convert line endings if needed
-        let content = self.rope.to_string();
-        let content = match self.line_ending {
-            LineEnding::Lf | LineEnding::Mixed => content,
-            LineEnding::Crlf => {
-                // Convert LF to CRLF for Windows files.
-                content.replace('\n', "\r\n")
-            }
-            LineEnding::Cr => {
-                // Convert LF back to classic Mac line endings.
-                content.replace('\n', "\r")
-            }
-        };
-
-        // Encode content back to original encoding
-        let bytes = self.encoding.encode(&content).context(format!(
-            "Failed to encode file content as {:?}",
-            self.encoding
-        ))?;
-
-        // Overwrite in place: open existing file (or create new), truncate, write.
-        // Preserves inode → permissions, ownership, ACLs, hard links, xattrs survive.
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path_ref)
-            .await
-            .context(format!("Failed to open file for writing: {}", path_str))?;
-
-        file.write_all(&bytes)
-            .await
-            .context("Failed to write file content")?;
-
-        // Ensure data reaches disk
-        file.sync_all()
-            .await
-            .context("Failed to sync file to disk")?;
+        self.write_contents_to(path_ref).await?;
 
         // CRITICAL: Only update file_path if it changed (Save As scenario)
         // Preserves URI stability for LSP tracking
@@ -261,6 +219,55 @@ impl Buffer {
             .and_then(|m| m.modified().ok());
 
         Ok(())
+    }
+
+    /// The file bytes: line endings and encoding as loaded.
+    fn file_bytes(&self) -> Result<Vec<u8>> {
+        let content = self.rope.to_string();
+        let content = match self.line_ending {
+            LineEnding::Lf | LineEnding::Mixed => content,
+            LineEnding::Crlf => content.replace('\n', "\r\n"),
+            LineEnding::Cr => content.replace('\n', "\r"),
+        };
+        self.encoding.encode(&content).context(format!(
+            "Failed to encode file content as {:?}",
+            self.encoding
+        ))
+    }
+
+    /// Overwrite `path` in place (open, truncate, write, fsync), which keeps
+    /// permissions, ownership, ACLs, hard links and extended attributes —
+    /// the strategy Vim and VS Code use for user-edited files.
+    async fn write_contents_to(&self, path: &Path) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        let bytes = self.file_bytes()?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .await
+            .context(format!(
+                "Failed to open file for writing: {}",
+                path.display()
+            ))?;
+        file.write_all(&bytes)
+            .await
+            .context("Failed to write file content")?;
+        file.sync_all()
+            .await
+            .context("Failed to sync file to disk")?;
+        Ok(())
+    }
+
+    /// Write the text to another file without making it the buffer's file
+    /// (vim's `:w {file}` on a named buffer). The buffer stays modified.
+    pub fn write_copy<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let path = normalize_path(path.as_ref());
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.write_contents_to(&path))
+        })
     }
 
     /// Saves the buffer to its file path (blocking wrapper)

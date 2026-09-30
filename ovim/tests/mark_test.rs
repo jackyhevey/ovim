@@ -228,7 +228,8 @@ line 2
 line 3
 "
     );
-    test.assert_cursor(0, 7);
+    // nvim --clean: `. is where the insert started, not its last character.
+    test.assert_cursor(0, 0);
 }
 
 #[test]
@@ -268,7 +269,9 @@ fn test_backtick_caret_insert_exit() {
 line 2
 "
     );
-    test.assert_cursor(0, 3);
+    // nvim --clean: `^ is where Insert mode stopped (on the 'l'), not the
+    // Normal-mode cursor one column left of it.
+    test.assert_cursor(0, 4);
 }
 
 // ============================================================================
@@ -877,4 +880,55 @@ fn test_ov00190_local_mark_clamps_column_when_line_shrinks() {
         "column must be clamped into 'hi' (last grapheme col 1), got {}",
         cursor.col().0
     );
+}
+
+// ============================================================================
+// '. / `. and `^ after every kind of change (OV-00489). Expectations from
+// `nvim --clean` on "abc def ghi" x3; positions are 0-based here.
+// ============================================================================
+
+const ABC: &str = "abc def ghi\nabc def ghi\nabc def ghi";
+
+fn cursor_after(keys: &str) -> (usize, usize) {
+    let mut test = EditorTest::new(ABC);
+    test.keys(keys);
+    test.cursor()
+}
+
+// nvim: `wdwj0`.` → 1,4 (1-based col 5): the start of the delete.
+#[test]
+fn backtick_dot_after_an_operator_is_the_change_start() {
+    assert_eq!(cursor_after("wdwj0`."), (0, 4));
+    assert_eq!(cursor_after("wxj0`."), (0, 4));
+    assert_eq!(cursor_after("wcwXY<Esc>j0`."), (0, 4));
+}
+
+// nvim: `wdwj$'.` → line 1, first non-blank.
+#[test]
+fn quote_dot_after_an_operator_is_the_change_line() {
+    assert_eq!(cursor_after("wdwj$'."), (0, 0));
+}
+
+// nvim: after `wiXY<Esc>`, `. is the start of the insert, `^ is where the
+// insert stopped (on the 'd' after XY); after `AXY<Esc>`, `^ is past the end
+// and clamps to the last character.
+#[test]
+fn backtick_dot_and_caret_after_an_insert() {
+    assert_eq!(cursor_after("wiXY<Esc>j0`."), (0, 4));
+    assert_eq!(cursor_after("wiXY<Esc>j0`^"), (0, 6));
+    assert_eq!(cursor_after("AXY<Esc>j0`."), (0, 11));
+    assert_eq!(cursor_after("AXY<Esc>j0`^"), (0, 12));
+}
+
+// nvim: `wiXY<Esc>jdw` then `^ still points at the insert, `. at the delete.
+#[test]
+fn caret_mark_survives_a_later_operator() {
+    assert_eq!(cursor_after("wiXY<Esc>jdwgg`^"), (0, 6));
+    assert_eq!(cursor_after("wiXY<Esc>jdwgg`."), (1, 5));
+}
+
+// nvim: `ofoo<Esc>gg`.` → the opened line.
+#[test]
+fn backtick_dot_after_open_line() {
+    assert_eq!(cursor_after("ofoo<Esc>gg`."), (1, 0));
 }

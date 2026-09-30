@@ -1,5 +1,7 @@
-//! Parsers for JVM build output: javac, kotlinc (plain and via Gradle) and
-//! Maven, turned into quickfix entries with correct file/line/column.
+//! Parsers for build output, turned into quickfix entries: JVM builds
+//! (javac, kotlinc plain and via Gradle, Maven) with correct file/line/
+//! column, then rustc, gcc/clang, tsc and Rust panics
+//! ([`parse_compiler_output_in`]).
 //!
 //! Formats understood:
 //!
@@ -417,6 +419,238 @@ pub fn summarize_build_failure(output: &str, diagnostics: &[QuickfixEntry]) -> O
         return Some(l.trim_start_matches("[ERROR] ").to_string());
     }
     lines.into_iter().rev().find(|l| !l.is_empty())
+}
+
+// ---- rustc / gcc / tsc / Rust panics (everything that is not JVM) ----
+
+/// Parse compiler output for file:line:col: error/warning patterns
+pub fn parse_compiler_output(output: &str) -> Vec<QuickfixEntry> {
+    parse_compiler_output_in(output, None)
+}
+
+/// Like [`parse_compiler_output`], resolving relative paths against `base_dir`
+/// (the directory the build ran in). javac, kotlinc, Gradle and Maven output
+/// is handled by [`crate::launch::diagnostics`] first (with columns from
+/// javac's caret line and `symbol:`/`location:` details); the remaining lines
+/// go through the rustc / gcc / tsc patterns below.
+pub fn parse_compiler_output_in(
+    output: &str,
+    base_dir: Option<&std::path::Path>,
+) -> Vec<QuickfixEntry> {
+    let jvm = parse_jvm_diagnostics(output, base_dir);
+    let mut entries = parse_generic_compiler_output(output, &jvm.consumed);
+    if let Some(base) = base_dir {
+        for entry in &mut entries {
+            if let Some(path) = entry.filename.as_mut() {
+                if path.is_relative() {
+                    *path = base.join(&*path);
+                }
+            }
+        }
+    }
+    let mut all = jvm.entries;
+    all.append(&mut entries);
+    all
+}
+
+/// rustc / gcc / tsc / panic patterns. Lines flagged in `skip` were already
+/// claimed by a more specific parser.
+fn parse_generic_compiler_output(output: &str, skip: &[bool]) -> Vec<QuickfixEntry> {
+    use crate::editor::{QuickfixEntry, QuickfixEntryType};
+    use std::path::PathBuf;
+
+    let mut entries = Vec::new();
+
+    // Regex-free parsing for common patterns:
+    // - rustc/cargo:  "  --> file.rs:line:col"
+    // - gcc/clang:    "file.rs:line:col: error: message"
+    // - typescript:    "file.ts(line,col): error TS1234: message"
+    for (line_index, line) in output.lines().enumerate() {
+        if skip.get(line_index).copied().unwrap_or(false) {
+            continue;
+        }
+        let trimmed = line.trim();
+
+        // Rust/cargo style: "  --> file.rs:42:10"
+        if let Some(rest) = trimmed.strip_prefix("--> ") {
+            // Split from the right: col, then line, rest is file path
+            let parts: Vec<&str> = rest.rsplitn(3, ':').collect();
+            if parts.len() == 3 {
+                if let (Ok(col), Ok(lnum)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>())
+                {
+                    entries.push(QuickfixEntry::new(
+                        Some(PathBuf::from(parts[2])),
+                        lnum,
+                        col,
+                        QuickfixEntryType::Error,
+                        String::new(), // Will be filled from context
+                    ));
+                }
+            }
+            continue;
+        }
+
+        // Rust panic style: "thread 'name' panicked at 'msg', file.rs:42:5"
+        // Also: "thread 'name' panicked at file.rs:42:5:" (Rust 2024+ format)
+        if trimmed.starts_with("thread '") && trimmed.contains("panicked at") {
+            if let Some(entry) = parse_panic_line(trimmed) {
+                entries.push(entry);
+                continue;
+            }
+        }
+
+        // gcc/clang/generic style: "file:line:col: error/warning: message"
+        // Also matches: "file:line: error: message" (no col)
+        if let Some(entry) = parse_gcc_style_line(trimmed) {
+            entries.push(entry);
+        }
+    }
+
+    // Second pass: fill in error messages from cargo/rustc output
+    // Cargo errors look like:
+    //   error[E0425]: cannot find value `foo` in this scope
+    //     --> file.rs:42:10
+    // So we look for "error" or "warning" lines preceding "-->" lines
+    let lines: Vec<&str> = output.lines().collect();
+    let mut entry_idx = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("--> ") && entry_idx < entries.len() {
+            // Look backward for the error/warning message
+            if i > 0 {
+                let prev = lines[i - 1].trim();
+                if prev.starts_with("error") || prev.starts_with("warning") {
+                    entries[entry_idx].text = prev.to_string();
+                    if prev.starts_with("warning") {
+                        entries[entry_idx].entry_type = QuickfixEntryType::Warning;
+                    }
+                }
+            }
+            entry_idx += 1;
+        }
+    }
+
+    entries
+}
+
+/// Parse a gcc/clang-style error line: "file:line:col: error: message"
+fn parse_gcc_style_line(line: &str) -> Option<QuickfixEntry> {
+    use crate::editor::{QuickfixEntry, QuickfixEntryType};
+    use std::path::PathBuf;
+
+    // Skip lines that don't look like file:line patterns
+    // Must contain at least one ':' and not start with whitespace
+    if line.is_empty() || line.starts_with(' ') || !line.contains(':') {
+        return None;
+    }
+
+    // Try to match file:line:col: type: message
+    let parts: Vec<&str> = line.splitn(4, ':').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let file = parts[0];
+    let lnum: usize = parts[1].trim().parse().ok()?;
+
+    // Check if parts[2] is a column number or the error type
+    let (col, rest) = if let Ok(c) = parts[2].trim().parse::<usize>() {
+        let rest = if parts.len() > 3 { parts[3] } else { "" };
+        (c, rest)
+    } else {
+        // No column — parts[2] is the type/message
+        let rest = if parts.len() > 3 {
+            &line[parts[0].len() + 1 + parts[1].len() + 1..]
+        } else {
+            parts[2]
+        };
+        (0, rest)
+    };
+
+    let rest = rest.trim();
+    let entry_type = if rest.starts_with("error") {
+        QuickfixEntryType::Error
+    } else if rest.starts_with("warning") {
+        QuickfixEntryType::Warning
+    } else if rest.starts_with("note") {
+        QuickfixEntryType::Note
+    } else if rest.starts_with("info") {
+        QuickfixEntryType::Info
+    } else {
+        // Not a recognizable error pattern — could be just a file path with colons
+        // Only include if it looks like an error (has some message text)
+        if rest.is_empty() {
+            return None;
+        }
+        QuickfixEntryType::Error
+    };
+
+    // Don't include entries for paths that don't look like files
+    if !file.contains('.') && !file.contains('/') {
+        return None;
+    }
+
+    Some(QuickfixEntry::new(
+        Some(PathBuf::from(file)),
+        lnum,
+        col,
+        entry_type,
+        rest.to_string(),
+    ))
+}
+
+/// Parse Rust panic lines from test output.
+///
+/// Formats:
+/// - `thread 'test_name' panicked at 'assertion message', src/file.rs:42:5`
+/// - `thread 'test_name' panicked at src/file.rs:42:5:` (Rust 2024+)
+fn parse_panic_line(line: &str) -> Option<QuickfixEntry> {
+    // Extract the panic message and location
+    let after_panicked = line.split("panicked at").nth(1)?.trim();
+
+    // Try old format: 'message', file:line:col
+    if after_panicked.starts_with('\'') {
+        // Find closing quote + comma
+        if let Some(comma_pos) = after_panicked.rfind("', ") {
+            let message = &after_panicked[1..comma_pos];
+            let location = &after_panicked[comma_pos + 3..];
+            return parse_file_line_col(location, message);
+        }
+    }
+
+    // Try new format: file:line:col:
+    // or: file:line:col:\nmessage
+    let location = after_panicked.trim_end_matches(':');
+    parse_file_line_col(location, "panicked")
+}
+
+/// Parse a `file:line:col` string into a QuickfixEntry.
+fn parse_file_line_col(location: &str, message: &str) -> Option<QuickfixEntry> {
+    use crate::editor::{QuickfixEntry, QuickfixEntryType};
+
+    let parts: Vec<&str> = location.rsplitn(3, ':').collect();
+    if parts.len() >= 2 {
+        let col: usize = parts[0].trim().parse().ok().unwrap_or(0);
+        let lnum: usize = parts[1].trim().parse().ok()?;
+        let file = if parts.len() == 3 {
+            parts[2]
+        } else {
+            return None;
+        };
+
+        if !file.contains('.') && !file.contains('/') {
+            return None;
+        }
+
+        return Some(QuickfixEntry::new(
+            Some(std::path::PathBuf::from(file)),
+            lnum,
+            col,
+            QuickfixEntryType::Error,
+            format!("PANIC: {}", message),
+        ));
+    }
+    None
 }
 
 #[cfg(test)]

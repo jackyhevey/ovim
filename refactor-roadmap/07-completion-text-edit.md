@@ -1,5 +1,7 @@
 # Completion: Use textEdit Range for Filtering
 
+> **HISTORICAL (2026-09).** This phase shipped or was overtaken by later work; the code is the source of truth. Kept for rationale only. The only active roadmap document is [17-multi-server-sync.md](./17-multi-server-sync.md).
+
 **Goal:** Completion filtering uses the LSP server's `textEdit` range to determine the completion prefix, instead of the editor's word-boundary guess. This fixes Tailwind CSS completions and any other server where tokens contain non-identifier characters (hyphens, colons, etc.).
 
 ## The Problem

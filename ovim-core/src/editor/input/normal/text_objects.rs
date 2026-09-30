@@ -5,8 +5,8 @@
 
 use crate::editor::input::helpers;
 use crate::editor::{
-    CursorPos, Editor, Operator, PendingChangeRepeat, RegisterType, TextObjectRange,
-    TextObjectType, TextObjects,
+    CursorPos, Editor, InputState, Operator, PendingChangeRepeat, RegisterType, TextObjectPrefix,
+    TextObjectRange, TextObjectType, TextObjects,
 };
 use crate::mode::Mode;
 use crate::repeat_action::{CaseTransform, RepeatAction};
@@ -17,23 +17,21 @@ use anyhow::Result;
 ///
 /// Returns `Ok(true)` if the key was handled, `Ok(false)` otherwise.
 pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
-    let text_obj_type = match editor.pending_command() {
-        Some('i') | Some('a') => editor.pending_command().unwrap(),
-        _ => return Ok(false),
+    let InputState::TextObjectPending {
+        operator: Some(operator),
+        prefix,
+    } = *editor.input_state()
+    else {
+        return Ok(false);
     };
-
-    let operator = match editor.pending_operator() {
-        Some(op) => op,
-        None => return Ok(false),
-    };
-
-    editor.clear_pending_command();
-    editor.clear_pending_operator();
+    editor.reset_input_state();
     editor.clear_count();
 
-    let Some(object_type) =
-        super::super::text_objects::from_key(editor, key_event.code, text_obj_type == 'i')
-    else {
+    let Some(object_type) = super::super::text_objects::from_key(
+        editor,
+        key_event.code,
+        prefix == TextObjectPrefix::Inner,
+    ) else {
         return Ok(true);
     };
     let result = if operator == Operator::Change {

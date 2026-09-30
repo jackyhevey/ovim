@@ -199,7 +199,7 @@ pub use toast::{Toast, ToastCenter, ToastLevel, ToastRequest, ToastSource};
 pub use ui_panels::UiPanels;
 pub use undo::UndoManager;
 pub use viewport_state::ViewportState;
-pub use visual_context::{VisualContext, VisualSelection};
+pub use visual_context::{BlockInsert, VisualContext, VisualSelection};
 pub use window::{SplitDirection, Window, WindowManager, WindowNode, WindowView, WindowViewNode};
 pub use wrap_map::WrapMap;
 
@@ -412,7 +412,7 @@ pub struct Editor {
     /// Register manager for yank/delete operations
     registers: RegisterManager,
     /// Visual mode context (selection start, block insert state, last selection)
-    visual: VisualContext,
+    pub(crate) visual: VisualContext,
     /// Command-line mode context (buffer, history, navigation)
     command: CommandContext,
     /// Search-related state
@@ -790,10 +790,10 @@ impl Editor {
             mode
         };
         self.mode = mode;
-        // Clear count and pending operator when changing modes
+        // A mode change ends any half-typed command (count, operator,
+        // prefix, character argument, register, mapping keys).
         self.input.count = None;
-        self.input.pending_operator = None;
-        self.input.pending_command = None;
+        self.input.input_state = InputState::Normal;
         self.input.pending_register = None;
         self.input.pending_mapping_sequence.clear();
         self.input.pending_mapping_events.clear();
@@ -970,16 +970,6 @@ impl Editor {
 
     pub fn ai_chat_working_animation_frame(&self) -> usize {
         (self.render_cache.ai_chat_working_animation_tick % 8) as usize
-    }
-
-    /// Gets the pending command
-    pub fn pending_command(&self) -> Option<char> {
-        self.input.pending_command
-    }
-
-    /// Sets the pending command
-    pub fn set_pending_command(&mut self, cmd: char) {
-        self.input.pending_command = Some(cmd);
     }
 
     /// Gets the current input state (new state machine)
@@ -1755,11 +1745,6 @@ impl Editor {
         (height / 2).max(1)
     }
 
-    /// Clears the pending command
-    pub fn clear_pending_command(&mut self) {
-        self.input.pending_command = None;
-    }
-
     /// Returns whether the editor should quit
     pub fn should_quit(&self) -> bool {
         self.should_quit
@@ -1805,21 +1790,6 @@ impl Editor {
     /// Gets the effective count (count or 1)
     pub fn effective_count(&self) -> usize {
         self.input.count.unwrap_or(1)
-    }
-
-    /// Gets the pending operator
-    pub fn pending_operator(&self) -> Option<Operator> {
-        self.input.pending_operator
-    }
-
-    /// Sets the pending operator
-    pub fn set_pending_operator(&mut self, op: Operator) {
-        self.input.pending_operator = Some(op);
-    }
-
-    /// Clears the pending operator
-    pub fn clear_pending_operator(&mut self) {
-        self.input.pending_operator = None;
     }
 
     /// Gets a reference to the registers
@@ -2265,11 +2235,6 @@ impl Editor {
         self.buffer_mut().change_manager_mut().set_entry_mode(mode);
     }
 
-    /// Adds a change to the change manager
-    pub fn add_change(&mut self, change: Change) {
-        self.buffer_mut().change_manager_mut().add_change(change);
-    }
-
     /// Finalizes the current insert-session change.
     ///
     /// Closes the stateful recording session and, if it produced edits,
@@ -2278,7 +2243,10 @@ impl Editor {
     /// legacy `ChangeBuilder`-built `Composite` is no longer produced here;
     /// the builder's role is now purely to carry `entry_mode` and
     /// `cursor_before` across the session.
-    pub fn finalize_change_building(&mut self) {
+    ///
+    /// Returns the token of the pushed undo entry, for flows that merge the
+    /// session with a preceding delete or replicate it (c, visual-block I/A).
+    pub fn finalize_change_building(&mut self) -> Option<crate::change::ChangeToken> {
         let cursor_after =
             CursorPos::new(self.buffer().cursor().line(), self.buffer().cursor().col());
 
@@ -2295,15 +2263,24 @@ impl Editor {
                 // No active session — still make sure recording is closed so
                 // a leaked `begin_recording` doesn't trip later record() calls.
                 let _ = self.buffer_mut().end_recording();
-                return;
+                return None;
             }
         };
 
         let origin = self.buffer().recording_origin();
         let origin_cursor = self.buffer().recording_origin_cursor();
         let edits = self.buffer_mut().end_recording();
+
+        // The `.` register: what was typed (empty for an insert that typed
+        // nothing, as in vim). For o/O the first edit is the opened line.
+        let typed = match entry_mode {
+            InsertEntryMode::OpenBelow | InsertEntryMode::OpenAbove => edits.get(1..),
+            _ => Some(&edits[..]),
+        };
+        let inserted = crate::edit::surviving_inserted_text(typed.unwrap_or_default());
+        self.registers.set_last_inserted(inserted);
         if edits.is_empty() {
-            return;
+            return None;
         }
 
         // Push the session as a mechanical-undo `Recorded` entry. The
@@ -2319,19 +2296,19 @@ impl Editor {
             ),
             None => Change::recorded(edits.clone(), cursor_before, cursor_after),
         };
-        self.buffer_mut().change_manager_mut().push_change(change);
+        let token = self.buffer_mut().change_manager_mut().push_change(change);
 
-        // Install dot-repeat. push_change above cleared last_repeat_action;
-        // set InsertSession now.
-        if let Some(origin_offset) = origin {
-            let cm = self.buffer_mut().change_manager_mut();
-            cm.last_repeat_action = Some(RepeatAction::InsertSession {
-                count: 1,
-                entry_mode,
-                origin_offset,
-                edits,
-            });
-        }
+        // Install dot-repeat. Session edits always start at a recorded
+        // origin; without one there is nothing to re-anchor, so `.` must not
+        // keep repeating the command before this insert either.
+        let cm = self.buffer_mut().change_manager_mut();
+        cm.last_repeat_action = origin.map(|origin_offset| RepeatAction::InsertSession {
+            count: 1,
+            entry_mode,
+            origin_offset,
+            edits,
+        });
+        Some(token)
     }
 
     /// Sets a pending change repeat (for cc, C, s, cj, etc. dot-repeat)
@@ -2342,16 +2319,6 @@ impl Editor {
     /// Takes and clears the pending change repeat
     pub fn take_pending_change_repeat(&mut self) -> Option<PendingChangeRepeat> {
         self.editing.pending_change_repeat.take()
-    }
-
-    /// Sets pending visual-block change repeat payload (line_count, width).
-    pub fn set_pending_visual_block_change_repeat(&mut self, pending: Option<(usize, usize)>) {
-        self.editing.pending_visual_block_change_repeat = pending;
-    }
-
-    /// Takes and clears pending visual-block change repeat payload.
-    pub fn take_pending_visual_block_change_repeat(&mut self) -> Option<(usize, usize)> {
-        self.editing.pending_visual_block_change_repeat.take()
     }
 
     /// Gets the leader key (default: space)
@@ -2489,11 +2456,6 @@ impl Editor {
     /// Clear last escape time
     pub fn clear_last_escape_time(&mut self) {
         self.ui_panels.last_escape_time = None;
-    }
-
-    /// Gets a reference to the last change
-    pub fn last_change(&self) -> Option<&Change> {
-        self.buffer().change_manager().last_change()
     }
 
     /// Jump to next diagnostic (]d).

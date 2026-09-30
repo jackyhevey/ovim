@@ -365,9 +365,7 @@ impl Editor {
     }
 
     fn push_resource_undo_change(&mut self, change: Change) {
-        self.buffer_mut()
-            .change_manager_mut()
-            .push_undo_change_preserving_repeat(change);
+        self.buffer_mut().change_manager_mut().push_change(change);
     }
 
     /// The open buffer (if any) whose file a resource operation renames or

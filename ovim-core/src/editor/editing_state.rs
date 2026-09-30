@@ -22,13 +22,6 @@ pub struct EditingState {
     pub last_insert_position: Option<(usize, usize)>,
     /// Pending change repeat — describes the delete phase for dot-repeat (cc, C, s, etc.).
     pub pending_change_repeat: Option<PendingChangeRepeat>,
-    /// Pending visual-block change repeat payload: (line_count, width).
-    /// Set for `Ctrl-V ... c ...` and consumed when insert mode exits.
-    pub pending_visual_block_change_repeat: Option<(usize, usize)>,
-    /// Token for the visual-block change delete-phase undo entry.
-    /// Set alongside `pending_visual_block_change_repeat` for `Ctrl-V ... c ...`
-    /// and redeemed during insert-mode exit merge.
-    pub pending_visual_block_change_delete_token: Option<ChangeToken>,
     /// Replace mode tracking for dot-repeat
     pub replace_mode_state: Option<ReplaceModeState>,
     /// Substitute confirmation state: matches to confirm (line, start_col, end_col, replacement)

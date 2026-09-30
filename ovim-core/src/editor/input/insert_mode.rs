@@ -9,7 +9,8 @@
 //! - Visual block insert state handling
 //! - Tab/auto-indent
 
-use crate::editor::{Change, CompletionAcceptMode, Editor, InsertEntryMode};
+use crate::change::ChangeToken;
+use crate::editor::{BlockInsert, Change, CompletionAcceptMode, Editor, InsertEntryMode};
 use crate::mode::Mode;
 use crate::repeat_action::RepeatAction;
 use crate::unicode::{CharCol, GraphemeCol};
@@ -77,22 +78,12 @@ fn finish_insert_mode(editor: &mut Editor, temporary: bool) {
         cleanup_whitespace_only_line(editor);
     }
 
-    // Track whether finalize actually pushed an insert-mode undo entry.
-    // For cases like `cw<Esc>`/`C<Esc>` where no text was typed, finalize
-    // pushes nothing and we must not pop unrelated history.
-    let undo_len_before_finalize = editor.buffer().change_manager().undo_stack.len();
-    editor.finalize_change_building();
-    let insert_change_pushed =
-        editor.buffer().change_manager().undo_stack.len() > undo_len_before_finalize;
+    let session = editor.finalize_change_building();
 
     // Check for pending change repeat (cc, C, s, S, cj, ck, cw, cgn, etc.)
     if let Some(pending) = editor.take_pending_change_repeat() {
-        // Pop the insert session's `Recorded` only if it pushed one.
-        let insert_undo = if insert_change_pushed {
-            editor.pop_last_change()
-        } else {
-            None
-        };
+        // The insert session's `Recorded`, if the session typed anything.
+        let insert_undo = session.and_then(|token| editor.pop_by_token(token));
         let inserted_text = insert_undo
             .as_ref()
             .map(|c| c.get_inserted_text())
@@ -151,120 +142,13 @@ fn finish_insert_mode(editor: &mut Editor, temporary: bool) {
         }
         _ => None,
     };
-
-    // Update the . register with the last inserted text
-    editor.update_last_inserted_register();
     if let Some(action) = open_line_repeat {
         editor.set_repeat_action(action);
     }
 
-    // If we were in visual block insert/append mode, replay the changes on all other lines.
-    // For visual-block change (`Ctrl-V ... c ...`), also capture a semantic repeat template.
-    let pending_visual_block_change = editor.take_pending_visual_block_change_repeat();
-    let pending_visual_block_delete_token = editor
-        .editing
-        .pending_visual_block_change_delete_token
-        .take();
-    let mut visual_block_change_inserted_text: Option<String> = None;
-    let should_move_to_end_line = if let Some((start_line, end_line, col, is_append, move_to_end)) =
-        editor.visual_block_insert_state()
-    {
-        // Pull the first-line session's `Recorded` so we can extend its
-        // edits with the replays on sibling lines and push the combined
-        // result as a single undo entry.
-        if let Some(last_change) = editor.last_change().cloned() {
-            let inserted_text = last_change.get_inserted_text();
-            if !is_append && !move_to_end {
-                visual_block_change_inserted_text = Some(inserted_text.clone());
-            }
-            let cursor_before = last_change.cursor_before();
-            let mut all_edits: Vec<crate::edit::Edit> =
-                last_change.into_edits().unwrap_or_default();
-
-            // `$A` (block append to end-of-line) appends at each line's EOL;
-            // a plain `A` appends at the fixed block column on every line.
-            // Consume the flag here since this path doesn't route through
-            // exit_visual_mode_to_normal (which is where it normally resets).
-            let block_dollar = editor.visual_block_dollar();
-            editor.set_visual_block_dollar(false);
-
-            // Replay the typed text on each sibling line inside a record()
-            // session so the edits are captured (and the edit_log populated)
-            // without the caller having to track each insert_text_at manually.
-            let ((), sibling_edits) = editor.buffer_mut().record(|buf| {
-                for line_idx in (start_line + 1)..=end_line {
-                    if is_append && block_dollar {
-                        // `$A`: append at end of each line.
-                        if let Some(line) = buf.line_text(line_idx) {
-                            let line_len = line.chars().count();
-                            buf.insert_text_at(line_idx, CharCol(line_len), &inserted_text);
-                        }
-                    } else if is_append {
-                        // `A`: append at the block append column, padding short
-                        // lines so the column lines up (matching Vim).
-                        if let Some(line) = buf.line_text(line_idx) {
-                            let line_len = line.chars().count();
-                            if col <= line_len {
-                                buf.insert_text_at(line_idx, CharCol(col), &inserted_text);
-                            } else {
-                                let padding = " ".repeat(col - line_len);
-                                let padded = format!("{padding}{inserted_text}");
-                                buf.insert_text_at(line_idx, CharCol(line_len), &padded);
-                            }
-                        }
-                    } else {
-                        // Insert mode: insert at the block column (`col` is
-                        // grapheme-space from visual-block state — pre-existing
-                        // Class-2 assumption that equals char-space for ASCII).
-                        if let Some(line_text) = buf.line_text(line_idx) {
-                            let insert_col = col.min(line_text.chars().count());
-                            buf.insert_text_at(line_idx, CharCol(insert_col), &inserted_text);
-                        }
-                    }
-                }
-            });
-
-            // If sibling lines produced edits, rewrite the undo entry to
-            // contain all of them. The first-line Recorded we popped above
-            // stands in for the whole visual-block insert/append.
-            if !sibling_edits.is_empty() {
-                editor.pop_last_change();
-                all_edits.extend(sibling_edits);
-
-                // Visual-block change (`c`) has a preceding delete Recorded.
-                // Redeem it by token so we never pop unrelated history.
-                if let Some(token) = pending_visual_block_delete_token {
-                    if let Some(prev_change) = editor.pop_by_token(token) {
-                        let mut merged = prev_change.into_edits().unwrap_or_default();
-                        merged.extend(all_edits);
-                        all_edits = merged;
-                    }
-                }
-
-                let cursor_after = editor.cursor_position();
-                editor
-                    .buffer_mut()
-                    .change_manager_mut()
-                    .push_change(Change::recorded(all_edits, cursor_before, cursor_after));
-            }
-        }
-
-        // Clear the visual block insert state
-        editor.set_visual_block_insert_state(None);
-        Some((start_line, end_line, col, is_append, move_to_end))
-    } else {
-        None
-    };
-
-    if let (Some((line_count, width)), Some(inserted_text)) = (
-        pending_visual_block_change,
-        visual_block_change_inserted_text,
-    ) {
-        editor.set_repeat_action(RepeatAction::ChangeVisualBlock {
-            line_count,
-            width,
-            inserted_text,
-        });
+    let block = editor.visual.block_insert.take();
+    if let Some(block) = &block {
+        replicate_block_insert(editor, block, session);
     }
 
     // Mark buffer modified for LSP didChange — placed after visual block replay
@@ -281,39 +165,76 @@ fn finish_insert_mode(editor: &mut Editor, temporary: bool) {
         return;
     }
 
-    // Move cursor left when exiting insert mode (unless at column 0)
-
-    // If we were in visual block mode, move cursor to appropriate line
-    if let Some((start_line, end_line, _col, is_append, move_to_end)) = should_move_to_end_line {
-        // For visual block, calculate the correct final cursor position
-        let target_line = if move_to_end { end_line } else { start_line };
-
-        if is_append {
-            // For append mode, position cursor on the last character of target line
-            if let Some(line_text) = editor.buffer().line_text(target_line) {
-                let line_len = line_text.chars().count();
-                let final_col = if line_len > 0 { line_len - 1 } else { 0 };
-                editor
-                    .buffer_mut()
-                    .cursor_mut()
-                    .set_position(target_line, GraphemeCol(final_col));
-            }
-        } else {
-            // For insert mode, use the same column as on the first line
-            let cursor = editor.buffer().cursor();
-            let current_col = cursor.col().0;
-            let inserted_col = if current_col > 0 { current_col - 1 } else { 0 };
+    match block {
+        // vim: a visual-block I / A leaves the cursor at the block's top-left.
+        Some(BlockInsert {
+            start_line,
+            left_col,
+            change: None,
+            ..
+        }) => {
             editor
                 .buffer_mut()
                 .cursor_mut()
-                .set_position(target_line, GraphemeCol(inserted_col));
+                .set_position(start_line, GraphemeCol(left_col));
+            editor.buffer_mut().validate_cursor_position();
         }
-    } else {
-        let cursor = editor.buffer_mut().cursor_mut();
-        if cursor.col().0 > 0 {
-            cursor.move_left(1);
+        // Otherwise the cursor steps back onto the last inserted character.
+        _ => {
+            let cursor = editor.buffer_mut().cursor_mut();
+            if cursor.col().0 > 0 {
+                cursor.move_left(1);
+            }
         }
     }
+}
+
+/// Visual-block I / A / c: replay the text typed on the first block line on
+/// the other lines, make the whole block (and the `c` delete) one undo step
+/// and install the block repeat for `.`.
+fn replicate_block_insert(editor: &mut Editor, block: &BlockInsert, session: Option<ChangeToken>) {
+    let delete_width = block.change.map_or(0, |(width, _)| width);
+    let session = session.and_then(|token| editor.pop_by_token(token));
+    let inserted_text = session
+        .as_ref()
+        .map(Change::get_inserted_text)
+        .unwrap_or_default();
+
+    if let Some(session) = session {
+        // Undo returns to the block's top-left, where the session began.
+        let cursor_before = session.cursor_before();
+        let mut edits = session.into_edits().unwrap_or_default();
+        let column = block.column.offset_by(block.left_col);
+        let ((), sibling_edits) = editor.buffer_mut().record(|buf| {
+            column.insert_on_lines(
+                buf,
+                block.start_line + 1..block.end_line + 1,
+                &inserted_text,
+            )
+        });
+        edits.extend(sibling_edits);
+        let delete_token = block.change.and_then(|(_, token)| token);
+        if let Some(delete) = delete_token.and_then(|token| editor.pop_by_token(token)) {
+            let mut merged = delete.into_edits().unwrap_or_default();
+            merged.extend(edits);
+            edits = merged;
+        }
+        let cursor_after = editor.cursor_position();
+        editor
+            .buffer_mut()
+            .change_manager_mut()
+            .push_change(Change::recorded(edits, cursor_before, cursor_after));
+    } else if delete_width == 0 {
+        // An I / A that typed nothing changed nothing; `.` keeps its target.
+        return;
+    }
+
+    editor.set_repeat_action(RepeatAction::VisualBlockInsert {
+        line_count: block.end_line - block.start_line + 1,
+        delete_width,
+        column: block.column,
+        inserted_text,
+    });
 }
 
 /// Handles input in Insert mode

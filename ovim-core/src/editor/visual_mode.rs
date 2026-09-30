@@ -120,19 +120,6 @@ impl Editor {
         self.visual.last_visual_selection = Some((start, end, mode));
     }
 
-    /// Sets visual block insert/append state for replay on insert mode exit
-    pub fn set_visual_block_insert_state(
-        &mut self,
-        state: Option<(usize, usize, usize, bool, bool)>,
-    ) {
-        self.visual.visual_block_insert_state = state;
-    }
-
-    /// Gets visual block insert/append state
-    pub fn visual_block_insert_state(&self) -> Option<(usize, usize, usize, bool, bool)> {
-        self.visual.visual_block_insert_state
-    }
-
     /// Returns true when `$` was pressed in visual block mode (extend to EOL).
     pub fn visual_block_dollar(&self) -> bool {
         self.visual.visual_block_dollar

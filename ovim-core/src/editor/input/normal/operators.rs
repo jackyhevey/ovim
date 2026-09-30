@@ -14,7 +14,8 @@
 
 use crate::editor::input::helpers;
 use crate::editor::{
-    CharMotion, CursorPos, Editor, InputState, Motions, Operator, PendingChangeRepeat, RegisterType,
+    CharMotion, CursorPos, Editor, InputState, Motions, Operator, PendingChangeRepeat,
+    RegisterType, TextObjectPrefix,
 };
 use crate::mode::Mode;
 use crate::repeat_action::RepeatAction;
@@ -28,22 +29,35 @@ use super::super::case;
 ///
 /// Returns `Ok(true)` if the key was handled, `Ok(false)` otherwise.
 pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
-    // Skip if we have a text object prefix ('i' or 'a')
-    let has_text_obj_prefix = matches!(editor.pending_command(), Some('i') | Some('a'));
-    if has_text_obj_prefix {
-        return Ok(false);
-    }
-
-    let operator = match editor.pending_operator() {
-        Some(op) => op,
-        None => return Ok(false),
+    let (operator, g_prefix) = match *editor.input_state() {
+        InputState::OperatorPending { operator } => (operator, false),
+        InputState::GPrefix {
+            operator: Some(operator),
+        } => (operator, true),
+        _ => return Ok(false),
     };
 
     let count = editor.effective_count();
 
+    // After an operator, `g` only continues as the `gg`, `gn` and `gN`
+    // motions; anything else (another operator such as `gu`, `gw`, Esc)
+    // cancels the whole command, as in vim.
+    if g_prefix {
+        return match key_event.code {
+            KeyCode::Char('g') => handle_gg_motion(editor, operator, count),
+            // gn / gN select a search match: pending_commands applies the operator.
+            KeyCode::Char('n' | 'N') => Ok(false),
+            _ => {
+                editor.reset_input_state();
+                editor.clear_count();
+                Ok(true)
+            }
+        };
+    }
+
     // K is not a motion, so operator+K should just cancel the operator
     if key_event.code == KeyCode::Char('K') {
-        editor.clear_pending_operator();
+        editor.reset_input_state();
         editor.clear_count();
         return Ok(true);
     }
@@ -57,7 +71,6 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
     // All linewise operators support gg: dgg, ygg, cgg, >gg, <gg, zfgg
     // dgn, ygn, cgn ARE also supported (gn is a search motion)
     if key_event.code == KeyCode::Char('g')
-        && editor.pending_command() != Some('g')
         && matches!(
             operator,
             Operator::Indent
@@ -69,21 +82,10 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
                 | Operator::Yank
         )
     {
-        editor.set_pending_command('g');
+        editor.set_input_state(InputState::GPrefix {
+            operator: Some(operator),
+        });
         return Ok(true);
-    }
-
-    // Handle gg motion with operators (dgg, ygg, cgg, >gg, <gg, zfgg)
-    if editor.pending_command() == Some('g') && key_event.code == KeyCode::Char('g') {
-        return handle_gg_motion(editor, operator, count);
-    }
-
-    // Handle gn and gN motions (search next/prev) - delegate to pending_commands
-    if editor.pending_command() == Some('g')
-        && matches!(key_event.code, KeyCode::Char('n') | KeyCode::Char('N'))
-    {
-        // Don't clear the operator - let pending_commands handle it
-        return Ok(false);
     }
 
     // Handle G motion with operators
@@ -92,7 +94,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
     }
 
     // Clear pending operator for the main match (will be restored if needed)
-    editor.clear_pending_operator();
+    editor.reset_input_state();
 
     let handled = match (operator, key_event.code) {
         // =====================================================================
@@ -602,21 +604,18 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         (_, KeyCode::Char(c)) if c.is_ascii_digit() && c != '0' => {
             let digit = c.to_digit(10).unwrap() as usize;
             editor.append_count(digit);
-            editor.set_pending_operator(operator); // Restore operator
+            editor.set_input_state(InputState::OperatorPending { operator });
             true
         }
 
         // =====================================================================
         // Text object prefixes
         // =====================================================================
-        (_, KeyCode::Char('i')) => {
-            editor.set_pending_operator(operator);
-            editor.set_pending_command('i');
-            true
-        }
-        (_, KeyCode::Char('a')) => {
-            editor.set_pending_operator(operator);
-            editor.set_pending_command('a');
+        (_, KeyCode::Char(c @ ('i' | 'a'))) => {
+            editor.set_input_state(InputState::TextObjectPending {
+                operator: Some(operator),
+                prefix: TextObjectPrefix::from_char(c).expect("i or a"),
+            });
             true
         }
 
@@ -696,7 +695,7 @@ fn try_handle_char_motion_with_operator(
 
 /// Handle G motion with operator (dG, cG, yG, >G, <G, zfG)
 fn handle_g_motion(editor: &mut Editor, operator: Operator, count: usize) -> Result<bool> {
-    editor.clear_pending_operator();
+    editor.reset_input_state();
     let cursor = editor.buffer().cursor();
     let cursor_before = CursorPos::new(cursor.line(), cursor.col());
     let cursor_line = cursor.line();
@@ -770,8 +769,7 @@ fn handle_g_motion(editor: &mut Editor, operator: Operator, count: usize) -> Res
 
 /// Handle gg motion with operator (dgg, ygg, cgg, >gg, <gg, zfgg)
 fn handle_gg_motion(editor: &mut Editor, operator: Operator, count: usize) -> Result<bool> {
-    editor.clear_pending_operator();
-    editor.clear_pending_command();
+    editor.reset_input_state();
 
     let cursor_line = editor.buffer().cursor().line();
     let cursor_before = CursorPos::new(cursor_line, editor.buffer().cursor().col());

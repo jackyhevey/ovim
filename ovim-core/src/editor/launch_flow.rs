@@ -197,7 +197,7 @@ impl LaunchJob {
         let mut entries = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for log in [&self.log_stderr, &self.log_stdout] {
-            for entry in crate::commands::parse_compiler_output_in(log, cwd) {
+            for entry in crate::launch::diagnostics::parse_compiler_output_in(log, cwd) {
                 let key = (
                     entry.filename.clone(),
                     entry.lnum,

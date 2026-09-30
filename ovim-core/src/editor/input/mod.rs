@@ -114,9 +114,7 @@ impl InputHandler {
         // the macro silently drops it.
         let is_recording_terminator = key_event.code == KeyCode::Char('q')
             && editor.mode() == Mode::Normal
-            && matches!(editor.input_state(), InputState::Normal)
-            && editor.pending_operator().is_none()
-            && editor.pending_command().is_none()
+            && editor.input_state().is_normal()
             && editor.pending_register().is_none();
         let should_record_macro =
             record_macro && editor.is_recording_macro() && !is_recording_terminator;
@@ -219,11 +217,9 @@ impl InputHandler {
             && editor.mode() == Mode::Normal
         {
             // Check if the command is fully resolved (no pending operator/command)
-            if editor.pending_operator().is_none()
-                && editor.pending_command().is_none()
+            if editor.input_state().is_normal()
                 && editor.pending_register().is_none()
                 && editor.count().is_none()
-                && matches!(editor.input_state(), InputState::Normal)
             {
                 editor.editing.insert_normal_pending = false;
                 editor.start_change_building(editor.cursor_position());
@@ -250,7 +246,10 @@ impl InputHandler {
         editor.sync_folds_after_key(fold_prev.0, fold_prev.1, fold_prev.2);
         editor.report_refused_edit();
 
-        let is_viewport_pending = matches!(editor.pending_command(), Some('z') | Some('Z'));
+        let is_viewport_pending = matches!(
+            editor.input_state(),
+            InputState::ZPrefix | InputState::QuitPrefix
+        );
         let preserve_viewport = editor.viewport.take_preserve_after_input();
         if !preserve_viewport && !is_viewport_pending && !mapping_handled {
             editor.update_scroll_offset();
@@ -308,10 +307,8 @@ impl InputHandler {
     fn is_mapping_context(editor: &Editor) -> bool {
         editor.pending_mapping_sequence().is_empty()
             && editor.count().is_none()
-            && editor.pending_operator().is_none()
-            && editor.pending_command().is_none()
+            && editor.input_state().is_normal()
             && editor.pending_register().is_none()
-            && matches!(editor.input_state(), InputState::Normal)
     }
 
     fn try_handle_mode_mapping(
@@ -491,13 +488,8 @@ impl InputHandler {
                 let keys_clone = keys.clone();
                 return leader::handle_leader_input(editor, key_event, &keys_clone);
             }
-            InputState::Normal => {
-                // Fall through to normal mode dispatcher
-            }
-            _ => {
-                // For unhandled states, reset and fall through
-                editor.reset_input_state();
-            }
+            // Operators and prefixes are resolved by the normal/ dispatcher.
+            _ => {}
         }
 
         // =====================================================================
@@ -521,15 +513,14 @@ impl InputHandler {
         commands::execute_command_string(editor, command)
     }
 
-    /// Execute a command string for the headless API / CLI, returning a
-    /// structured result. Unlike the standard commands module, this reaches
-    /// substitute, global, and range commands (full parity with the
-    /// interactive command line).
+    /// Execute a command line for the headless API / GUI: the same
+    /// dispatcher as the `:` prompt, returning the result instead of showing
+    /// it. See [`crate::commands::execute_command_api`].
     pub fn execute_command_api(
         editor: &mut Editor,
         command: &str,
     ) -> crate::command_result::CommandResult {
-        commands::execute_command_string_api(editor, command)
+        crate::commands::execute_command_api(editor, command)
     }
 
     /// Wrapper to call commands module's handle_command_mode
@@ -537,8 +528,51 @@ impl InputHandler {
         editor.with_execution_scope(|editor| commands::handle_command_mode(editor, key_event))
     }
 
-    /// Wrapper to call commands module's parse_range
-    pub fn parse_range_wrapper(editor: &Editor, range_str: &str) -> Option<(usize, usize)> {
-        commands::parse_range(editor, range_str)
+    /// Type `keys` as if in Normal mode, for `:normal`. Each character is
+    /// one key (`\x1b` is <Esc>, `\r`/`\n` <Enter>, `\t` <Tab>). An
+    /// unfinished command or mode is ended with <Esc>, as vim does.
+    /// `remap` is false for `:normal!`.
+    pub(crate) fn type_normal_keys(editor: &mut Editor, keys: &str, remap: bool) -> Result<()> {
+        if editor.mode() != Mode::Normal {
+            Self::handle_key_event_internal(
+                editor,
+                KeyEvent::new(KeyCode::Esc, Modifiers::NONE),
+                false,
+                false,
+                0,
+            )?;
+        }
+        for ch in keys.chars() {
+            let code = match ch {
+                '\x1b' => KeyCode::Esc,
+                '\r' | '\n' => KeyCode::Enter,
+                '\t' => KeyCode::Tab,
+                '\x08' | '\x7f' => KeyCode::Backspace,
+                ch => KeyCode::Char(ch),
+            };
+            Self::handle_key_event_internal(
+                editor,
+                KeyEvent::new(code, Modifiers::NONE),
+                remap,
+                false,
+                0,
+            )?;
+        }
+        // Leave whatever the keys started: an operator waiting for a motion,
+        // Insert mode, a half-typed command line.
+        for _ in 0..3 {
+            if editor.mode() == Mode::Normal && editor.input_state().is_normal() {
+                break;
+            }
+            Self::handle_key_event_internal(
+                editor,
+                KeyEvent::new(KeyCode::Esc, Modifiers::NONE),
+                false,
+                false,
+                0,
+            )?;
+        }
+        editor.mark_dirty();
+        Ok(())
     }
 }

@@ -1,5 +1,7 @@
 # Phase 2: Unified Slot Architecture
 
+> **HISTORICAL (2026-09).** This phase shipped or was overtaken by later work; the code is the source of truth. Kept for rationale only. The only active roadmap document is [17-multi-server-sync.md](./17-multi-server-sync.md).
+
 **Goal:** Every LSP feature uses the same `Slot<T>` pattern. No keystroke is ever lost. No action blocks the event loop. Same-type cancels, different-type coexists.
 
 **Fixes:** Actions lost during fast input. Format/code-actions/rename blocking the event loop for 100-500ms. Ad-hoc polling code for completion, inlay hints, diagnostics, hover, goto.

@@ -22,7 +22,9 @@ fn test_command_global_percent_delete_non_matching_lines_g_bang() {
 
     assert_eq!(test.buffer_content(), "foo 1\ndrop foo 2\n");
     assert_eq!(test.editor.status_message(), "Deleted 2 line(s)");
-    test.assert_cursor(0, 0);
+    // vim (nvim --clean): the cursor ends where the last deleted line was,
+    // here line 2.
+    test.assert_cursor(1, 0);
 }
 
 #[test]
@@ -41,9 +43,10 @@ fn test_command_global_percent_default_print_command() {
 
     InputHandler::execute_command_string(&mut test.editor, "%g/foo/").unwrap();
 
-    let status = test.editor.status_message();
-    assert!(status.contains("2: foo two"), "status: {}", status);
-    assert!(status.contains("3: three foo"), "status: {}", status);
+    // Multi-line output goes to the hover popup like every other command.
+    let output = test.editor.hover_info().unwrap_or_default().to_string();
+    assert!(output.contains("2: foo two"), "output: {}", output);
+    assert!(output.contains("3: three foo"), "output: {}", output);
 }
 
 #[test]
@@ -137,5 +140,6 @@ fn test_command_global_no_matches_is_non_destructive() {
     InputHandler::execute_command_string(&mut test.editor, "%g/foo/d").unwrap();
 
     assert_eq!(test.buffer_content(), "one\ntwo\nthree\n");
-    assert_eq!(test.editor.status_message(), "No matching lines found");
+    // vim's message for a :g without matches.
+    assert_eq!(test.editor.status_message(), "Pattern not found: foo");
 }

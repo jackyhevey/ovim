@@ -1,5 +1,7 @@
 # 08: Column Coordinate Correctness
 
+> **HISTORICAL (2026-09).** This phase shipped or was overtaken by later work; the code is the source of truth. Kept for rationale only. The only active roadmap document is [17-multi-server-sync.md](./17-multi-server-sync.md).
+
 **Goal:** Every function that takes a column parameter uses the correct coordinate system. No implicit conversions, no silent mismatches between UTF-16 / char / grapheme columns.
 
 **Fixes:** Latent buffer corruption with combining characters in completion, potential off-by-one in decoration adjustment for non-ASCII text.

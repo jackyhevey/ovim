@@ -1,5 +1,7 @@
 # Phase 0: Quick Fixes
 
+> **HISTORICAL (2026-09).** This phase shipped or was overtaken by later work; the code is the source of truth. Kept for rationale only. The only active roadmap document is [17-multi-server-sync.md](./17-multi-server-sync.md).
+
 **Goal:** Fix the acute symptoms with surgical changes that are correct regardless of what happens in later phases. No double work -- each fix is either the final fix or a prerequisite for the structural work.
 
 **Risk:** Low. Each change is small, independent, and testable in isolation.

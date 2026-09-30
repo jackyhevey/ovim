@@ -83,7 +83,8 @@ fn test_ctrl_v_insert_block() {
         .press_esc();
 
     assert_eq!(test.buffer_content(), ">> hello\n>> world\n>> test\n");
-    test.assert_cursor(2, 2);
+    // nvim --clean: the cursor returns to the block's top-left corner.
+    test.assert_cursor(0, 0);
 }
 
 #[test]
@@ -98,7 +99,8 @@ fn test_ctrl_v_append_block() {
         .press_esc();
 
     assert_eq!(test.buffer_content(), "hello!\nworld!\ntest!\n");
-    test.assert_cursor(2, 4);
+    // nvim --clean: the cursor returns to the block's top-left corner.
+    test.assert_cursor(0, 4);
 }
 
 #[test]
@@ -459,7 +461,8 @@ fn test_ctrl_v_multiple_char_insert() {
         test.buffer_content(),
         "PREFIX: hello\nPREFIX: world\nPREFIX: test\n"
     );
-    test.assert_cursor(2, 7);
+    // nvim --clean: the cursor returns to the block's top-left corner.
+    test.assert_cursor(0, 0);
 }
 
 #[test]
@@ -532,4 +535,73 @@ fn test_ctrl_v_replace_r() {
 
     assert_eq!(test.buffer_content(), "XXXlo\nXXXld\nXXXt\n");
     test.assert_cursor(2, 2);
+}
+
+// nvim --clean: `.` after a block insert/append repeats it at the cursor on
+// as many lines as the block had (OV-00489).
+#[test]
+fn test_ctrl_v_insert_dot_repeat_at_cursor() {
+    editor_flow_test! {
+        content "abc def ghi\nabc def ghi\nabc def ghi\n";
+        step "w<C-v>jIXY<Esc>" => |test| {
+            assert_eq!(test.buffer_content(), "abc XYdef ghi\nabc XYdef ghi\nabc def ghi\n");
+            test.assert_cursor(0, 4);
+        }
+        step "jw." => |test| {
+            assert_eq!(
+                test.buffer_content(),
+                "abc XYdef ghi\nabc XYdef XYghi\nabc def ghXYi\n"
+            );
+            test.assert_cursor(1, 10);
+        }
+        step "u" => |test| {
+            assert_eq!(test.buffer_content(), "abc XYdef ghi\nabc XYdef ghi\nabc def ghi\n");
+        }
+    }
+}
+
+#[test]
+fn test_ctrl_v_append_dot_repeat_at_cursor() {
+    editor_flow_test! {
+        content "abc def ghi\nabc def ghi\nabc def ghi\n";
+        step "w<C-v>jAXY<Esc>" => |test| {
+            assert_eq!(test.buffer_content(), "abc dXYef ghi\nabc dXYef ghi\nabc def ghi\n");
+        }
+        step "jjb." => |test| {
+            assert_eq!(test.buffer_content(), "abc dXYef ghi\nabc dXYef ghi\naXYbc def ghi\n");
+            test.assert_cursor(2, 0);
+        }
+    }
+}
+
+// nvim --clean: a block I that types nothing changes nothing (it used to
+// replicate the previous insert's text onto the other block lines and fold
+// that older insert into its undo step).
+#[test]
+fn test_ctrl_v_empty_insert_changes_nothing() {
+    editor_flow_test! {
+        content "abc def\nabc def\n";
+        step "iAB<Esc>w<C-v>jI<Esc>" => |test| {
+            assert_eq!(test.buffer_content(), "ABabc def\nabc def\n");
+        }
+        step "u" => |test| {
+            assert_eq!(test.buffer_content(), "abc def\nabc def\n");
+        }
+    }
+}
+
+// nvim --clean: block I and c skip lines shorter than the block column;
+// A pads them.
+#[test]
+fn test_ctrl_v_insert_skips_short_lines_append_pads() {
+    for (keys, expected) in [
+        ("ll<C-v>jjIX<Esc>", "abXcd\na\nabXcd\n"),
+        ("ll<C-v>jjcX<Esc>", "abXd\na\nabXd\n"),
+        ("l<C-v>jjAX<Esc>", "abXcd\na X\nabXcd\n"),
+        ("l<C-v>jj$AX<Esc>", "abcdX\naX\nabcdX\n"),
+    ] {
+        let mut test = EditorTest::new("abcd\na\nabcd\n");
+        test.keys(keys);
+        assert_eq!(test.buffer_content(), expected, "{keys}");
+    }
 }

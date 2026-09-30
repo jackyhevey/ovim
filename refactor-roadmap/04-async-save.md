@@ -1,5 +1,7 @@
 # Phase 4: Async Save
 
+> **HISTORICAL (2026-09).** This phase shipped or was overtaken by later work; the code is the source of truth. Kept for rationale only. The only active roadmap document is [17-multi-server-sync.md](./17-multi-server-sync.md).
+
 **Goal:** Save never blocks the event loop. Git operations run on background threads.
 
 **Fixes:** Editor freezes on `:w`.

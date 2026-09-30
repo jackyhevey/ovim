@@ -620,7 +620,17 @@ pub fn insert_line_below(editor: &mut Editor) -> Result<bool> {
         .buffer_mut()
         .cursor_mut()
         .set_position(line_idx + 1, GraphemeCol(indent.chars().count()));
+    change_starts_on_opened_line(editor, line_idx + 1);
     Ok(true)
+}
+
+/// For `o` / `O` the change starts on the opened line (vim's `'.` and `g;`),
+/// not where the cursor was when the newline was inserted.
+fn change_starts_on_opened_line(editor: &mut Editor, line: usize) {
+    let buffer = editor.buffer_mut();
+    if let Some(offset) = buffer.recording_origin() {
+        buffer.set_recording_origin(offset, CursorPos::new(line, GraphemeCol::ZERO));
+    }
 }
 
 pub fn insert_line_above(editor: &mut Editor) -> Result<bool> {
@@ -654,6 +664,7 @@ pub fn insert_line_above(editor: &mut Editor) -> Result<bool> {
         .buffer_mut()
         .cursor_mut()
         .set_position(line_idx, GraphemeCol(indent.chars().count()));
+    change_starts_on_opened_line(editor, line_idx);
     Ok(true)
 }
 

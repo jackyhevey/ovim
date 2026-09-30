@@ -1,7 +1,4 @@
-//! Data-driven `:set` command handler.
-//!
-//! Replaces the ~400-line match/else-if chain in `commands.rs` with a
-//! declarative option table. Adding a new boolean or integer option
+//! `:set` options: a declarative option table. Adding a new boolean or integer option
 //! requires adding a single entry to `BOOL_OPTIONS` or handling it
 //! in `handle_value_option`.
 
@@ -595,10 +592,8 @@ fn handle_pullbase_path(editor: &mut Editor, option: &str, path: &str) -> Comman
     ok(Some(message))
 }
 
-/// Handle `:set` commands for options.
-///
-/// This replaces `handle_set_command` in `commands.rs`.
-pub fn handle_set_command(editor: &mut Editor, args: &str) -> CommandResult {
+/// Handle one `:set` argument.
+pub(super) fn handle_set_command(editor: &mut Editor, args: &str) -> CommandResult {
     if let Some(result) = handle_pseudocode_option(editor, args) {
         return result;
     }
