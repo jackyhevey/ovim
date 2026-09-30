@@ -30,6 +30,24 @@ use crate::editor::Editor;
 use contexts::BufferKind;
 use table::{ExCommand, RangePolicy};
 
+pub use table::command_names;
+
+/// The file argument being typed on `line`, for path completion: the rest
+/// of the line after the name of a command whose argument is a file
+/// (`:e`, `:w`, `:sp`, `:r`, `:so`, `:cd`, ...), once a blank follows the
+/// name. `None` for other commands and for `:r !cmd` / `:w !cmd`.
+pub fn file_argument(line: &str) -> Option<&str> {
+    let parsed = parse(line).ok()?;
+    if parsed.command.args != table::ArgKind::File || parsed.args.starts_with('!') {
+        return None;
+    }
+    let start = parsed.args.as_ptr() as usize - line.as_ptr() as usize;
+    let before = &line[..start];
+    before
+        .ends_with(char::is_whitespace)
+        .then(|| &line[start..])
+}
+
 /// One command as its handler sees it.
 pub(crate) struct Ex<'a> {
     pub command: &'static ExCommand,

@@ -490,7 +490,6 @@ pub(crate) static COMMANDS: &[ExCommand] = &[
 ];
 
 /// The full form of a `:help`-style name: `quit` for `q[uit]`.
-#[cfg(test)]
 pub fn full_name(spec: &str) -> String {
     spec.replace(['[', ']'], "")
 }
@@ -507,6 +506,23 @@ fn name_matches(spec: &str, typed: &str) -> bool {
         }
         None => spec == typed,
     }
+}
+
+/// Every command name in full, sorted, for tab completion: derived from
+/// the table, so it cannot list a command that does not exist or miss one
+/// that does.
+pub fn command_names() -> &'static [String] {
+    static NAMES: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+        let mut names: Vec<String> = COMMANDS
+            .iter()
+            .flat_map(|command| command.names.iter().map(|spec| full_name(spec)))
+            .filter(|name| name.starts_with(|c: char| c.is_ascii_alphabetic()))
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    });
+    &NAMES
 }
 
 /// Resolve a typed command name.
@@ -528,6 +544,373 @@ mod tests {
         assert!(!name_matches("sor[t]", "so"));
         assert!(name_matches("t", "t"));
         assert!(!name_matches("t", "ta"));
+    }
+
+    /// Every spelling the three old dispatchers accepted (read from
+    /// commands.rs, cmd_project.rs, cmd_buffer.rs, cmd_set.rs and
+    /// editor/input/commands.rs before OV-00487), with the command it
+    /// resolves to now. Bang forms (`q!`, `bd!`, ...) are the same entries.
+    const OLD_SPELLINGS: &[(&str, &str)] = &[
+        ("q", "quit"),
+        ("quit", "quit"),
+        ("cq", "cquit"),
+        ("cquit", "cquit"),
+        ("qa", "qall"),
+        ("qall", "qall"),
+        ("wa", "wall"),
+        ("wall", "wall"),
+        ("writeall", "wall"),
+        ("w", "write"),
+        ("write", "write"),
+        ("wq", "wq"),
+        ("format", "format"),
+        ("Format", "format"),
+        ("GitDiff", "GitDiff"),
+        ("gitdiff", "GitDiff"),
+        ("DiffReview", "GitDiff"),
+        ("GitDiffLayout", "GitDiffLayout"),
+        ("gitdifflayout", "GitDiffLayout"),
+        ("unset", "unset"),
+        ("GitFetch", "GitFetch"),
+        ("gitfetch", "GitFetch"),
+        ("LspInfo", "LspInfo"),
+        ("LspReloadProject", "LspReloadProject"),
+        ("LspExec", "LspExec"),
+        ("LspRestart", "LspRestart"),
+        ("LspStatus", "LspStatus"),
+        ("LspLog", "LspLog"),
+        ("LspRename", "LspRename"),
+        ("Run", "Run"),
+        ("RunCursor", "Run"),
+        ("Debug", "Debug"),
+        ("RunConfig", "RunConfig"),
+        ("RunPick", "RunConfig"),
+        ("DebugConfig", "DebugConfig"),
+        ("DebugPick", "DebugConfig"),
+        ("RunLast", "RunLast"),
+        ("DebugLast", "RunLast"),
+        ("RunStop", "RunStop"),
+        ("RunConsole", "RunConsole"),
+        ("RunToggle", "RunConsole"),
+        ("RunFocus", "RunFocus"),
+        ("CodeLens", "CodeLens"),
+        ("CodeLensRun", "CodeLens"),
+        ("CodeLensDebug", "CodeLensDebug"),
+        ("RunPrev", "RunPrev"),
+        ("RunNext", "RunNext"),
+        ("RunJump", "RunJump"),
+        ("RunEof", "RunEof"),
+        ("RunInput", "RunInput"),
+        ("RunClear", "RunClear"),
+        ("TestFile", "TestFile"),
+        ("TF", "TestFile"),
+        ("TestNearest", "TestNearest"),
+        ("TN", "TestNearest"),
+        ("TestAll", "TestAll"),
+        ("TA", "TestAll"),
+        ("TestSuite", "TestAll"),
+        ("TS", "TestAll"),
+        ("TestDebug", "TestDebug"),
+        ("TD", "TestDebug"),
+        ("TestDebugFile", "TestDebugFile"),
+        ("TDF", "TestDebugFile"),
+        ("TestLast", "TestLast"),
+        ("TL", "TestLast"),
+        ("TestVisit", "TestVisit"),
+        ("TV", "TestVisit"),
+        ("PanelSize", "PanelSize"),
+        ("TestPanel", "TestPanel"),
+        ("TestToggle", "TestPanel"),
+        ("TP", "TestPanel"),
+        ("TestOutput", "TestOutput"),
+        ("MakeOutput", "TestOutput"),
+        ("make", "make"),
+        ("copen", "copen"),
+        ("cclose", "cclose"),
+        ("ccl", "cclose"),
+        ("cnext", "cnext"),
+        ("cn", "cnext"),
+        ("cprev", "cprevious"),
+        ("cp", "cprevious"),
+        ("cprevious", "cprevious"),
+        ("cfirst", "cfirst"),
+        ("cfir", "cfirst"),
+        ("clast", "clast"),
+        ("cla", "clast"),
+        ("tabnew", "tabnew"),
+        ("tabe", "tabedit"),
+        ("tabedit", "tabedit"),
+        ("tabnext", "tabnext"),
+        ("tabn", "tabnext"),
+        ("tabprev", "tabprevious"),
+        ("tabp", "tabprevious"),
+        ("tabprevious", "tabprevious"),
+        ("tabfirst", "tabfirst"),
+        ("tabfir", "tabfirst"),
+        ("tablast", "tablast"),
+        ("tabl", "tablast"),
+        ("tabclose", "tabclose"),
+        ("tabc", "tabclose"),
+        ("ls", "ls"),
+        ("buffers", "ls"),
+        ("files", "ls"),
+        ("bnext", "bnext"),
+        ("bn", "bnext"),
+        ("bprev", "bprevious"),
+        ("bp", "bprevious"),
+        ("bprevious", "bprevious"),
+        ("bd", "bdelete"),
+        ("bdelete", "bdelete"),
+        ("tabonly", "tabonly"),
+        ("tabo", "tabonly"),
+        ("blame", "blame"),
+        ("noh", "nohlsearch"),
+        ("nohlsearch", "nohlsearch"),
+        ("reg", "registers"),
+        ("registers", "registers"),
+        ("j", "join"),
+        ("join", "join"),
+        ("recover", "recover"),
+        ("rec", "recover"),
+        ("checktime", "checktime"),
+        ("marks", "marks"),
+        ("tabs", "tabs"),
+        ("clearaedits", "clearaedits"),
+        ("lua", "lua"),
+        ("luafile", "luafile"),
+        ("colorscheme", "colorscheme"),
+        ("colo", "colorscheme"),
+        ("set", "set"),
+        ("se", "set"),
+        ("sp", "split"),
+        ("split", "split"),
+        ("vsp", "vsplit"),
+        ("vsplit", "vsplit"),
+        ("only", "only"),
+        ("on", "only"),
+        ("ConfigReload", "reload"),
+        ("reload", "reload"),
+        ("source", "source"),
+        ("so", "source"),
+        ("e", "edit"),
+        ("edit", "edit"),
+        ("help", "help"),
+        ("map", "map"),
+        ("nmap", "nmap"),
+        ("imap", "imap"),
+        ("vmap", "vmap"),
+        ("xmap", "vmap"),
+        ("cmap", "cmap"),
+        ("noremap", "noremap"),
+        ("nnoremap", "nnoremap"),
+        ("inoremap", "inoremap"),
+        ("vnoremap", "vnoremap"),
+        ("xnoremap", "vnoremap"),
+        ("cnoremap", "cnoremap"),
+        ("unmap", "unmap"),
+        ("nunmap", "nunmap"),
+        ("iunmap", "iunmap"),
+        ("vunmap", "vunmap"),
+        ("xunmap", "vunmap"),
+        ("cunmap", "cunmap"),
+        ("mapclear", "mapclear"),
+        ("nmapclear", "nmapclear"),
+        ("imapclear", "imapclear"),
+        ("vmapclear", "vmapclear"),
+        ("xmapclear", "vmapclear"),
+        ("cmapclear", "cmapclear"),
+        ("ai", "ai"),
+        ("workflow", "workflow"),
+        ("session", "session"),
+        ("debug", "debug"),
+        ("eval", "eval"),
+        ("DebugPanel", "DebugPanel"),
+        ("DebugFocus", "DebugPanel"),
+        ("DebugWatch", "DebugWatch"),
+        ("DebugUnwatch", "DebugUnwatch"),
+        ("DebugBreakpoints", "DebugBreakpoints"),
+        ("DebugException", "DebugException"),
+        ("DebugExpand", "DebugExpand"),
+        ("DebugLogpoint", "DebugLogpoint"),
+        ("DebugHitCount", "DebugHitCount"),
+        ("DebugCondition", "DebugCondition"),
+        ("f", "file"),
+        ("file", "file"),
+        ("pwd", "pwd"),
+        ("cd", "cd"),
+        ("lcd", "cd"),
+        ("LspInstall", "LspInstall"),
+        ("LspManager", "LspInstall"),
+        ("u", "undo"),
+        ("undo", "undo"),
+        ("red", "redo"),
+        ("redo", "redo"),
+        ("browser", "browser"),
+        // cmd_project.rs
+        ("SearchReplace", "SearchReplace"),
+        ("Sr", "SearchReplace"),
+        ("ReplaceInFiles", "SearchReplace"),
+        ("ReplaceApply", "ReplaceApply"),
+        ("ReplaceUndo", "ReplaceUndo"),
+        ("Recent", "Recent"),
+        ("RecentFiles", "Recent"),
+        ("Buffers", "Buffers"),
+        ("Problems", "Problems"),
+        ("Diagnostics", "Problems"),
+        ("Outline", "Outline"),
+        ("DocumentSymbols", "Outline"),
+        ("Symbols", "Symbols"),
+        ("WorkspaceSymbols", "Symbols"),
+        ("GitStatus", "GitStatus"),
+        ("Gstatus", "GitStatus"),
+        ("GitStage", "GitStage"),
+        ("GitStageFile", "GitStage"),
+        ("GitUnstage", "GitUnstage"),
+        ("GitUnstageFile", "GitUnstage"),
+        ("GitStageHunk", "GitStageHunk"),
+        ("GitUnstageHunk", "GitUnstageHunk"),
+        ("GitStageAll", "GitStageAll"),
+        ("GitCommit", "GitCommit"),
+        ("Gcommit", "GitCommit"),
+        ("GitAmend", "GitAmend"),
+        ("GitLog", "GitLog"),
+        ("GitFileLog", "GitLog"),
+        ("GitLogAll", "GitLogAll"),
+        ("GitLineLog", "GitLineLog"),
+        ("GitLineHistory", "GitLineLog"),
+        ("GitDiffFile", "GitDiffFile"),
+        ("GitEdit", "GitEdit"),
+        ("GitShow", "GitShow"),
+        ("ConflictNext", "ConflictNext"),
+        ("ConflictPrev", "ConflictPrev"),
+        ("ConflictOurs", "ConflictOurs"),
+        ("ConflictTheirs", "ConflictTheirs"),
+        ("ConflictBoth", "ConflictBoth"),
+        ("ConflictNone", "ConflictNone"),
+        ("update", "update"),
+        ("up", "update"),
+        ("grep", "grep"),
+        ("gr", "grep"),
+        ("vimgrep", "grep"),
+        ("vim", "grep"),
+        // editor/input/commands.rs
+        ("cdo", "cdo"),
+        ("cfdo", "cfdo"),
+        ("terminal", "terminal"),
+        ("term", "terminal"),
+        ("shell", "terminal"),
+        ("d", "delete"),
+        ("delete", "delete"),
+        ("y", "yank"),
+        ("yank", "yank"),
+        ("sort", "sort"),
+        ("t", "t"),
+        ("copy", "t"),
+        ("m", "move"),
+        ("move", "move"),
+        ("s", "substitute"),
+        ("g", "global"),
+        ("v", "vglobal"),
+        ("r", "read"),
+        ("read", "read"),
+        ("b", "buffer"),
+        ("buffer", "buffer"),
+        ("!", "!"),
+    ];
+
+    #[test]
+    fn every_old_spelling_resolves_to_its_command() {
+        for (typed, canonical) in OLD_SPELLINGS {
+            let command = lookup(typed).unwrap_or_else(|| panic!("{typed:?} is unknown"));
+            assert_eq!(&command.name(), canonical, "{typed:?}");
+        }
+    }
+
+    /// vim's abbreviations, checked with nvim's `fullcommand()` (NVIM
+    /// v0.12.2): every spelling from the required part to the full name.
+    #[test]
+    fn vim_abbreviations_match_fullcommand() {
+        for (typed, canonical) in [
+            ("qu", "quit"),
+            ("quita", "qall"),
+            ("wr", "write"),
+            ("xi", "xit"),
+            ("exi", "xit"),
+            ("xa", "wqall"),
+            ("wqa", "wqall"),
+            ("sav", "saveas"),
+            ("de", "delete"),
+            ("ya", "yank"),
+            ("jo", "join"),
+            ("sor", "sort"),
+            ("co", "t"),
+            ("mo", "move"),
+            ("su", "substitute"),
+            ("gl", "global"),
+            ("vg", "vglobal"),
+            ("norm", "normal"),
+            ("un", "undo"),
+            ("re", "read"),
+            ("tabN", "tabprevious"),
+            ("tabr", "tabfirst"),
+            ("bN", "bprevious"),
+            ("cN", "cprevious"),
+            ("cr", "cfirst"),
+            ("vs", "vsplit"),
+            ("clo", "close"),
+            ("cope", "copen"),
+            ("mak", "make"),
+            ("nn", "nnoremap"),
+            ("no", "noremap"),
+            ("ino", "inoremap"),
+            ("unm", "unmap"),
+            ("mapc", "mapclear"),
+            ("nohl", "nohlsearch"),
+            ("di", "registers"),
+            ("fi", "file"),
+            ("pw", "pwd"),
+            ("lc", "cd"),
+            ("checkt", "checktime"),
+            ("ter", "terminal"),
+            ("h", "help"),
+            ("p", "print"),
+            ("luaf", "luafile"),
+        ] {
+            let command = lookup(typed).unwrap_or_else(|| panic!("{typed:?} is unknown"));
+            assert_eq!(command.name(), canonical, "{typed:?}");
+        }
+        // Shorter than the required part: not a command (or another one).
+        assert!(lookup("sa").is_none());
+        assert_eq!(lookup("s").unwrap().name(), "substitute");
+        assert_eq!(lookup("so").unwrap().name(), "source");
+    }
+
+    #[test]
+    fn completion_lists_exactly_the_table() {
+        let names = command_names();
+        for command in COMMANDS {
+            for spec in command
+                .names
+                .iter()
+                .filter(|spec| !matches!(**spec, "" | "!"))
+            {
+                assert!(names.contains(&full_name(spec)), "{spec} missing");
+            }
+        }
+        for name in names {
+            assert!(lookup(name).is_some(), "{name} does not resolve");
+        }
+        // Offered by the old hand-written list without a handler.
+        for dead in [
+            "delmarks",
+            "history",
+            "messages",
+            "highlight",
+            "tabmove",
+            "unlet",
+        ] {
+            assert!(!names.iter().any(|name| name == dead), "{dead}");
+        }
     }
 
     #[test]
