@@ -39,7 +39,7 @@ fn written(path: &str, editor: &Editor) -> String {
     format!(
         "\"{}\" {}L, {}C written",
         path,
-        editor.buffer().rope().len_lines(),
+        editor.buffer().line_count(),
         editor.buffer().rope().len_chars()
     )
 }
@@ -273,7 +273,7 @@ fn reload_buffer(editor: &mut Editor, force: bool) -> CommandResult {
         Ok(_) => {
             editor.mark_saved();
             editor.mark_buffer_modified_force_send();
-            let line_count = editor.buffer().rope().len_lines();
+            let line_count = editor.buffer().line_count();
             ok(format!("\"{}\" {}L reloaded", path, line_count))
         }
         Err(e) => err(format!("Failed to reload: {}", e)),

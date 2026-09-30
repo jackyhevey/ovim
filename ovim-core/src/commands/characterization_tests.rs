@@ -228,7 +228,7 @@ fn cases() -> Vec<Case> {
         case("wq").file().is("Saved and quitting").quits(),
         case("w {dir}/other.txt")
             .file()
-            .ok(Has("other.txt\" 5L, 17C written"))
+            .ok(Has("other.txt\" 4L, 17C written"))
             .check(|editor| {
                 // vim: `:w other` writes a copy and keeps editing f.txt (it
                 // used to rename the buffer, which is `:saveas`).
@@ -249,14 +249,14 @@ fn cases() -> Vec<Case> {
         case("w {dir}/f.txt")
             .file()
             .keys("x")
-            .ok(Has("f.txt\" 5L, 16C written")),
+            .ok(Has("f.txt\" 4L, 16C written")),
         case("2,3w {dir}/part.txt")
             .file()
             .fails("E140: Use ! to write partial buffer"),
         // New: :sav[eas] renames the buffer; an existing file needs `!`.
         case("saveas {dir}/other.txt")
             .file()
-            .ok(Has("other.txt\" 5L, 17C written"))
+            .ok(Has("other.txt\" 4L, 17C written"))
             .check(|editor| match editor.buffer().file_path() {
                 Some(path) if path.ends_with("other.txt") => Ok(()),
                 other => Err(format!("buffer path {other:?}")),
@@ -275,7 +275,7 @@ fn cases() -> Vec<Case> {
         case("e")
             .keys("x")
             .fails("No write since last change (add ! to override)"),
-        case("e").file().ok(Has("f.txt\" 5L reloaded")),
+        case("e").file().ok(Has("f.txt\" 4L reloaded")),
         case("e!")
             .file()
             .keys("x")
