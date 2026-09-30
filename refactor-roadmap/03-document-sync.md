@@ -1,5 +1,7 @@
 # Phase 3: Document Sync
 
+> **HISTORICAL (2026-09).** This phase shipped or was overtaken by later work; the code is the source of truth. Kept for rationale only. The only active roadmap document is [17-multi-server-sync.md](./17-multi-server-sync.md).
+
 **Goal:** The LSP server always has the correct view of the document. The content pipeline from buffer mutation to didChange notification has no path where stale baselines corrupt the incremental diff.
 
 **Fixes:** Wrong diagnostics after undo. Silent document desync. Reconciliation complexity.

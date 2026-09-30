@@ -1,5 +1,7 @@
 # Refactor Roadmap
 
+> **HISTORICAL (2026-09).** This phase shipped or was overtaken by later work; the code is the source of truth. Kept for rationale only. The only active roadmap document is [17-multi-server-sync.md](./17-multi-server-sync.md).
+
 ## History
 
 Phases 0–8 addressed user-facing bugs: LSP response races, save freezes, undo/LSP content divergence, inlay hint drift, column coordinate mismatches. The LSP subsystem was rebuilt around `Slot<T>` / `TrackedSlot<T>` with intent-based dispatch. All of that is done and working.

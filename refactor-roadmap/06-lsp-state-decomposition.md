@@ -1,5 +1,7 @@
 # Phase 6: LspState Decomposition
 
+> **HISTORICAL (2026-09).** This phase shipped or was overtaken by later work; the code is the source of truth. Kept for rationale only. The only active roadmap document is [17-multi-server-sync.md](./17-multi-server-sync.md).
+
 **Goal:** Break the 33-field `LspState` into focused subsystems that each manage their own lifecycle.
 
 **Fixes:** Maintainability. Reduces cognitive load when working on any single LSP feature.
