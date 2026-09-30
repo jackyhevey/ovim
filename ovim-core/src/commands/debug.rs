@@ -6,11 +6,31 @@ use crate::command_result::{err, ok, ok_silent, CommandResult};
 use crate::dap::PendingDebugAction;
 use crate::editor::{BreakpointExtra, Editor};
 
-/// `:debug {subcommand}`: launch, step and inspect.
-pub(super) fn debug(editor: &mut Editor, ex: &Ex) -> CommandResult {
-    let subcmd = ex.args;
+const DEBUG_USAGE: &str = "Usage: :debug [start [cmd]|run|last|config|stop|continue|next|stepin|stepout|breakpoint|panels|console]";
 
-    match subcmd {
+fn step(editor: &mut Editor, action: PendingDebugAction, message: &'static str) -> CommandResult {
+    editor.dap_manager_mut().pending_action = Some(action);
+    ok(message)
+}
+
+/// `:debug {subcommand}`: launch, step and inspect. The launch
+/// subcommands are the `:Run*` / `:Debug*` table commands under another
+/// name.
+pub(super) fn debug(editor: &mut Editor, ex: &Ex) -> CommandResult {
+    let same_as = match ex.args {
+        "run" => "Run",
+        // Same path as F5: resolve what is at the cursor (or fall back to
+        // configurations), build, launch, attach.
+        "start" => "Debug",
+        "last" | "restart" => "RunLast",
+        "config" | "pick" => "DebugConfig",
+        "console" => "RunConsole",
+        _ => "",
+    };
+    if !same_as.is_empty() {
+        return super::run_line(editor, same_as);
+    }
+    match ex.args {
         "breakpoint" | "bp" => {
             editor.toggle_breakpoint();
             ok("Breakpoint toggled")
@@ -19,73 +39,28 @@ pub(super) fn debug(editor: &mut Editor, ex: &Ex) -> CommandResult {
             editor.toggle_debug_panels();
             ok_silent()
         }
-        "continue" | "c" => {
-            editor.dap_manager_mut().pending_action = Some(PendingDebugAction::Continue);
-            ok("Continue")
-        }
-        "next" | "n" | "step" => {
-            editor.dap_manager_mut().pending_action = Some(PendingDebugAction::StepOver);
-            ok("Step over")
-        }
-        "stepin" | "si" => {
-            editor.dap_manager_mut().pending_action = Some(PendingDebugAction::StepIn);
-            ok("Step in")
-        }
-        "stepout" | "so" => {
-            editor.dap_manager_mut().pending_action = Some(PendingDebugAction::StepOut);
-            ok("Step out")
-        }
-        "stop" => {
-            if editor.launch_stop() {
-                ok("Stopping")
-            } else {
+        "continue" | "c" => step(editor, PendingDebugAction::Continue, "Continue"),
+        "next" | "n" | "step" => step(editor, PendingDebugAction::StepOver, "Step over"),
+        "stepin" | "si" => step(editor, PendingDebugAction::StepIn, "Step in"),
+        "stepout" | "so" => step(editor, PendingDebugAction::StepOut, "Step out"),
+        "stop" if editor.launch_stop() => ok("Stopping"),
+        "stop" => ok_silent(),
+        "" => ok(DEBUG_USAGE),
+        other => match other.strip_prefix("start ") {
+            // :debug start <adapter> [args...] — the F5 flow, custom adapter.
+            Some(rest) => {
+                let mut parts = rest.split_whitespace();
+                let command = parts.next().unwrap_or_default().to_string();
+                let args: Vec<String> = parts.map(String::from).collect();
+                editor
+                    .launch_at_cursor_with(crate::launch::LaunchMode::Debug, Some((command, args)));
                 ok_silent()
             }
-        }
-        "run" => {
-            editor.launch_at_cursor(crate::launch::LaunchMode::Run);
-            ok_silent()
-        }
-        "start" => {
-            // Same path as F5: resolve what is at the cursor (or fall back to
-            // configurations), build, launch, attach.
-            editor.launch_at_cursor(crate::launch::LaunchMode::Debug);
-            ok_silent()
-        }
-        "last" | "restart" => {
-            editor.launch_last();
-            ok_silent()
-        }
-        "config" | "pick" => {
-            editor.launch_pick_config(crate::launch::LaunchMode::Debug);
-            ok_silent()
-        }
-        "console" => {
-            editor.toggle_run_console();
-            ok_silent()
-        }
-        s if s.starts_with("start ") => {
-            // :debug start <adapter> [args...] — same flow, custom adapter.
-            let rest = s["start ".len()..].trim();
-            let mut parts = rest.split_whitespace();
-            let Some(cmd) = parts.next() else {
-                return err("Usage: :debug start [command] [args...]");
-            };
-            let args: Vec<String> = parts.map(String::from).collect();
-            editor.launch_at_cursor_with(
-                crate::launch::LaunchMode::Debug,
-                Some((cmd.to_string(), args)),
-            );
-            ok_silent()
-        }
-        "" => ok(
-                "Usage: :debug [start [cmd]|run|last|config|stop|continue|next|stepin|stepout|breakpoint|panels|console]"
-                    .to_string(),
-            ),
-        _ => err(format!(
-                "Unknown debug subcommand: '{}'. Usage: :debug [start|run|last|config|stop|continue|next|stepin|stepout|breakpoint|panels|console]",
-                subcmd
+            None => err(format!(
+                "Unknown debug subcommand: '{other}'. {}",
+                DEBUG_USAGE.replace("Usage: :debug [start [cmd]|", "Usage: :debug [start|")
             )),
+        },
     }
 }
 

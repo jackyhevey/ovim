@@ -69,7 +69,7 @@ fn map_keys(editor: &Editor, keys: &str) -> String {
 
 /// `:map {lhs} {rhs}` and friends; with only `{lhs}` show that mapping,
 /// without arguments list the mode's mappings.
-fn map(editor: &mut Editor, ex: &Ex, mode: MapMode, noremap: bool) -> CommandResult {
+pub(super) fn map(editor: &mut Editor, ex: &Ex, mode: MapMode, noremap: bool) -> CommandResult {
     let mut parts = ex.args.splitn(2, char::is_whitespace);
     let lhs = parts.next().unwrap_or("");
     let rhs = parts.next().map(str::trim_start).unwrap_or("");
@@ -109,7 +109,7 @@ fn map(editor: &mut Editor, ex: &Ex, mode: MapMode, noremap: bool) -> CommandRes
     ok_silent()
 }
 
-fn unmap(editor: &mut Editor, ex: &Ex, mode: MapMode) -> CommandResult {
+pub(super) fn unmap(editor: &mut Editor, ex: &Ex, mode: MapMode) -> CommandResult {
     let Some(lhs) = ex.args.split_whitespace().next() else {
         return err("E474: Invalid argument");
     };
@@ -121,70 +121,9 @@ fn unmap(editor: &mut Editor, ex: &Ex, mode: MapMode) -> CommandResult {
     }
 }
 
-fn mapclear(editor: &mut Editor, mode: MapMode) -> CommandResult {
+pub(super) fn mapclear(editor: &mut Editor, mode: MapMode) -> CommandResult {
     editor.keymaps_mut().clear_mappings(mode);
     ok_silent()
-}
-
-pub(super) fn map_all(e: &mut Editor, x: &Ex) -> CommandResult {
-    map(e, x, MapMode::All, false)
-}
-pub(super) fn map_normal(e: &mut Editor, x: &Ex) -> CommandResult {
-    map(e, x, MapMode::Normal, false)
-}
-pub(super) fn map_insert(e: &mut Editor, x: &Ex) -> CommandResult {
-    map(e, x, MapMode::Insert, false)
-}
-pub(super) fn map_visual(e: &mut Editor, x: &Ex) -> CommandResult {
-    map(e, x, MapMode::Visual, false)
-}
-pub(super) fn map_command(e: &mut Editor, x: &Ex) -> CommandResult {
-    map(e, x, MapMode::Command, false)
-}
-pub(super) fn noremap_all(e: &mut Editor, x: &Ex) -> CommandResult {
-    map(e, x, MapMode::All, true)
-}
-pub(super) fn noremap_normal(e: &mut Editor, x: &Ex) -> CommandResult {
-    map(e, x, MapMode::Normal, true)
-}
-pub(super) fn noremap_insert(e: &mut Editor, x: &Ex) -> CommandResult {
-    map(e, x, MapMode::Insert, true)
-}
-pub(super) fn noremap_visual(e: &mut Editor, x: &Ex) -> CommandResult {
-    map(e, x, MapMode::Visual, true)
-}
-pub(super) fn noremap_command(e: &mut Editor, x: &Ex) -> CommandResult {
-    map(e, x, MapMode::Command, true)
-}
-pub(super) fn unmap_all(e: &mut Editor, x: &Ex) -> CommandResult {
-    unmap(e, x, MapMode::All)
-}
-pub(super) fn unmap_normal(e: &mut Editor, x: &Ex) -> CommandResult {
-    unmap(e, x, MapMode::Normal)
-}
-pub(super) fn unmap_insert(e: &mut Editor, x: &Ex) -> CommandResult {
-    unmap(e, x, MapMode::Insert)
-}
-pub(super) fn unmap_visual(e: &mut Editor, x: &Ex) -> CommandResult {
-    unmap(e, x, MapMode::Visual)
-}
-pub(super) fn unmap_command(e: &mut Editor, x: &Ex) -> CommandResult {
-    unmap(e, x, MapMode::Command)
-}
-pub(super) fn mapclear_all(e: &mut Editor, _x: &Ex) -> CommandResult {
-    mapclear(e, MapMode::All)
-}
-pub(super) fn mapclear_normal(e: &mut Editor, _x: &Ex) -> CommandResult {
-    mapclear(e, MapMode::Normal)
-}
-pub(super) fn mapclear_insert(e: &mut Editor, _x: &Ex) -> CommandResult {
-    mapclear(e, MapMode::Insert)
-}
-pub(super) fn mapclear_visual(e: &mut Editor, _x: &Ex) -> CommandResult {
-    mapclear(e, MapMode::Visual)
-}
-pub(super) fn mapclear_command(e: &mut Editor, _x: &Ex) -> CommandResult {
-    mapclear(e, MapMode::Command)
 }
 
 pub(super) fn nohlsearch(editor: &mut Editor, _ex: &Ex) -> CommandResult {

@@ -11,6 +11,7 @@ use super::{
 use crate::command_result::CommandResult;
 use crate::command_result::{ok, ok_silent};
 use crate::editor::Editor;
+use crate::editor::MapMode;
 use crate::git::conflict::Resolution;
 use crate::launch::LaunchMode;
 
@@ -58,6 +59,23 @@ pub(crate) struct ExCommand {
     /// Meaning in special buffers (chat scratch, commit message, pseudocode).
     pub lifecycle: Option<Lifecycle>,
     pub handler: Handler,
+}
+
+/// A handler that calls one editor method and reports nothing, or the
+/// given message.
+macro_rules! call {
+    ($message:literal, $($call:tt)+) => {
+        |editor, _| {
+            editor.$($call)+;
+            ok($message)
+        }
+    };
+    ($($call:tt)+) => {
+        |editor, _| {
+            editor.$($call)+;
+            ok_silent()
+        }
+    };
 }
 
 const fn ex(names: &'static [&'static str], handler: Handler) -> ExCommand {
@@ -222,26 +240,64 @@ pub(crate) static COMMANDS: &[ExCommand] = &[
     ex(&["se[t]"], options::set).args(A::Text).anywhere(),
     ex(&["unset"], options::unset).args(A::Text),
     ex(&["colo[rscheme]"], options::colorscheme).args(A::Text),
-    ex(&["map"], options::map_all).args(A::Text),
-    ex(&["nm[ap]"], options::map_normal).args(A::Text),
-    ex(&["im[ap]"], options::map_insert).args(A::Text),
-    ex(&["vm[ap]", "xm[ap]"], options::map_visual).args(A::Text),
-    ex(&["cm[ap]"], options::map_command).args(A::Text),
-    ex(&["no[remap]"], options::noremap_all).args(A::Text),
-    ex(&["nn[oremap]"], options::noremap_normal).args(A::Text),
-    ex(&["ino[remap]"], options::noremap_insert).args(A::Text),
-    ex(&["vn[oremap]", "xn[oremap]"], options::noremap_visual).args(A::Text),
-    ex(&["cno[remap]"], options::noremap_command).args(A::Text),
-    ex(&["unm[ap]"], options::unmap_all).args(A::Text),
-    ex(&["nun[map]"], options::unmap_normal).args(A::Text),
-    ex(&["iu[nmap]"], options::unmap_insert).args(A::Text),
-    ex(&["vu[nmap]", "xu[nmap]"], options::unmap_visual).args(A::Text),
-    ex(&["cu[nmap]"], options::unmap_command).args(A::Text),
-    ex(&["mapc[lear]"], options::mapclear_all),
-    ex(&["nmapc[lear]"], options::mapclear_normal),
-    ex(&["imapc[lear]"], options::mapclear_insert),
-    ex(&["vmapc[lear]", "xmapc[lear]"], options::mapclear_visual),
-    ex(&["cmapc[lear]"], options::mapclear_command),
+    ex(&["map"], |e, x| options::map(e, x, MapMode::All, false)).args(A::Text),
+    ex(&["nm[ap]"], |e, x| {
+        options::map(e, x, MapMode::Normal, false)
+    })
+    .args(A::Text),
+    ex(&["im[ap]"], |e, x| {
+        options::map(e, x, MapMode::Insert, false)
+    })
+    .args(A::Text),
+    ex(&["vm[ap]", "xm[ap]"], |e, x| {
+        options::map(e, x, MapMode::Visual, false)
+    })
+    .args(A::Text),
+    ex(&["cm[ap]"], |e, x| {
+        options::map(e, x, MapMode::Command, false)
+    })
+    .args(A::Text),
+    ex(&["no[remap]"], |e, x| {
+        options::map(e, x, MapMode::All, true)
+    })
+    .args(A::Text),
+    ex(&["nn[oremap]"], |e, x| {
+        options::map(e, x, MapMode::Normal, true)
+    })
+    .args(A::Text),
+    ex(&["ino[remap]"], |e, x| {
+        options::map(e, x, MapMode::Insert, true)
+    })
+    .args(A::Text),
+    ex(&["vn[oremap]", "xn[oremap]"], |e, x| {
+        options::map(e, x, MapMode::Visual, true)
+    })
+    .args(A::Text),
+    ex(&["cno[remap]"], |e, x| {
+        options::map(e, x, MapMode::Command, true)
+    })
+    .args(A::Text),
+    ex(&["unm[ap]"], |e, x| options::unmap(e, x, MapMode::All)).args(A::Text),
+    ex(&["nun[map]"], |e, x| options::unmap(e, x, MapMode::Normal)).args(A::Text),
+    ex(&["iu[nmap]"], |e, x| options::unmap(e, x, MapMode::Insert)).args(A::Text),
+    ex(&["vu[nmap]", "xu[nmap]"], |e, x| {
+        options::unmap(e, x, MapMode::Visual)
+    })
+    .args(A::Text),
+    ex(&["cu[nmap]"], |e, x| options::unmap(e, x, MapMode::Command)).args(A::Text),
+    ex(&["mapc[lear]"], |e, _| options::mapclear(e, MapMode::All)),
+    ex(&["nmapc[lear]"], |e, _| {
+        options::mapclear(e, MapMode::Normal)
+    }),
+    ex(&["imapc[lear]"], |e, _| {
+        options::mapclear(e, MapMode::Insert)
+    }),
+    ex(&["vmapc[lear]", "xmapc[lear]"], |e, _| {
+        options::mapclear(e, MapMode::Visual)
+    }),
+    ex(&["cmapc[lear]"], |e, _| {
+        options::mapclear(e, MapMode::Command)
+    }),
     ex(&["noh[lsearch]"], options::nohlsearch),
     ex(&["reg[isters]", "di[splay]"], options::registers).args(A::Text),
     ex(&["marks"], options::marks).args(A::Text),
@@ -271,96 +327,48 @@ pub(crate) static COMMANDS: &[ExCommand] = &[
     ex(&["ReplaceUndo"], project::replace_undo),
     ex(&["Problems", "Diagnostics"], project::problems).args(A::Text),
     ex(&["Symbols", "WorkspaceSymbols"], project::symbols).args(A::Text),
-    ex(&["Outline", "DocumentSymbols"], |e, _| {
-        e.open_outline_picker();
-        ok_silent()
-    }),
-    ex(&["Recent", "RecentFiles"], |e, _| {
-        e.open_recent_files_picker();
-        ok_silent()
-    }),
-    ex(&["Buffers"], |e, _| {
-        e.open_buffer_picker();
-        ok_silent()
-    }),
+    ex(
+        &["Outline", "DocumentSymbols"],
+        call!(open_outline_picker()),
+    ),
+    ex(
+        &["Recent", "RecentFiles"],
+        call!(open_recent_files_picker()),
+    ),
+    ex(&["Buffers"], call!(open_buffer_picker())),
     // ---- git ----
     ex(&["GitDiff", "gitdiff", "DiffReview"], git::diff_review).args(A::Text),
     ex(&["GitDiffLayout", "gitdifflayout"], git::diff_layout).args(A::Text),
     ex(&["GitDiffFile"], git::diff_file).args(A::File),
     ex(&["GitEdit"], git::edit).args(A::File),
     ex(&["GitShow"], git::show).args(A::Text),
-    ex(&["GitFetch", "gitfetch"], |e, _| {
-        e.fetch_review_base();
-        ok_silent()
-    }),
-    ex(&["GitStatus", "Gstatus"], |e, _| {
-        e.open_git_status_picker();
-        ok_silent()
-    }),
-    ex(&["GitStage", "GitStageFile"], |e, _| {
-        e.git_stage_file();
-        ok_silent()
-    }),
-    ex(&["GitUnstage", "GitUnstageFile"], |e, _| {
-        e.git_unstage_file();
-        ok_silent()
-    }),
-    ex(&["GitStageHunk"], |e, _| {
-        e.git_stage_hunk();
-        ok_silent()
-    }),
-    ex(&["GitUnstageHunk"], |e, _| {
-        e.git_unstage_hunk();
-        ok_silent()
-    }),
-    ex(&["GitStageAll"], |e, _| {
-        e.git_stage_all();
-        ok_silent()
-    }),
-    ex(&["GitCommit", "Gcommit"], |e, _| {
-        e.open_commit_message(false);
-        ok_silent()
-    }),
-    ex(&["GitAmend"], |e, _| {
-        e.open_commit_message(true);
-        ok_silent()
-    }),
-    ex(&["GitLog", "GitFileLog"], |e, _| {
-        e.open_file_history_picker();
-        ok_silent()
-    }),
-    ex(&["GitLogAll"], |e, _| {
-        e.open_repo_history_picker();
-        ok_silent()
-    }),
-    ex(&["GitLineLog", "GitLineHistory"], |e, _| {
-        e.open_line_history_picker();
-        ok_silent()
-    }),
-    ex(&["ConflictNext"], |e, _| {
-        e.goto_conflict(true);
-        ok_silent()
-    }),
-    ex(&["ConflictPrev"], |e, _| {
-        e.goto_conflict(false);
-        ok_silent()
-    }),
-    ex(&["ConflictOurs"], |e, _| {
-        e.resolve_conflict(Resolution::Ours);
-        ok_silent()
-    }),
-    ex(&["ConflictTheirs"], |e, _| {
-        e.resolve_conflict(Resolution::Theirs);
-        ok_silent()
-    }),
-    ex(&["ConflictBoth"], |e, _| {
-        e.resolve_conflict(Resolution::Both);
-        ok_silent()
-    }),
-    ex(&["ConflictNone"], |e, _| {
-        e.resolve_conflict(Resolution::Neither);
-        ok_silent()
-    }),
+    ex(&["GitFetch", "gitfetch"], call!(fetch_review_base())),
+    ex(&["GitStatus", "Gstatus"], call!(open_git_status_picker())),
+    ex(&["GitStage", "GitStageFile"], call!(git_stage_file())),
+    ex(&["GitUnstage", "GitUnstageFile"], call!(git_unstage_file())),
+    ex(&["GitStageHunk"], call!(git_stage_hunk())),
+    ex(&["GitUnstageHunk"], call!(git_unstage_hunk())),
+    ex(&["GitStageAll"], call!(git_stage_all())),
+    ex(&["GitCommit", "Gcommit"], call!(open_commit_message(false))),
+    ex(&["GitAmend"], call!(open_commit_message(true))),
+    ex(&["GitLog", "GitFileLog"], call!(open_file_history_picker())),
+    ex(&["GitLogAll"], call!(open_repo_history_picker())),
+    ex(
+        &["GitLineLog", "GitLineHistory"],
+        call!(open_line_history_picker()),
+    ),
+    ex(&["ConflictNext"], call!(goto_conflict(true))),
+    ex(&["ConflictPrev"], call!(goto_conflict(false))),
+    ex(&["ConflictOurs"], call!(resolve_conflict(Resolution::Ours))),
+    ex(
+        &["ConflictTheirs"],
+        call!(resolve_conflict(Resolution::Theirs)),
+    ),
+    ex(&["ConflictBoth"], call!(resolve_conflict(Resolution::Both))),
+    ex(
+        &["ConflictNone"],
+        call!(resolve_conflict(Resolution::Neither)),
+    ),
     // ---- language servers ----
     ex(&["LspInfo"], lsp::info),
     ex(&["LspStatus"], lsp::status),
@@ -368,105 +376,75 @@ pub(crate) static COMMANDS: &[ExCommand] = &[
     ex(&["LspRestart"], lsp::restart).args(A::Text),
     ex(&["LspExec"], lsp::exec).args(A::Rest),
     ex(&["LspRename"], lsp::rename).args(A::Text),
-    ex(&["LspReloadProject"], |e, _| {
-        e.lsp_execute_command("hyperion.reloadProject", Vec::new());
-        ok_silent()
-    }),
-    ex(&["LspInstall", "LspManager"], |e, _| {
-        e.open_lsp_manager();
-        ok_silent()
-    }),
-    ex(&["format", "Format"], |e, _| {
-        e.request_format_document();
-        ok("Formatting document...")
-    }),
+    ex(
+        &["LspReloadProject"],
+        call!(lsp_execute_command("hyperion.reloadProject", Vec::new())),
+    ),
+    ex(&["LspInstall", "LspManager"], call!(open_lsp_manager())),
+    ex(
+        &["format", "Format"],
+        call!("Formatting document...", request_format_document()),
+    ),
     // ---- run, test, debug ----
-    ex(&["Run", "RunCursor"], |e, _| {
-        e.launch_at_cursor(LaunchMode::Run);
-        ok_silent()
-    }),
-    ex(&["Debug"], |e, _| {
-        e.launch_at_cursor(LaunchMode::Debug);
-        ok_silent()
-    }),
-    ex(&["RunConfig", "RunPick"], |e, _| {
-        e.launch_pick_config(LaunchMode::Run);
-        ok_silent()
-    }),
-    ex(&["DebugConfig", "DebugPick"], |e, _| {
-        e.launch_pick_config(LaunchMode::Debug);
-        ok_silent()
-    }),
-    ex(&["RunLast", "DebugLast"], |e, _| {
-        e.launch_last();
-        ok_silent()
-    }),
-    ex(&["RunStop"], |e, _| {
-        e.launch_stop();
-        ok_silent()
-    }),
-    ex(&["RunConsole", "RunToggle"], |e, _| {
-        e.toggle_run_console();
-        ok_silent()
-    }),
-    ex(&["RunFocus"], |e, _| {
-        e.focus_run_console();
-        ok_silent()
-    }),
-    ex(&["RunPrev"], |e, _| {
-        e.run_console_mut().view_previous();
-        ok_silent()
-    }),
-    ex(&["RunNext"], |e, _| {
-        e.run_console_mut().view_next();
-        ok_silent()
-    }),
-    ex(&["RunEof"], |e, _| {
-        e.run_eof();
-        ok_silent()
-    }),
-    ex(&["RunClear"], |e, _| {
-        e.clear_run_console();
-        ok_silent()
-    }),
+    ex(
+        &["Run", "RunCursor"],
+        call!(launch_at_cursor(LaunchMode::Run)),
+    ),
+    ex(&["Debug"], call!(launch_at_cursor(LaunchMode::Debug))),
+    ex(
+        &["RunConfig", "RunPick"],
+        call!(launch_pick_config(LaunchMode::Run)),
+    ),
+    ex(
+        &["DebugConfig", "DebugPick"],
+        call!(launch_pick_config(LaunchMode::Debug)),
+    ),
+    ex(&["RunLast", "DebugLast"], call!(launch_last())),
+    ex(&["RunStop"], call!(launch_stop())),
+    ex(&["RunConsole", "RunToggle"], call!(toggle_run_console())),
+    ex(&["RunFocus"], call!(focus_run_console())),
+    ex(&["RunPrev"], call!(run_console_mut().view_previous())),
+    ex(&["RunNext"], call!(run_console_mut().view_next())),
+    ex(&["RunEof"], call!(run_eof())),
+    ex(&["RunClear"], call!(clear_run_console())),
     ex(&["RunJump"], launch::run_jump).args(A::Text),
     ex(&["RunInput"], launch::run_input).args(A::Rest),
-    ex(&["CodeLens", "CodeLensRun"], |e, _| {
-        e.run_code_lens_at_cursor(LaunchMode::Run);
-        ok_silent()
-    }),
-    ex(&["CodeLensDebug"], |e, _| {
-        e.run_code_lens_at_cursor(LaunchMode::Debug);
-        ok_silent()
-    }),
-    ex(&["TestFile", "TF"], |e, _| {
-        e.run_test_file();
-        ok("Running tests for current file...")
-    }),
-    ex(&["TestNearest", "TN"], |e, _| {
-        e.run_test_nearest();
-        ok("Running nearest test...")
-    }),
-    ex(&["TestAll", "TA", "TestSuite", "TS"], |e, _| {
-        e.run_test_all();
-        ok("Running all tests...")
-    }),
-    ex(&["TestDebug", "TD"], |e, _| {
-        e.debug_test_nearest();
-        ok("Debugging nearest test...")
-    }),
-    ex(&["TestDebugFile", "TDF"], |e, _| {
-        e.debug_test_file();
-        ok("Debugging tests of current file...")
-    }),
-    ex(&["TestLast", "TL"], |e, _| {
-        e.run_test_last();
-        ok("Re-running last test...")
-    }),
-    ex(&["TestVisit", "TV"], |e, _| {
-        e.test_visit();
-        ok("Visiting last-tested position...")
-    }),
+    ex(
+        &["CodeLens", "CodeLensRun"],
+        call!(run_code_lens_at_cursor(LaunchMode::Run)),
+    ),
+    ex(
+        &["CodeLensDebug"],
+        call!(run_code_lens_at_cursor(LaunchMode::Debug)),
+    ),
+    ex(
+        &["TestFile", "TF"],
+        call!("Running tests for current file...", run_test_file()),
+    ),
+    ex(
+        &["TestNearest", "TN"],
+        call!("Running nearest test...", run_test_nearest()),
+    ),
+    ex(
+        &["TestAll", "TA", "TestSuite", "TS"],
+        call!("Running all tests...", run_test_all()),
+    ),
+    ex(
+        &["TestDebug", "TD"],
+        call!("Debugging nearest test...", debug_test_nearest()),
+    ),
+    ex(
+        &["TestDebugFile", "TDF"],
+        call!("Debugging tests of current file...", debug_test_file()),
+    ),
+    ex(
+        &["TestLast", "TL"],
+        call!("Re-running last test...", run_test_last()),
+    ),
+    ex(
+        &["TestVisit", "TV"],
+        call!("Visiting last-tested position...", test_visit()),
+    ),
     ex(&["TestPanel", "TestToggle", "TP"], launch::test_panel),
     ex(&["TestOutput", "MakeOutput"], launch::test_output),
     ex(&["PanelSize"], launch::panel_size).args(A::Text),
