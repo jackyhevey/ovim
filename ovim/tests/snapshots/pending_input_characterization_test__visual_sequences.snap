@@ -95,9 +95,9 @@ Vj$AX<Esc>    | V[-] j[-] $[-] A[-] X[-] <Esc>[-] => Normal (2,6) text="foo bar(
 <C-v><Space><Esc>| <C-v>[-] <Space>[leader=[]] <Esc>[-] => VisualBlock (1,8)
 <C-v>2iw      | <C-v>[-] 2[n=2] i[n=2,cmd=i] w[-] => Visual (1,11)
 <C-v>IX<Esc>  | <C-v>[-] I[-] X[-] <Esc>[-] => Normal (1,8) text="foo bar(baz, qux) \"str\" end\n  alpha Xbeta gamma\nxdelta\n\nlast line here\n"
-<C-v>AX<Esc>  | <C-v>[-] A[-] X[-] <Esc>[-] => Normal (1,18) text="foo bar(baz, qux) \"str\" end\n  alpha bXeta gamma\nxdelta\n\nlast line here\n"
-<C-v>$AX<Esc> | <C-v>[-] $[-] A[-] X[-] <Esc>[-] => Normal (1,18) text="foo bar(baz, qux) \"str\" end\n  alpha beta gammaX\nxdelta\n\nlast line here\n"
-<C-v>jIX<Esc> | <C-v>[-] j[-] I[-] X[-] <Esc>[-] => Normal (2,6) text="foo bar(baz, qux) \"str\" end\n  alpha Xbeta gamma\nxdeltaX\n\nlast line here\n"
-<C-v>jAX<Esc> | <C-v>[-] j[-] A[-] X[-] <Esc>[-] => Normal (2,9) text="foo bar(baz, qux) \"str\" end\n  alpha bXeta gamma\nxdelta   X\n\nlast line here\n"
-<C-v>jcX<Esc> | <C-v>[-] j[-] c[-] X[-] <Esc>[-] => Normal (1,8) text="foo bar(baz, qux) \"str\" end\n  alpha Xeta gamma\nxdeltaX\n\nlast line here\n" @"="b\n"
-<C-v>j$AX<Esc>| <C-v>[-] j[-] $[-] A[-] X[-] <Esc>[-] => Normal (2,6) text="foo bar(baz, qux) \"str\" end\n  alpha beta gammaX\nxdeltaX\n\nlast line here\n"
+<C-v>AX<Esc>  | <C-v>[-] A[-] X[-] <Esc>[-] => Normal (1,8) text="foo bar(baz, qux) \"str\" end\n  alpha bXeta gamma\nxdelta\n\nlast line here\n"
+<C-v>$AX<Esc> | <C-v>[-] $[-] A[-] X[-] <Esc>[-] => Normal (1,8) text="foo bar(baz, qux) \"str\" end\n  alpha beta gammaX\nxdelta\n\nlast line here\n"
+<C-v>jIX<Esc> | <C-v>[-] j[-] I[-] X[-] <Esc>[-] => Normal (1,8) text="foo bar(baz, qux) \"str\" end\n  alpha Xbeta gamma\nxdelta\n\nlast line here\n"
+<C-v>jAX<Esc> | <C-v>[-] j[-] A[-] X[-] <Esc>[-] => Normal (1,8) text="foo bar(baz, qux) \"str\" end\n  alpha bXeta gamma\nxdelta   X\n\nlast line here\n"
+<C-v>jcX<Esc> | <C-v>[-] j[-] c[-] X[-] <Esc>[-] => Normal (1,8) text="foo bar(baz, qux) \"str\" end\n  alpha Xeta gamma\nxdelta\n\nlast line here\n" @"="b\n"
+<C-v>j$AX<Esc>| <C-v>[-] j[-] $[-] A[-] X[-] <Esc>[-] => Normal (1,5) text="foo bar(baz, qux) \"str\" end\n  alpha beta gammaX\nxdeltaX\n\nlast line here\n"

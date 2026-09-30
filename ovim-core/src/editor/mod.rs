@@ -199,7 +199,7 @@ pub use toast::{Toast, ToastCenter, ToastLevel, ToastRequest, ToastSource};
 pub use ui_panels::UiPanels;
 pub use undo::UndoManager;
 pub use viewport_state::ViewportState;
-pub use visual_context::{VisualContext, VisualSelection};
+pub use visual_context::{BlockInsert, VisualContext, VisualSelection};
 pub use window::{SplitDirection, Window, WindowManager, WindowNode, WindowView, WindowViewNode};
 pub use wrap_map::WrapMap;
 
@@ -412,7 +412,7 @@ pub struct Editor {
     /// Register manager for yank/delete operations
     registers: RegisterManager,
     /// Visual mode context (selection start, block insert state, last selection)
-    visual: VisualContext,
+    pub(crate) visual: VisualContext,
     /// Command-line mode context (buffer, history, navigation)
     command: CommandContext,
     /// Search-related state
@@ -2248,7 +2248,10 @@ impl Editor {
     /// legacy `ChangeBuilder`-built `Composite` is no longer produced here;
     /// the builder's role is now purely to carry `entry_mode` and
     /// `cursor_before` across the session.
-    pub fn finalize_change_building(&mut self) {
+    ///
+    /// Returns the token of the pushed undo entry, for flows that merge the
+    /// session with a preceding delete or replicate it (c, visual-block I/A).
+    pub fn finalize_change_building(&mut self) -> Option<crate::change::ChangeToken> {
         let cursor_after =
             CursorPos::new(self.buffer().cursor().line(), self.buffer().cursor().col());
 
@@ -2265,26 +2268,24 @@ impl Editor {
                 // No active session — still make sure recording is closed so
                 // a leaked `begin_recording` doesn't trip later record() calls.
                 let _ = self.buffer_mut().end_recording();
-                return;
+                return None;
             }
         };
 
         let origin = self.buffer().recording_origin();
         let origin_cursor = self.buffer().recording_origin_cursor();
         let edits = self.buffer_mut().end_recording();
-        if edits.is_empty() {
-            return;
-        }
 
-        // The `.` register: what was typed. For o/O the first edit is the
-        // opened line itself, not typed text.
+        // The `.` register: what was typed (empty for an insert that typed
+        // nothing, as in vim). For o/O the first edit is the opened line.
         let typed = match entry_mode {
-            InsertEntryMode::OpenBelow | InsertEntryMode::OpenAbove => &edits[1..],
-            _ => &edits[..],
+            InsertEntryMode::OpenBelow | InsertEntryMode::OpenAbove => edits.get(1..),
+            _ => Some(&edits[..]),
         };
-        let inserted = crate::edit::surviving_inserted_text(typed);
-        if !inserted.is_empty() {
-            self.registers.set_last_inserted(inserted);
+        let inserted = crate::edit::surviving_inserted_text(typed.unwrap_or_default());
+        self.registers.set_last_inserted(inserted);
+        if edits.is_empty() {
+            return None;
         }
 
         // Push the session as a mechanical-undo `Recorded` entry. The
@@ -2300,7 +2301,10 @@ impl Editor {
             ),
             None => Change::recorded(edits.clone(), cursor_before, cursor_after),
         };
-        self.buffer_mut().change_manager_mut().push_change(change);
+        let token = self
+            .buffer_mut()
+            .change_manager_mut()
+            .push_change_returning_token(change);
 
         // Install dot-repeat. push_change above cleared last_repeat_action;
         // set InsertSession now.
@@ -2313,6 +2317,7 @@ impl Editor {
                 edits,
             });
         }
+        Some(token)
     }
 
     /// Sets a pending change repeat (for cc, C, s, cj, etc. dot-repeat)
@@ -2323,16 +2328,6 @@ impl Editor {
     /// Takes and clears the pending change repeat
     pub fn take_pending_change_repeat(&mut self) -> Option<PendingChangeRepeat> {
         self.editing.pending_change_repeat.take()
-    }
-
-    /// Sets pending visual-block change repeat payload (line_count, width).
-    pub fn set_pending_visual_block_change_repeat(&mut self, pending: Option<(usize, usize)>) {
-        self.editing.pending_visual_block_change_repeat = pending;
-    }
-
-    /// Takes and clears pending visual-block change repeat payload.
-    pub fn take_pending_visual_block_change_repeat(&mut self) -> Option<(usize, usize)> {
-        self.editing.pending_visual_block_change_repeat.take()
     }
 
     /// Gets the leader key (default: space)

@@ -152,10 +152,13 @@ pub enum RepeatAction {
     DeleteVisualLine { line_count: usize },
     /// Visual-block delete (Ctrl-V...d/x)
     DeleteVisualBlock { line_count: usize, width: usize },
-    /// Visual-block change (Ctrl-V...c): delete block then insert on each line
-    ChangeVisualBlock {
+    /// Visual-block `I` / `A` / `c`: delete `delete_width` columns at the
+    /// cursor on `line_count` lines (`c` only), then insert the text on each
+    /// line at `column`, relative to the cursor column.
+    VisualBlockInsert {
         line_count: usize,
-        width: usize,
+        delete_width: usize,
+        column: BlockColumn,
         inserted_text: String,
     },
     /// Change operator — semantic delete + insert text (cc, C, s, S, cj, ck, etc.)
@@ -248,7 +251,7 @@ impl RepeatAction {
                 object_type: TextObjectType::Paragraph { .. },
             } => RegisterType::Line,
             Self::Change { delete, .. } => return delete.deleted_register(edits, before),
-            Self::DeleteVisualBlock { .. } | Self::ChangeVisualBlock { .. } => RegisterType::Block,
+            Self::DeleteVisualBlock { .. } | Self::VisualBlockInsert { .. } => RegisterType::Block,
             Self::DeleteParagraphForward { .. } | Self::DeleteParagraphBackward { .. } => {
                 let starts_line =
                     before.line_to_char(before.char_to_line(first.offset())) == first.offset();
@@ -651,70 +654,30 @@ impl RepeatAction {
             Self::DeleteVisualBlock { line_count, width } => {
                 let start_line = buffer.cursor().line();
                 let start_col = buffer.cursor_char_col();
-
-                for i in 0..*line_count {
-                    let line_idx = start_line + i;
-                    if line_idx >= buffer.line_count() {
-                        break;
-                    }
-                    if let Some(line_text) = buffer.line_text(line_idx) {
-                        let line_len = line_text.chars().count();
-                        if start_col < line_len {
-                            let end_col = (start_col + *width).min_usize(line_len);
-                            buffer.delete_range(line_idx, start_col, line_idx, end_col);
-                        }
-                    }
-                }
-
-                let line_len = buffer
-                    .line_text(start_line)
-                    .map(|l| l.chars().count())
-                    .unwrap_or(0);
-                let clamped_col = if line_len > 0 {
-                    start_col.min_usize(line_len - 1)
-                } else {
-                    CharCol::ZERO
-                };
-                buffer.set_cursor_char_col(start_line, clamped_col);
+                delete_block(buffer, start_line, start_col, *line_count, *width);
+                set_cursor_on_char(buffer, start_line, start_col);
             }
-            Self::ChangeVisualBlock {
+            Self::VisualBlockInsert {
                 line_count,
-                width,
+                delete_width,
+                column,
                 inserted_text,
             } => {
                 let start_line = buffer.cursor().line();
                 let start_col = buffer.cursor_char_col();
+                delete_block(buffer, start_line, start_col, *line_count, *delete_width);
+                let end_line = (start_line + line_count).min(buffer.line_count());
+                column.offset_by(start_col.0).insert_on_lines(
+                    buffer,
+                    start_line..end_line,
+                    inserted_text,
+                );
 
-                // Delete block at current cursor geometry.
-                for i in 0..*line_count {
-                    let line_idx = start_line + i;
-                    if line_idx >= buffer.line_count() {
-                        break;
-                    }
-                    if let Some(line_text) = buffer.line_text(line_idx) {
-                        let line_len = line_text.chars().count();
-                        if start_col < line_len {
-                            let end_col = (start_col + *width).min_usize(line_len);
-                            buffer.delete_range(line_idx, start_col, line_idx, end_col);
-                        }
-                    }
-                }
-
-                // Reinsert captured text on each selected line.
-                if !inserted_text.is_empty() {
-                    let initial_line_count = buffer.line_count();
-                    for i in 0..*line_count {
-                        let line_idx = start_line + i;
-                        if line_idx >= initial_line_count {
-                            break;
-                        }
-                        if let Some(line_text) = buffer.line_text(line_idx) {
-                            let line_len = line_text.chars().count();
-                            let insert_col = start_col.min_usize(line_len);
-                            buffer.insert_text_at(line_idx, insert_col, inserted_text);
-                        }
-                    }
-
+                // vim: `c` leaves the cursor on the last inserted character of
+                // the first line, `I` / `A` at the block's top-left corner.
+                if *delete_width == 0 || inserted_text.is_empty() {
+                    set_cursor_on_char(buffer, start_line, start_col);
+                } else {
                     let mut final_line = start_line;
                     let mut final_col = start_col;
                     for ch in inserted_text.chars() {
@@ -725,19 +688,7 @@ impl RepeatAction {
                             final_col += 1;
                         }
                     }
-                    final_col = final_col.saturating_sub(1);
-                    buffer.set_cursor_char_col(final_line, final_col);
-                } else {
-                    let line_len = buffer
-                        .line_text(start_line)
-                        .map(|l| l.chars().count())
-                        .unwrap_or(0);
-                    let clamped_col = if line_len > 0 {
-                        start_col.min_usize(line_len - 1)
-                    } else {
-                        CharCol::ZERO
-                    };
-                    buffer.set_cursor_char_col(start_line, clamped_col);
+                    buffer.set_cursor_char_col(final_line, final_col.saturating_sub(1));
                 }
             }
             Self::Change {
@@ -943,6 +894,77 @@ impl RepeatAction {
             }
         }
     }
+}
+
+/// Where a visual-block `I` / `A` / `c` puts its text on each block line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockColumn {
+    /// `I` / `c`: at this column; lines shorter than it are left alone.
+    Insert(usize),
+    /// `A`: at this column, padding shorter lines with spaces.
+    Append(usize),
+    /// `$A`: at the end of each line.
+    EndOfLine,
+}
+
+impl BlockColumn {
+    /// The same placement shifted right by `base` columns.
+    pub fn offset_by(self, base: usize) -> Self {
+        match self {
+            Self::Insert(col) => Self::Insert(col + base),
+            Self::Append(col) => Self::Append(col + base),
+            Self::EndOfLine => Self::EndOfLine,
+        }
+    }
+
+    /// Inserts `text` on each of `lines` (char-space columns).
+    pub fn insert_on_lines(self, buffer: &mut Buffer, lines: std::ops::Range<usize>, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        for line in lines {
+            let Some(len) = buffer.line_text(line).map(|l| l.chars().count()) else {
+                continue;
+            };
+            match self {
+                Self::Insert(col) if col <= len => buffer.insert_text_at(line, CharCol(col), text),
+                Self::Insert(_) => {}
+                Self::Append(col) if col <= len => buffer.insert_text_at(line, CharCol(col), text),
+                Self::Append(col) => {
+                    let padded = format!("{}{text}", " ".repeat(col - len));
+                    buffer.insert_text_at(line, CharCol(len), &padded);
+                }
+                Self::EndOfLine => buffer.insert_text_at(line, CharCol(len), text),
+            }
+        }
+    }
+}
+
+/// Deletes `width` columns from `start_col` on `line_count` lines.
+fn delete_block(
+    buffer: &mut Buffer,
+    start_line: usize,
+    start_col: CharCol,
+    line_count: usize,
+    width: usize,
+) {
+    if width == 0 {
+        return;
+    }
+    let end_line = (start_line + line_count).min(buffer.line_count());
+    for line in start_line..end_line {
+        let len = buffer.line_text(line).map_or(0, |l| l.chars().count());
+        if start_col.0 < len {
+            let end_col = (start_col + width).min_usize(len);
+            buffer.delete_range(line, start_col, line, end_col);
+        }
+    }
+}
+
+/// Puts the cursor at `col` on `line`, clamped to the last character.
+fn set_cursor_on_char(buffer: &mut Buffer, line: usize, col: CharCol) {
+    let len = buffer.line_text(line).map_or(0, |l| l.chars().count());
+    buffer.set_cursor_char_col(line, col.min_usize(len.saturating_sub(1)));
 }
 
 #[cfg(test)]

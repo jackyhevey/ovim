@@ -9,11 +9,12 @@
 //! - Visual mode search (/ and ?)
 
 use crate::editor::{
-    CursorPos, Editor, Motions, PendingChangeRepeat, RegisterType, TextObjectRange, TextObjectType,
+    BlockInsert, CursorPos, Editor, Motions, PendingChangeRepeat, RegisterType, TextObjectRange,
+    TextObjectType,
 };
 use crate::indentation::leading_char_count;
 use crate::mode::Mode;
-use crate::repeat_action::RepeatAction;
+use crate::repeat_action::{BlockColumn, RepeatAction};
 use crate::unicode::{CharCol, GraphemeCol};
 use crate::{KeyCode, KeyEvent, Modifiers};
 use anyhow::Result;
@@ -524,8 +525,7 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         // Change selection
         KeyCode::Char('c') => {
             let mode_before = editor.mode();
-            editor.set_pending_visual_block_change_repeat(None);
-            editor.editing.pending_visual_block_change_delete_token = None;
+            editor.visual.block_insert = None;
 
             // VisualLine-c must mirror normal-mode `cc`: delete the whole
             // line(s), open a blank line at the deletion site (preserving the
@@ -547,9 +547,8 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
                 editor
                     .visual_selection()
                     .map(|((start_line, start_col), (end_line, end_col))| {
-                        let line_count = end_line.saturating_sub(start_line) + 1;
                         let width = end_col.saturating_sub(start_col) + 1;
-                        (start_line, end_line, start_col, line_count, width)
+                        (start_line, end_line, start_col, width)
                     })
             } else {
                 None
@@ -557,16 +556,16 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
 
             let delete_token = helpers::delete_visual_selection_with_token(editor)?;
 
-            if let Some((start_line, end_line, start_col, line_count, width)) = visual_block_state {
-                editor.set_pending_visual_block_change_repeat(Some((line_count, width)));
-                editor.editing.pending_visual_block_change_delete_token = delete_token;
-
-                // Set visual block insert state for multi-line replication
-                // For 'c', move cursor to start_line (move_to_end = false)
+            if let Some((start_line, end_line, start_col, width)) = visual_block_state {
+                // Replicated onto the other block lines when Insert mode ends.
+                editor.visual.block_insert = Some(BlockInsert {
+                    start_line,
+                    end_line,
+                    left_col: start_col,
+                    column: BlockColumn::Insert(0),
+                    change: Some((width, delete_token)),
+                });
                 let cursor_before = CursorPos::new(start_line, GraphemeCol(start_col));
-                editor.set_visual_block_insert_state(Some((
-                    start_line, end_line, start_col, false, false,
-                )));
                 editor.start_change_building(cursor_before);
             } else if delete_token.is_some() {
                 // Regular visual (v) with a non-empty selection: route the
@@ -712,21 +711,16 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         // Visual block insert/append
         KeyCode::Char('I') => {
             if editor.mode() == Mode::VisualBlock {
-                // Insert at beginning of block on each line
+                // Insert at the block's left edge on each line.
                 if let Some(((start_line, start_col), (end_line, _))) = editor.visual_selection() {
-                    let cursor_before = CursorPos::new(start_line, GraphemeCol(start_col));
-                    editor
-                        .buffer_mut()
-                        .cursor_mut()
-                        .set_position(start_line, GraphemeCol(start_col));
-                    // Track visual block insert state: (start_line, end_line, col, is_append, move_to_end)
-                    // For 'I', move cursor to end_line (move_to_end = true)
-                    editor.set_visual_block_insert_state(Some((
-                        start_line, end_line, start_col, false, true,
-                    )));
-                    editor.clear_visual_start();
-                    editor.start_change_building(cursor_before);
-                    editor.set_mode(Mode::Insert);
+                    let block = BlockInsert {
+                        start_line,
+                        end_line,
+                        left_col: start_col,
+                        column: BlockColumn::Insert(0),
+                        change: None,
+                    };
+                    begin_block_insert(editor, block, start_col);
                 }
             } else if let Some(((start_line, _), _)) = editor.visual_selection() {
                 // Char/line visual: vim makes `I` linewise, inserting at
@@ -743,41 +737,37 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         KeyCode::Char('A') => {
             if editor.mode() == Mode::VisualBlock {
-                // Append at end of block on each line
-                if let Some(((start_line, _), (end_line, end_col))) = editor.visual_selection() {
-                    // Get actual end column - clamp to line length to avoid overflow
+                // Append after the block on each line.
+                if let Some(((start_line, start_col), (end_line, end_col))) =
+                    editor.visual_selection()
+                {
+                    // Clamp to the first line so a ragged block still appends
+                    // right after that line's text.
                     let line_len = editor
                         .buffer()
                         .line_text(start_line)
                         .map(|l| l.chars().count())
                         .unwrap_or(0);
-                    let actual_end_col = end_col.min(line_len.saturating_sub(1));
-                    let append_col = actual_end_col.saturating_add(1);
-
-                    // A block created "to end of line" — either via `$` inside
-                    // block mode (visual_block_dollar) or a `$` before entering
-                    // block mode (which leaves the sticky column at usize::MAX) —
-                    // appends at each line's own EOL. A fixed-column block appends
-                    // at the block column (padding short lines). Fold the sticky
-                    // MAXCOL case into visual_block_dollar so the insert finalize
-                    // has a single flag to consult.
-                    if editor.buffer().cursor().desired_col() == usize::MAX {
-                        editor.set_visual_block_dollar(true);
-                    }
-
-                    let cursor_before = CursorPos::new(start_line, GraphemeCol(append_col));
-                    editor
-                        .buffer_mut()
-                        .cursor_mut()
-                        .set_position(start_line, GraphemeCol(append_col));
-                    // Track visual block append state: (start_line, end_line, col, is_append, move_to_end)
-                    // For 'A', move cursor to end_line (move_to_end = true)
-                    editor.set_visual_block_insert_state(Some((
-                        start_line, end_line, append_col, true, true,
-                    )));
-                    editor.clear_visual_start();
-                    editor.start_change_building(cursor_before);
-                    editor.set_mode(Mode::Insert);
+                    let append_col = end_col.min(line_len.saturating_sub(1)) + 1;
+                    // A block created "to end of line" — via `$` inside block
+                    // mode, or a `$` before entering it (sticky MAXCOL) —
+                    // appends at each line's own end; a fixed-column block at
+                    // the block column (padding short lines).
+                    let to_eol = editor.visual_block_dollar()
+                        || editor.buffer().cursor().desired_col() == usize::MAX;
+                    let column = if to_eol {
+                        BlockColumn::EndOfLine
+                    } else {
+                        BlockColumn::Append(append_col.saturating_sub(start_col))
+                    };
+                    let block = BlockInsert {
+                        start_line,
+                        end_line,
+                        left_col: start_col,
+                        column,
+                        change: None,
+                    };
+                    begin_block_insert(editor, block, append_col);
                 }
             } else if let Some((_, (end_line, end_col))) = editor.visual_selection() {
                 // Char/line visual: append after the end of the selection.
@@ -944,4 +934,19 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         _ => {}
     }
     Ok(())
+}
+
+/// Enter Insert mode for a visual-block `I` / `A` at `col` on the first
+/// block line; the typed text is replicated when Insert mode ends.
+fn begin_block_insert(editor: &mut Editor, block: BlockInsert, col: usize) {
+    let cursor = CursorPos::new(block.start_line, GraphemeCol(col));
+    editor
+        .buffer_mut()
+        .cursor_mut()
+        .set_position(cursor.line, cursor.col);
+    editor.visual.block_insert = Some(block);
+    editor.set_visual_block_dollar(false);
+    editor.clear_visual_start();
+    editor.start_change_building(cursor);
+    editor.set_mode(Mode::Insert);
 }
