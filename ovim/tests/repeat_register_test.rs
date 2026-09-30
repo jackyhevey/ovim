@@ -48,3 +48,25 @@ fn repeat_does_not_overwrite_registers_for_case_changes() {
     test.keys("yiwgUiw w.");
     assert_eq!(test.editor.registers().get_default(), "one");
 }
+
+// ".: the text inserted by the last insert session, whichever command
+// opened it (nvim --clean on "abc def ghi"). OV-00489.
+#[test]
+#[ignore = "OV-00489: \". is stale after c/s/cc (read from last_change, cleared by the Change repeat action) and holds \"foo\\n\" after o"]
+fn dot_register_holds_the_text_of_the_last_insert() {
+    for (keys, inserted) in [
+        ("iAB<Esc>", "AB"),
+        ("AXY<Esc>", "XY"),
+        ("ofoo<Esc>", "foo"),
+        ("iAB<Esc>wcwXY<Esc>", "XY"),
+        ("iAB<Esc>ciwXY<Esc>", "XY"),
+        ("iAB<Esc>ccXY<Esc>", "XY"),
+        ("iAB<Esc>sXY<Esc>", "XY"),
+        ("iAB<Esc>wdw", "AB"),
+        ("iAB<Esc>w<C-v>jIXY<Esc>", "XY"),
+    ] {
+        let mut test = EditorTest::new("abc def ghi\nabc def ghi");
+        test.keys(keys);
+        assert_eq!(test.editor.registers().get(Some('.')), inserted, "{keys}");
+    }
+}

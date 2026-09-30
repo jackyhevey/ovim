@@ -878,3 +878,59 @@ fn test_ov00190_local_mark_clamps_column_when_line_shrinks() {
         cursor.col().0
     );
 }
+
+// ============================================================================
+// '. / `. and `^ after every kind of change (OV-00489). Expectations from
+// `nvim --clean` on "abc def ghi" x3; positions are 0-based here.
+// ============================================================================
+
+const ABC: &str = "abc def ghi\nabc def ghi\nabc def ghi";
+
+fn cursor_after(keys: &str) -> (usize, usize) {
+    let mut test = EditorTest::new(ABC);
+    test.keys(keys);
+    test.cursor()
+}
+
+// nvim: `wdwj0`.` → 1,4 (1-based col 5): the start of the delete.
+#[test]
+#[ignore = "OV-00489: `. is unset after operators (set_repeat_action clears last_change)"]
+fn backtick_dot_after_an_operator_is_the_change_start() {
+    assert_eq!(cursor_after("wdwj0`."), (0, 4));
+    assert_eq!(cursor_after("wxj0`."), (0, 4));
+    assert_eq!(cursor_after("wcwXY<Esc>j0`."), (0, 4));
+}
+
+// nvim: `wdwj$'.` → line 1, first non-blank.
+#[test]
+#[ignore = "OV-00489: '. is unset after operators"]
+fn quote_dot_after_an_operator_is_the_change_line() {
+    assert_eq!(cursor_after("wdwj$'."), (0, 0));
+}
+
+// nvim: after `wiXY<Esc>`, `. is the start of the insert, `^ is where the
+// insert stopped (on the 'd' after XY); after `AXY<Esc>`, `^ is past the end
+// and clamps to the last character.
+#[test]
+#[ignore = "OV-00489: `. lands on the last inserted char and `^ one column left of the insert exit"]
+fn backtick_dot_and_caret_after_an_insert() {
+    assert_eq!(cursor_after("wiXY<Esc>j0`."), (0, 4));
+    assert_eq!(cursor_after("wiXY<Esc>j0`^"), (0, 6));
+    assert_eq!(cursor_after("AXY<Esc>j0`."), (0, 11));
+    assert_eq!(cursor_after("AXY<Esc>j0`^"), (0, 12));
+}
+
+// nvim: `wiXY<Esc>jdw` then `^ still points at the insert, `. at the delete.
+#[test]
+#[ignore = "OV-00489: `^ is one column left of the insert exit"]
+fn caret_mark_survives_a_later_operator() {
+    assert_eq!(cursor_after("wiXY<Esc>jdwgg`^"), (0, 6));
+    assert_eq!(cursor_after("wiXY<Esc>jdwgg`."), (1, 5));
+}
+
+// nvim: `ofoo<Esc>gg`.` → the opened line.
+#[test]
+#[ignore = "OV-00489: `. is unset after o (OpenLine repeat clears last_change)"]
+fn backtick_dot_after_open_line() {
+    assert_eq!(cursor_after("ofoo<Esc>gg`."), (1, 0));
+}

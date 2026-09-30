@@ -533,3 +533,42 @@ fn test_ctrl_v_replace_r() {
     assert_eq!(test.buffer_content(), "XXXlo\nXXXld\nXXXt\n");
     test.assert_cursor(2, 2);
 }
+
+// nvim --clean: `.` after a block insert/append repeats it at the cursor on
+// as many lines as the block had (OV-00489).
+#[test]
+#[ignore = "OV-00489: dot replays the block insert at its original absolute offsets; cursor ends on the last block line"]
+fn test_ctrl_v_insert_dot_repeat_at_cursor() {
+    editor_flow_test! {
+        content "abc def ghi\nabc def ghi\nabc def ghi\n";
+        step "w<C-v>jIXY<Esc>" => |test| {
+            assert_eq!(test.buffer_content(), "abc XYdef ghi\nabc XYdef ghi\nabc def ghi\n");
+            test.assert_cursor(0, 4);
+        }
+        step "jw." => |test| {
+            assert_eq!(
+                test.buffer_content(),
+                "abc XYdef ghi\nabc XYdef XYghi\nabc def ghXYi\n"
+            );
+            test.assert_cursor(1, 10);
+        }
+        step "u" => |test| {
+            assert_eq!(test.buffer_content(), "abc XYdef ghi\nabc XYdef ghi\nabc def ghi\n");
+        }
+    }
+}
+
+#[test]
+#[ignore = "OV-00489: dot replays the block insert at its original absolute offsets; cursor ends on the last block line"]
+fn test_ctrl_v_append_dot_repeat_at_cursor() {
+    editor_flow_test! {
+        content "abc def ghi\nabc def ghi\nabc def ghi\n";
+        step "w<C-v>jAXY<Esc>" => |test| {
+            assert_eq!(test.buffer_content(), "abc dXYef ghi\nabc dXYef ghi\nabc def ghi\n");
+        }
+        step "jjb." => |test| {
+            assert_eq!(test.buffer_content(), "abc dXYef ghi\nabc dXYef ghi\naXYbc def ghi\n");
+            test.assert_cursor(2, 0);
+        }
+    }
+}
