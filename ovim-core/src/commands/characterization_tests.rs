@@ -907,6 +907,31 @@ fn check_state(case: &Case, editor: &Editor, failures: &mut Vec<String>, entry: 
     }
 }
 
+/// vim: one `u` undoes a ranged `:normal` or `:g/pat/normal` as a whole.
+#[test]
+fn ranged_normal_is_one_undo_step() {
+    for command in ["2,3normal Iz", "g/a/normal Ax", "%normal A!"] {
+        let mut editor = Editor::with_content(FIX);
+        InputHandler::execute_command_string(&mut editor, command).unwrap();
+        assert_ne!(buffer_text(&editor), "c1\nb2\n  a3\n  d4a\n", "{command}");
+        run_keys(&mut editor, "u");
+        assert_eq!(buffer_text(&editor), "c1\nb2\n  a3\n  d4a\n", "{command}");
+    }
+}
+
+/// vim: starting a command line clears the previous message, so a command
+/// that reports nothing leaves none.
+#[test]
+fn the_prompt_does_not_leave_a_stale_message() {
+    let mut editor = Editor::with_content("a");
+    for command in [":set nu?", ":set nonu"] {
+        run_keys(&mut editor, command);
+        InputHandler::handle_key_event(&mut editor, KeyEvent::new(KeyCode::Enter, Modifiers::NONE))
+            .unwrap();
+    }
+    assert_eq!(editor.status_message(), "");
+}
+
 /// vim: `":` holds the previous command line while a command runs.
 #[test]
 fn the_colon_register_is_set_after_the_command_runs() {

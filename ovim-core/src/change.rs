@@ -733,6 +733,28 @@ impl ChangeManager {
         ChangeToken(seq)
     }
 
+    /// Make every change pushed after the stack top was `since` (see
+    /// [`Self::undo_mark`]) one undo step, like vim does for `:normal` over
+    /// a range or `:g`. Filesystem `ResourceOp` entries stay separate.
+    pub fn group_since(&mut self, since: u64) {
+        // Distinct from the small ids agent turns use, and from any other
+        // group: sequence numbers are never reused.
+        let group = u64::MAX - since;
+        for entry in self.undo_stack.iter_mut().rev() {
+            if entry.seq <= since {
+                break;
+            }
+            if let Change::Recorded { undo_group_id, .. } = &mut entry.change {
+                *undo_group_id = Some(group);
+            }
+        }
+    }
+
+    /// The current undo position, for [`Self::group_since`].
+    pub fn undo_mark(&self) -> u64 {
+        self.top_seq()
+    }
+
     /// Sequence number of the current undo-stack top (0 = empty stack).
     /// Uniquely identifies the current tracked document state.
     fn top_seq(&self) -> u64 {

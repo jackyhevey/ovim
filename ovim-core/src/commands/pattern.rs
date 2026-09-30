@@ -360,7 +360,9 @@ pub(super) fn global(editor: &mut Editor, ex: &Ex) -> CommandResult {
             substitute_lines(editor, &substitution, &lines);
             ok(format!("Substituted on {} line(s)", lines.len()))
         }
-        "norm[al]" => global_normal(editor, &lines, command),
+        "norm[al]" => {
+            super::edit::one_undo_step(editor, |editor| global_normal(editor, &lines, command))
+        }
         _ => err(format!("Unsupported global command: {command}")),
     }
 }

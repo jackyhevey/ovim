@@ -298,8 +298,10 @@ pub fn execute_command_string(editor: &mut Editor, command: &str) -> Result<()> 
     Ok(())
 }
 
-/// Executes the command line being edited.
+/// Executes the command line being edited. The previous message goes away
+/// as in vim, so a command that reports nothing does not leave a stale one.
 fn execute_command(editor: &mut Editor) -> Result<()> {
     let command = editor.command_line().trim().to_string();
+    editor.clear_status_message();
     execute_command_string(editor, &command)
 }

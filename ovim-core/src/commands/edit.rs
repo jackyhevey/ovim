@@ -362,6 +362,25 @@ pub(super) fn normal(editor: &mut Editor, ex: &Ex) -> CommandResult {
     if ex.args.is_empty() {
         return err("E471: Argument required");
     }
+    one_undo_step(editor, |editor| run_normal(editor, ex))
+}
+
+/// Run `body` so that everything it changes in the current buffer is undone
+/// by one `u` (vim's `:normal` over a range, `:g`).
+pub(super) fn one_undo_step(
+    editor: &mut Editor,
+    body: impl FnOnce(&mut Editor) -> CommandResult,
+) -> CommandResult {
+    let buffer = editor.buffer().id();
+    let mark = editor.buffer().change_manager().undo_mark();
+    let result = body(editor);
+    if editor.buffer().id() == buffer {
+        editor.buffer_mut().change_manager_mut().group_since(mark);
+    }
+    result
+}
+
+fn run_normal(editor: &mut Editor, ex: &Ex) -> CommandResult {
     let remap = !ex.bang;
     let lines = match ex.range {
         Some(range) if ex.explicit_range => range.start.max(1)..=range.end,
