@@ -40,93 +40,56 @@ pub enum InputState {
         operator: Option<Operator>,
     },
 
-    /// Operator (d, c, y, >, <) pressed, awaiting motion or text object.
+    /// Operator (d, c, y, >, <, =, gu, gU, g~, zf) pressed, awaiting a
+    /// motion or text object.
     ///
-    /// Example sequences:
-    /// - `dw` → delete word
-    /// - `ci"` → change inside quotes
-    /// - `yy` → yank line (operator repeated)
+    /// Example sequences: `dw`, `yy` (operator repeated), `2d3w`.
     OperatorPending {
         /// The operator waiting for a motion
         operator: Operator,
     },
 
-    /// 'g' prefix pressed, awaiting second character.
-    ///
-    /// Example sequences:
-    /// - `gg` → go to first line
-    /// - `gd` → go to definition
-    /// - `ge` → end of previous word
-    /// - `gu{motion}` → lowercase
-    /// - `gU{motion}` → uppercase
+    /// 'g' prefix pressed, awaiting second character (`gg`, `gd`, `gu`...).
     GPrefix {
-        /// If preceded by an operator (for dgg, cgg, ygg)
+        /// If preceded by an operator (`dgg`, `cgn`)
         operator: Option<Operator>,
     },
 
-    /// 'z' prefix pressed, awaiting second character.
-    ///
-    /// Example sequences:
-    /// - `zz` → center cursor line in viewport
-    /// - `zt` → cursor line to top
-    /// - `zb` → cursor line to bottom
-    /// - `zo` → open fold
-    /// - `zc` → close fold
-    ZPrefix {
-        /// If preceded by an operator (for zf fold motion)
-        operator: Option<Operator>,
-    },
+    /// `gr` pressed, awaiting the LSP command key (`grr`, `grn`, `gra`...).
+    LspPrefix,
 
-    /// '[' or ']' prefix pressed, awaiting second character.
-    ///
-    /// Example sequences:
-    /// - `[[` → previous section
-    /// - `]]` → next section
-    /// - `[m` → previous method
-    /// - `]d` → next diagnostic
+    /// 'z' prefix pressed, awaiting second character (`zz`, `zt`, `zo`, `zf`...).
+    ZPrefix,
+
+    /// 'Z' pressed, awaiting `Z` (`ZZ` = `:x`) or `Q` (`ZQ` = `:q!`).
+    QuitPrefix,
+
+    /// '[' or ']' prefix pressed, awaiting second character (`[[`, `]d`...).
     BracketPrefix {
         /// Which bracket started the sequence
         bracket: char,
-        /// If preceded by an operator
-        operator: Option<Operator>,
     },
 
-    /// Text object prefix (i/a) after operator.
+    /// Text object prefix (i/a), awaiting the object key.
     ///
-    /// Example sequences:
-    /// - `diw` → delete inner word
-    /// - `ca"` → change around quotes
-    /// - `yi(` → yank inner parentheses
+    /// Example sequences: `diw`, `ca"`, `yi(`; in Visual mode `viw`.
     TextObjectPending {
-        /// The operator to apply
-        operator: Operator,
+        /// The operator to apply (`None` in Visual mode)
+        operator: Option<Operator>,
         /// Inner (i) or Around (a)
         prefix: TextObjectPrefix,
     },
 
-    /// Window command prefix (Ctrl-W).
-    ///
-    /// Example sequences:
-    /// - `<C-w>h` → move to left window
-    /// - `<C-w>v` → vertical split
-    /// - `<C-w>s` → horizontal split
+    /// Window command prefix (Ctrl-W), awaiting `w`, `v`, `h`...
     WindowCommand,
 
-    /// Macro prefix (q for record, @ for playback).
-    ///
-    /// Example sequences:
-    /// - `qa` → start recording macro to register 'a'
-    /// - `@a` → play macro from register 'a'
+    /// Macro prefix: `q` (record) or `@` (play), awaiting the register.
     MacroPrefix {
         /// true = recording (q), false = playback (@)
         is_recording: bool,
     },
 
-    /// Register selection prefix (").
-    ///
-    /// Example sequences:
-    /// - `"ayy` → yank line to register 'a'
-    /// - `"ap` → paste from register 'a'
+    /// Register selection prefix (`"`), awaiting the register name.
     RegisterPending,
 }
 
@@ -136,41 +99,61 @@ impl InputState {
         matches!(self, Self::Normal)
     }
 
-    /// Returns true if an operator is pending in this state.
-    pub fn has_pending_operator(&self) -> bool {
-        matches!(
-            self,
-            Self::OperatorPending { .. }
-                | Self::AwaitingChar {
-                    operator: Some(_),
-                    ..
-                }
-                | Self::GPrefix {
-                    operator: Some(_),
-                    ..
-                }
-                | Self::ZPrefix {
-                    operator: Some(_),
-                    ..
-                }
-                | Self::BracketPrefix {
-                    operator: Some(_),
-                    ..
-                }
-                | Self::TextObjectPending { .. }
-        )
-    }
-
     /// Returns the pending operator, if any.
     pub fn pending_operator(&self) -> Option<Operator> {
         match self {
             Self::OperatorPending { operator } => Some(*operator),
-            Self::AwaitingChar { operator, .. } => *operator,
-            Self::GPrefix { operator, .. } => *operator,
-            Self::ZPrefix { operator, .. } => *operator,
-            Self::BracketPrefix { operator, .. } => *operator,
-            Self::TextObjectPending { operator, .. } => Some(*operator),
+            Self::AwaitingChar { operator, .. }
+            | Self::GPrefix { operator }
+            | Self::TextObjectPending { operator, .. } => *operator,
             _ => None,
+        }
+    }
+
+    /// The key that opened a pending prefix: `g`, `z`, `Z`, `[`/`]`,
+    /// `i`/`a` (text object), `"`, `q`/`@`; `R` after `gr` and `W` after
+    /// Ctrl-W. `None` when no prefix is pending.
+    pub fn prefix_key(&self) -> Option<char> {
+        Some(match self {
+            Self::GPrefix { .. } => 'g',
+            Self::LspPrefix => 'R',
+            Self::ZPrefix => 'z',
+            Self::QuitPrefix => 'Z',
+            Self::BracketPrefix { bracket } => *bracket,
+            Self::TextObjectPending { prefix, .. } => prefix.as_char(),
+            Self::WindowCommand => 'W',
+            Self::MacroPrefix { is_recording: true } => 'q',
+            Self::MacroPrefix { is_recording: false } => '@',
+            Self::RegisterPending => '"',
+            Self::Normal
+            | Self::Leader { .. }
+            | Self::AwaitingChar { .. }
+            | Self::OperatorPending { .. } => return None,
+        })
+    }
+
+    /// The state for a pending `operator` and/or prefix `key` (the inverse
+    /// of [`Self::pending_operator`] + [`Self::prefix_key`]). Only `g` and
+    /// `i`/`a` combine with an operator; other prefixes drop it.
+    pub fn from_parts(operator: Option<Operator>, key: Option<char>) -> Self {
+        match (operator, key) {
+            (None, None) => Self::Normal,
+            (Some(operator), None) => Self::OperatorPending { operator },
+            (operator, Some('g')) => Self::GPrefix { operator },
+            (operator, Some(c @ ('i' | 'a'))) => Self::TextObjectPending {
+                operator,
+                prefix: TextObjectPrefix::from_char(c).expect("i or a"),
+            },
+            (_, Some('R')) => Self::LspPrefix,
+            (_, Some('z')) => Self::ZPrefix,
+            (_, Some('Z')) => Self::QuitPrefix,
+            (_, Some(bracket @ ('[' | ']'))) => Self::BracketPrefix { bracket },
+            (_, Some('W')) => Self::WindowCommand,
+            (_, Some('q')) => Self::MacroPrefix { is_recording: true },
+            (_, Some('@')) => Self::MacroPrefix {
+                is_recording: false,
+            },
+            (_, Some(_)) => Self::RegisterPending,
         }
     }
 
@@ -310,25 +293,24 @@ mod tests {
     }
 
     #[test]
-    fn test_has_pending_operator() {
-        assert!(!InputState::Normal.has_pending_operator());
-
-        assert!(InputState::OperatorPending {
-            operator: Operator::Delete
+    fn pending_operator_and_prefix_key_round_trip_through_from_parts() {
+        let ops = [None, Some(Operator::Delete)];
+        for op in ops {
+            for key in [None, Some('g'), Some('i'), Some('a')] {
+                let state = InputState::from_parts(op, key);
+                assert_eq!((state.pending_operator(), state.prefix_key()), (op, key));
+            }
         }
-        .has_pending_operator());
-
-        assert!(InputState::AwaitingChar {
+        for key in ['R', 'z', 'Z', '[', ']', 'W', 'q', '@', '"'] {
+            let state = InputState::from_parts(None, Some(key));
+            assert_eq!((state.pending_operator(), state.prefix_key()), (None, Some(key)));
+        }
+        let char_state = InputState::AwaitingChar {
             motion: CharMotion::Find,
             operator: Some(Operator::Delete),
-        }
-        .has_pending_operator());
-
-        assert!(!InputState::AwaitingChar {
-            motion: CharMotion::Find,
-            operator: None,
-        }
-        .has_pending_operator());
+        };
+        assert_eq!(char_state.pending_operator(), Some(Operator::Delete));
+        assert_eq!(char_state.prefix_key(), None);
     }
 
     #[test]

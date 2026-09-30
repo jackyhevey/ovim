@@ -491,13 +491,8 @@ impl InputHandler {
                 let keys_clone = keys.clone();
                 return leader::handle_leader_input(editor, key_event, &keys_clone);
             }
-            InputState::Normal => {
-                // Fall through to normal mode dispatcher
-            }
-            _ => {
-                // For unhandled states, reset and fall through
-                editor.reset_input_state();
-            }
+            // Operators and prefixes are resolved by the normal/ dispatcher.
+            _ => {}
         }
 
         // =====================================================================

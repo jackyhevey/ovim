@@ -792,8 +792,12 @@ impl Editor {
         self.mode = mode;
         // Clear count and pending operator when changing modes
         self.input.count = None;
-        self.input.pending_operator = None;
-        self.input.pending_command = None;
+        if !matches!(
+            self.input.input_state,
+            InputState::AwaitingChar { .. } | InputState::Leader { .. }
+        ) {
+            self.input.input_state = InputState::Normal;
+        }
         self.input.pending_register = None;
         self.input.pending_mapping_sequence.clear();
         self.input.pending_mapping_events.clear();
@@ -972,14 +976,26 @@ impl Editor {
         (self.render_cache.ai_chat_working_animation_tick % 8) as usize
     }
 
-    /// Gets the pending command
+    /// The key of the pending multi-key prefix (see [`InputState::prefix_key`]).
     pub fn pending_command(&self) -> Option<char> {
-        self.input.pending_command
+        self.input.input_state.prefix_key()
     }
 
     /// Sets the pending command
     pub fn set_pending_command(&mut self, cmd: char) {
-        self.input.pending_command = Some(cmd);
+        self.set_legacy_pending(self.pending_operator(), Some(cmd));
+    }
+
+    fn set_legacy_pending(&mut self, operator: Option<Operator>, key: Option<char>) {
+        if matches!(
+            self.input.input_state,
+            InputState::AwaitingChar { .. } | InputState::Leader { .. }
+        ) && operator.is_none()
+            && key.is_none()
+        {
+            return;
+        }
+        self.input.input_state = InputState::from_parts(operator, key);
     }
 
     /// Gets the current input state (new state machine)
@@ -1757,7 +1773,7 @@ impl Editor {
 
     /// Clears the pending command
     pub fn clear_pending_command(&mut self) {
-        self.input.pending_command = None;
+        self.set_legacy_pending(self.pending_operator(), None);
     }
 
     /// Returns whether the editor should quit
@@ -1809,17 +1825,17 @@ impl Editor {
 
     /// Gets the pending operator
     pub fn pending_operator(&self) -> Option<Operator> {
-        self.input.pending_operator
+        self.input.input_state.pending_operator()
     }
 
     /// Sets the pending operator
     pub fn set_pending_operator(&mut self, op: Operator) {
-        self.input.pending_operator = Some(op);
+        self.set_legacy_pending(Some(op), self.pending_command());
     }
 
     /// Clears the pending operator
     pub fn clear_pending_operator(&mut self) {
-        self.input.pending_operator = None;
+        self.set_legacy_pending(None, self.pending_command());
     }
 
     /// Gets a reference to the registers
