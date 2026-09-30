@@ -1,5 +1,6 @@
 /// A shell command queued by `:!cmd` for the event loop to execute
 /// with full terminal access (outside the alternate screen).
+#[derive(Debug, PartialEq, Eq)]
 pub struct PendingShellCommand {
     /// The expanded shell command string
     pub command: String,

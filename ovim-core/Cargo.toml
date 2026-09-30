@@ -10,6 +10,11 @@ workspace = true
 [dependencies]
 bitflags = "2"
 flate2 = "1"
+# tick: open URLs the editor asks for (Codex sign-in) in the system browser
+open = "5"
+# lsp_init/auto_install (GitHub release archives)
+tar = "0.4"
+zip = "2"
 
 # mode/ - no extra deps
 # unicode/

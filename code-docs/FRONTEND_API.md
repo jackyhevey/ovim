@@ -8,7 +8,7 @@ and renders highlights as spans rather than styled terminal cells, so it has
 no UI framework to be coupled to in the first place. `ovim::frontend` is the
 analogous boundary one layer up, inside the `ovim` lib target: it is
 everything a non-terminal frontend can call directly to drive the editor
-(tick, refresh, viewport geometry, background picker/file loading), as
+(the core tick, refresh, viewport geometry), as
 opposed to the terminal-specific code (crossterm event handling, shell
 suspend/resume, the two event loops themselves) that stays in the binary's
 `event_loop.rs`.
@@ -23,25 +23,27 @@ A frontend embedding the editor core must:
    gutter), kept in sync by hand with
    `ovim::ui::renderer::layout::BufferLayout::compute`, the authority it
    mirrors for gutter/layout sizing.
-2. Build a `FrontendChannels` once per `Editor` and run `process_editor_tick`
-   on a periodic interval to drive LSP, DAP, syntax highlighting, and other
-   background work.
-3. Drain background picker results with `process_picker_results` on the same
-   cadence as the tick — `process_editor_tick` deliberately does not *drain*
-   the preview/file receivers even though it holds them via
-   `FrontendChannels`, so a frontend that opens the picker must call this
-   itself (see `event_loop.rs`'s TUI loop; the headless loop instead
-   receives on `FrontendChannels::preview_rx`/`file_rx` directly for lower
-   latency).
+2. Build one `TickState` per `Editor` and call `editor.tick(&mut state)` on a
+   periodic interval. The tick lives in `ovim-core` (`ovim-core/src/tick/`)
+   and owns all background work and its cadences in one defined order: LSP,
+   DAP, syntax, launch, AI jobs, git, picker loading and result delivery,
+   the external-file check (every 500ms) and the full rehighlight (200ms
+   after the last edit, observed by the tick itself). A test there fails
+   when a public `poll_*` in `ovim-core` is not driven by the tick.
+3. Handle the returned `TickReport`: its `terminal_request` (`:!cmd`,
+   `:terminal`) must be run with a real terminal (TUI) or declined with a
+   status message (GUI, headless).
 4. Call `refresh_after_input` after dispatching input to the editor, then
    call `editor.dispatch_pending_intents().await` right after — otherwise
    LSP-triggered work waits for the next tick.
-5. Run the debounced rehighlight (`editor.process_pending_rehighlight()`)
-   roughly 200ms after the last edit.
-6. Call `process_external_file_change` periodically (roughly every 500ms) so
-   externally-modified files are detected and reloaded.
-7. On shutdown, call `editor.close_current_file_lsp().await` so the language
+5. On shutdown, call `editor.close_current_file_lsp().await` so the language
    server sees a clean `didClose` instead of a dropped socket.
+
+Frontend-only by design: the TUI's terminal bell for new AI attention (the
+GUI and headless API project `ai_chat_attention_generation` into their
+snapshots instead), the TUI's external-file check on terminal focus, the
+headless loop's extra select arms that deliver picker results without
+waiting for a tick, and the GUI's diff-review geometry.
 
 This list is kept in sync by hand with the doc comment on `ovim/src/frontend/mod.rs`
 — treat that module as the source of truth if the two ever drift.
@@ -91,7 +93,7 @@ terminal palette assumptions out of the SolidJS layer.
 `ovim/tests/frontend_api.rs` is an integration test that simulates a minimal
 third frontend using only `ovim::` lib API — no binary-target modules, which
 are unreachable from an integration test crate regardless. It builds an
-`Editor`, resizes the viewport, runs a tick with a fresh `FrontendChannels`,
+`Editor`, resizes the viewport, runs a tick with a fresh `TickState`,
 dispatches keys through `InputHandler` followed by `refresh_after_input`, and
 exercises the picker-drain no-op path. Read it alongside this document as the
 concrete, compiling version of the contract above.

@@ -1,6 +1,6 @@
 use super::{initialize_configured_lsp, install_approved, normalize_path};
 use crate::editor::{AutoInstallMode, Editor, PendingLspInstall};
-use ovim_core::language_catalog::LanguageDefinition;
+use crate::language_catalog::LanguageDefinition;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -143,7 +143,7 @@ impl LspStartup {
         for path in finished {
             if let Some(task) = self.jobs.remove(&path) {
                 if let Err(error) = task.await {
-                    ovim_core::lsp_warn!("LSP", "Startup task failed for {}: {}", path, error);
+                    crate::lsp_warn!("LSP", "Startup task failed for {}: {}", path, error);
                     if editor.buffer().file_path() == Some(path.as_str()) {
                         editor.set_lsp_status(format!("LSP: Startup failed: {error}"));
                     }

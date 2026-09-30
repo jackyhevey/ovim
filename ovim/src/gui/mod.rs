@@ -21,10 +21,7 @@ mod terminal;
 use crate::cli::FileArg;
 use crate::color::Color;
 use crate::editor::{Editor, EditorServices, InputHandler};
-use crate::frontend::{
-    compute_text_width, handle_viewport_resize, process_editor_tick, process_external_file_change,
-    process_picker_results, refresh_after_input, FrontendChannels,
-};
+use crate::frontend::{compute_text_width, handle_viewport_resize, refresh_after_input, TickState};
 use crate::git::LineStatus;
 use crate::mode::Mode;
 use crate::syntax::{HighlightGroup, UiGroup};
@@ -34,12 +31,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::mpsc as std_mpsc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 use unicode_segmentation::UnicodeSegmentation;
 
 const TICK_RATE: Duration = Duration::from_millis(50);
-const EXTERNAL_FILE_RATE: Duration = Duration::from_millis(500);
 const SNAPSHOT_OVERSCAN: usize = 4;
 const HORIZONTAL_OVERSCAN: usize = 96;
 const MAX_PICKER_ITEMS: usize = 24;
@@ -1624,10 +1620,9 @@ async fn run_editor(
 
     editor.set_ai_conversation_resume_enabled(resume);
     editor.enable_lsp();
-    let mut channels = FrontendChannels::new();
+    let mut tick_state = TickState::new();
     let mut tick = tokio::time::interval(TICK_RATE);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut last_external_check = Instant::now();
     let mut revision = 1u64;
     let mut dimensions = (120u16, 40u16);
     let mut projection_cache = GuiProjectionCache::default();
@@ -1642,12 +1637,10 @@ async fn run_editor(
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                process_editor_tick(&mut editor, &mut channels).await;
-                process_picker_results(&mut editor, &mut channels);
-                editor.process_pending_rehighlight().await;
-                if last_external_check.elapsed() >= EXTERNAL_FILE_RATE {
-                    process_external_file_change(&mut editor);
-                    last_external_check = Instant::now();
+                if editor.tick(&mut tick_state).await.terminal_request.is_some() {
+                    // The GUI has its own PTY terminal panel; `:!`/`:terminal`
+                    // would need the terminal the GUI process was started from.
+                    editor.set_status_message("Use the Terminal icon or Cmd/Ctrl+Shift+T to run shell commands in the GUI".to_string());
                 }
                 update_diff_review_geometry(&mut editor);
                 publish_if_changed(
@@ -1671,11 +1664,6 @@ async fn run_editor(
                     &mut revision,
                     &mut projection_cache,
                 ).await;
-                let rejected_terminal = editor.take_pending_terminal_session().is_some();
-                let rejected_shell = editor.take_pending_shell_command().is_some();
-                if rejected_terminal || rejected_shell {
-                    editor.set_status_message("Use the Terminal icon or Cmd/Ctrl+Shift+T to run shell commands in the GUI".to_string());
-                }
                 update_diff_review_geometry(&mut editor);
                 publish_if_changed(
                     &editor,

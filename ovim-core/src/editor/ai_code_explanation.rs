@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use super::ai_chat_state::{
     CodeExplanationContinuation, CodeExplanationExchange, CodeExplanationInteraction,
-    PendingCodeExplanation, QueuedChatInputKind,
+    PendingCodeExplanation, PendingWalkthroughCall, QueuedChatInputKind,
 };
 use super::code_explanation::{
     comment_rows_for_viewport, concept_body_row_limit, concept_body_rows_for_viewport,
@@ -240,7 +240,7 @@ impl Editor {
             return false;
         };
 
-        match self.begin_code_explanation(tool_call, CodeExplanationContinuation::Replay) {
+        match self.begin_code_explanation(tool_call, None) {
             Ok(()) => true,
             Err((error, _)) => {
                 let message = match error {
@@ -252,12 +252,15 @@ impl Editor {
         }
     }
 
+    /// Open a walkthrough for `tool_call`. `continuation` is the blocked
+    /// call to resume when the user finishes; `None` is a local replay.
     pub(super) fn begin_code_explanation(
         &mut self,
         tool_call: ToolCallInfo,
-        continuation: CodeExplanationContinuation,
-    ) -> Result<(), (ToolResult, Box<CodeExplanationContinuation>)> {
-        let cached_steps = matches!(continuation, CodeExplanationContinuation::Replay)
+        continuation: Option<CodeExplanationContinuation>,
+    ) -> Result<(), (ToolResult, Option<Box<CodeExplanationContinuation>>)> {
+        let replay = continuation.is_none();
+        let cached_steps = replay
             .then(|| self.cached_code_explanation_steps(&tool_call.id))
             .flatten();
         let steps = if let Some(steps) = cached_steps {
@@ -265,28 +268,40 @@ impl Editor {
         } else {
             match self.parse_code_explanation_steps(&tool_call.arguments) {
                 Ok(steps) => steps,
-                Err(error) => return Err((error, Box::new(continuation))),
+                Err(error) => return Err((error, continuation.map(Box::new))),
             }
         };
+        let Some(chat) = self.ai_state.chat.as_ref() else {
+            return Err((
+                ToolResult::Error("AI chat is not open".to_string()),
+                continuation.map(Box::new),
+            ));
+        };
+        // One walkthrough at a time, and its call is the turn's only park.
+        if chat.pending_code_explanation.is_some()
+            || (continuation.is_some() && chat.parked().is_some())
+        {
+            return Err((
+                ToolResult::Error(
+                    "Finish or dismiss the current walkthrough before starting another".into(),
+                ),
+                continuation.map(Box::new),
+            ));
+        }
         self.retain_code_explanation_steps(&tool_call.id, &steps);
-        let original_active_buffer_id = self
-            .ai_state
-            .chat
-            .as_ref()
-            .map(|chat| chat.active_buffer_id);
-        let Some(original_active_buffer_id) = original_active_buffer_id else {
-            return Err((
-                ToolResult::Error("AI chat is not open".to_string()),
-                Box::new(continuation),
-            ));
-        };
-
         let Some(chat) = self.ai_state.chat.as_mut() else {
-            return Err((
-                ToolResult::Error("AI chat is not open".to_string()),
-                Box::new(continuation),
-            ));
+            unreachable!("chat checked above");
         };
+        let original_active_buffer_id = chat.active_buffer_id;
+        if let Some(continuation) = continuation {
+            let blocked = PendingWalkthroughCall {
+                tool_call: tool_call.clone(),
+                continuation,
+            };
+            if chat.park(blocked).is_err() {
+                unreachable!("walkthrough parking was checked above");
+            }
+        }
         chat.pending_code_explanation = Some(PendingCodeExplanation {
             tool_call,
             threads: vec![Vec::new(); steps.len()],
@@ -297,36 +312,27 @@ impl Editor {
             interaction: CodeExplanationInteraction::Navigating,
             original_active_buffer_id,
             presentation_buffer_id: None,
-            continuation: Some(continuation),
+            replay,
         });
         chat.waiting = false;
 
         if let Err(error) = self.show_current_code_explanation_step() {
-            if let Some(pending) = self
+            let chat = self
                 .ai_state
                 .chat
                 .as_mut()
-                .and_then(|chat| chat.pending_code_explanation.take())
-            {
-                self.discard_code_explanation_presentation_buffer(
-                    pending.presentation_buffer_id,
-                    pending.original_active_buffer_id,
-                );
-                if let Some(chat) = self.ai_state.chat.as_mut() {
-                    chat.active_buffer_id = original_active_buffer_id;
-                }
-                return Err((
-                    error,
-                    Box::new(
-                        pending
-                            .continuation
-                            .expect("new walkthrough must retain its continuation"),
-                    ),
-                ));
-            } else if let Some(chat) = self.ai_state.chat.as_mut() {
-                chat.active_buffer_id = original_active_buffer_id;
-            }
-            unreachable!("installed walkthrough disappeared before activation");
+                .expect("installed walkthrough keeps its chat");
+            let pending = chat
+                .pending_code_explanation
+                .take()
+                .expect("installed walkthrough disappeared before activation");
+            let blocked = chat.take_parked_as::<PendingWalkthroughCall>();
+            chat.active_buffer_id = original_active_buffer_id;
+            self.discard_code_explanation_presentation_buffer(
+                pending.presentation_buffer_id,
+                pending.original_active_buffer_id,
+            );
+            return Err((error, blocked.map(|blocked| Box::new(blocked.continuation))));
         }
 
         self.ai_state.ai_attention_generation =
@@ -538,13 +544,11 @@ impl Editor {
     }
 
     pub fn submit_code_explanation_question(&mut self) -> Result<bool, String> {
-        let (step_index, step, question, tool_call, continuation) = {
-            let Some(pending) = self
-                .ai_state
-                .chat
-                .as_mut()
-                .and_then(|chat| chat.pending_code_explanation.as_mut())
-            else {
+        let (step_index, step, question, blocked) = {
+            let Some(chat) = self.ai_state.chat.as_mut() else {
+                return Ok(false);
+            };
+            let Some(pending) = chat.pending_code_explanation.as_mut() else {
                 return Ok(false);
             };
             let CodeExplanationInteraction::Composing { input, .. } = &pending.interaction else {
@@ -572,12 +576,13 @@ impl Editor {
             };
             pending.visible_exchange = Some(exchange);
             pending.answer_scroll = FOLLOW_LATEST_ANSWER;
+            // Asking turns a replay into a live discussion.
+            pending.replay = false;
             (
                 step_index,
                 step,
                 question,
-                pending.tool_call.clone(),
-                pending.continuation.take(),
+                chat.take_parked_as::<PendingWalkthroughCall>(),
             )
         };
 
@@ -588,14 +593,19 @@ impl Editor {
             question
         ));
 
-        match continuation {
-            Some(continuation @ CodeExplanationContinuation::EditorMcp { .. }) => {
+        match blocked {
+            Some(
+                blocked @ PendingWalkthroughCall {
+                    continuation: CodeExplanationContinuation::EditorMcp { .. },
+                    ..
+                },
+            ) => {
                 // The question travels in the MCP result to the running Claude
                 // turn. Queueing another turn as well would ask it twice.
                 self.clear_ai_chat_input();
-                self.resolve_code_explanation_continuation(&tool_call, continuation, outcome);
+                self.resolve_code_explanation_call(blocked, outcome);
             }
-            Some(CodeExplanationContinuation::Replay) | None => {
+            None => {
                 if let Some(chat) = self.ai_state.chat.as_mut() {
                     chat.input = prompt;
                     chat.input_cursor = chat.input.len();
@@ -603,21 +613,20 @@ impl Editor {
                 self.submit_ai_chat_message()
                     .map_err(|error| error.to_string())?;
             }
-            Some(continuation) => {
+            Some(blocked) => {
                 if let Some(chat) = self.ai_state.chat.as_mut() {
                     chat.input = prompt;
                     chat.input_cursor = chat.input.len();
                 }
-                // `continuation` has already been taken out of `pending`, so it
-                // must reach resolve_* on every path out of here — a dropped
-                // Batch never emits a tool_result for the explain_with_codebase
-                // tool_use (malforming the next request) and a dropped Dynamic
-                // loses its oneshot sender, with no way back: finish_code_
-                // explanation would see `continuation == None`. Queueing is
-                // infallible, so that is guaranteed by construction rather than
-                // by error handling.
+                // `blocked` has already been unparked, so it must reach
+                // resolve_* on every path out of here — a dropped Batch never
+                // emits a tool_result for the explain_with_codebase tool_use
+                // (malforming the next request) and a dropped Dynamic loses its
+                // oneshot sender, with no way back: finish_code_explanation
+                // would find nothing parked. Queueing is infallible, so that is
+                // guaranteed by construction rather than by error handling.
                 self.queue_current_ai_chat_input(QueuedChatInputKind::Steer);
-                self.resolve_code_explanation_continuation(&tool_call, continuation, outcome);
+                self.resolve_code_explanation_call(blocked, outcome);
             }
         }
         self.set_status_message(format!(
@@ -734,14 +743,13 @@ impl Editor {
     }
 
     pub fn finish_code_explanation(&mut self, dismissed: bool) -> bool {
-        let Some(pending) = self
-            .ai_state
-            .chat
-            .as_mut()
-            .and_then(|chat| chat.pending_code_explanation.take())
-        else {
+        let Some(chat) = self.ai_state.chat.as_mut() else {
             return false;
         };
+        let Some(pending) = chat.pending_code_explanation.take() else {
+            return false;
+        };
+        let blocked = chat.take_parked_as::<PendingWalkthroughCall>();
 
         self.discard_code_explanation_presentation_buffer(
             pending.presentation_buffer_id,
@@ -752,10 +760,7 @@ impl Editor {
         }
         self.ai_state.active_selection = None;
 
-        let is_replay = matches!(
-            pending.continuation.as_ref(),
-            Some(CodeExplanationContinuation::Replay)
-        );
+        let is_replay = pending.replay;
         let question_count = pending.threads.iter().map(Vec::len).sum::<usize>();
         let outcome = if is_replay && dismissed {
             format!(
@@ -768,14 +773,14 @@ impl Editor {
                 "Completed walkthrough replay ({} pages).",
                 pending.steps.len()
             )
-        } else if pending.continuation.is_none() && dismissed {
+        } else if blocked.is_none() && dismissed {
             format!(
                 "Dismissed walkthrough at page {} of {} after {} question(s).",
                 pending.current + 1,
                 pending.steps.len(),
                 question_count
             )
-        } else if pending.continuation.is_none() {
+        } else if blocked.is_none() {
             format!(
                 "Completed walkthrough ({} pages, {} question(s)).",
                 pending.steps.len(),
@@ -795,21 +800,20 @@ impl Editor {
         };
         let result = ToolResult::Success(outcome.clone());
 
-        if let Some(continuation) = pending.continuation {
-            self.resolve_code_explanation_continuation(&pending.tool_call, continuation, result);
+        if let Some(blocked) = blocked {
+            self.resolve_code_explanation_call(blocked, result);
         }
 
         self.set_status_message(outcome);
         true
     }
 
-    fn resolve_code_explanation_continuation(
+    fn resolve_code_explanation_call(
         &mut self,
-        tool_call: &ToolCallInfo,
-        continuation: CodeExplanationContinuation,
+        blocked: PendingWalkthroughCall,
         result: ToolResult,
     ) {
-        match continuation {
+        match blocked.continuation {
             CodeExplanationContinuation::EditorMcp {
                 request_id,
                 rpc_id,
@@ -824,43 +828,14 @@ impl Editor {
                     chat.waiting = true;
                 }
             }
-            CodeExplanationContinuation::Dynamic {
-                runtime_tool,
-                runtime_turn,
-                response,
-            } => {
-                self.finish_dynamic_tool(&runtime_turn, &runtime_tool, tool_call, response, result);
-                if let Some(chat) = self.ai_state.chat.as_mut() {
-                    chat.waiting = true;
-                }
+            CodeExplanationContinuation::Tool(continuation) => {
+                self.resume_tool_continuation(
+                    blocked.tool_call,
+                    continuation,
+                    result,
+                    "walkthrough",
+                );
             }
-            CodeExplanationContinuation::Batch {
-                runtime_tool,
-                runtime_turn,
-                remaining_tool_calls,
-                model_name,
-            } => {
-                if let (Some(turn), Some(tool)) = (runtime_turn.as_ref(), runtime_tool.as_ref()) {
-                    if let Err(error) = self.ai_runtime_finish_tool(turn, tool, &result) {
-                        self.ai_runtime_fail_turn(format!(
-                            "failed to record walkthrough result: {error}"
-                        ));
-                        self.clear_streaming_state();
-                        return;
-                    }
-                }
-                self.record_tool_event_summary(tool_call, &result);
-                let result_content = self.format_tool_result_with_target(tool_call, &result);
-                if let Some(conversation) = self.conversation_mut() {
-                    conversation.append_tool_result(tool_call.id.clone(), result_content);
-                }
-                if let Some(chat) = self.ai_state.chat.as_mut() {
-                    chat.tool_call_count = chat.tool_call_count.saturating_add(1);
-                    chat.waiting = true;
-                }
-                self.execute_tool_call_batch(remaining_tool_calls, model_name);
-            }
-            CodeExplanationContinuation::Replay => {}
         }
     }
 
@@ -1627,13 +1602,15 @@ mod tests {
         }
     }
 
-    fn batch_continuation() -> CodeExplanationContinuation {
-        CodeExplanationContinuation::Batch {
-            runtime_tool: None,
-            runtime_turn: None,
-            remaining_tool_calls: Vec::new(),
-            model_name: "test".into(),
-        }
+    fn batch_continuation() -> Option<CodeExplanationContinuation> {
+        Some(CodeExplanationContinuation::Tool(
+            crate::editor::ai_chat_state::ToolExecutionContinuation::Batch {
+                runtime_tool: None,
+                runtime_turn: None,
+                remaining_tool_calls: Vec::new(),
+                model_name: "test".into(),
+            },
+        ))
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1889,11 +1866,13 @@ mod tests {
         });
         if let Err((error, _)) = editor.begin_code_explanation(
             tool_call,
-            CodeExplanationContinuation::Dynamic {
-                runtime_tool,
-                runtime_turn: turn,
-                response: response_tx,
-            },
+            Some(CodeExplanationContinuation::Tool(
+                crate::editor::ai_chat_state::ToolExecutionContinuation::Dynamic {
+                    runtime_tool,
+                    runtime_turn: turn,
+                    response: response_tx,
+                },
+            )),
         ) {
             panic!("could not start walkthrough: {error:?}");
         }

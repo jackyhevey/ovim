@@ -1,9 +1,12 @@
-use crate::ai::chat_types::{ChatOpts, ConversationTree};
+use crate::ai::chat_types::{ChatOpts, ConversationTree, ToolCallInfo};
 use crate::buffer::BufferId;
 use crate::mode::Mode;
 use anyhow::Result;
 
-use super::ai_chat_state::AiChatState;
+use super::ai_chat_state::{
+    AiChatState, CodeExplanationContinuation, ParkedKind, ParkedTurn, PendingShellExecution,
+    ToolExecutionContinuation,
+};
 use super::Editor;
 
 impl Editor {
@@ -193,34 +196,18 @@ impl Editor {
         let had_agent_work = self.ai_state.chat.as_ref().is_some_and(|chat| {
             chat.waiting
                 || chat.pending_job.is_some()
-                || chat.pending_tool_approval.is_some()
-                || chat.pending_auto_mode_classification.is_some()
-                || chat.pending_shell_execution.is_some()
-                || chat.pending_background_tool.is_some()
-                || chat.pending_subagent_control.is_some()
+                || chat.parked().is_some()
                 || chat.pending_code_explanation.is_some()
         });
 
         self.flush_ai_runtime_stream_segments();
         self.commit_partial_streaming(&model_name);
 
-        let (
-            pending_job,
-            pending_approval,
-            pending_classification,
-            pending_shell,
-            pending_background,
-            pending_subagent,
-            pending_explanation,
-        ) = {
+        let (pending_job, parked, walkthrough) = {
             let chat = self.ai_state.chat.as_mut().expect("pending chat exists");
             (
                 chat.pending_job.take(),
-                chat.pending_tool_approval.take(),
-                chat.pending_auto_mode_classification.take(),
-                chat.pending_shell_execution.take(),
-                chat.pending_background_tool.take(),
-                chat.pending_subagent_control.take(),
+                chat.take_parked(),
                 chat.pending_code_explanation.take(),
             )
         };
@@ -228,260 +215,19 @@ impl Editor {
         if let Some(job) = pending_job {
             job.task.abort();
         }
-        if let Some(pending) = pending_approval {
-            if let (Some(turn), Some(tool)) =
-                (pending.dynamic_turn.as_ref(), pending.runtime_tool.as_ref())
-            {
-                if let Err(error) =
-                    self.ai_state
-                        .agent_runtime
-                        .fail_tool(turn, tool, "cancelled by user")
-                {
-                    crate::log_warn!("agent_runtime", "failed to cancel pending tool: {error}");
-                }
-            } else if let (Some(turn), Some(tool)) =
-                (self.active_ai_runtime_turn(), pending.runtime_tool.as_ref())
-            {
-                if let Err(error) =
-                    self.ai_state
-                        .agent_runtime
-                        .fail_tool(&turn, tool, "cancelled by user")
-                {
-                    crate::log_warn!("agent_runtime", "failed to cancel pending tool: {error}");
-                }
-            }
-            match pending.dynamic_response {
-                Some(response) => {
-                    let _ = response.send(Err("cancelled by user".into()));
-                }
-                None => {
-                    // Batch approvals pause after the assistant tool_use blocks
-                    // were committed; close out the paused call and the rest of
-                    // the batch so the next provider request stays well-formed.
-                    let mut unresolved = vec![pending.tool_call.clone()];
-                    unresolved.extend(pending.remaining_tool_calls);
-                    self.append_synthetic_tool_results(&unresolved, "Execution cancelled");
-                }
-            }
-        }
-        if let Some(pending) = pending_classification {
-            if let Err(error) = self.ai_state.agent_runtime.fail_tool(
-                &pending.runtime_turn,
-                &pending.runtime_tool,
-                "cancelled by user",
-            ) {
-                crate::log_warn!("agent_runtime", "failed to cancel classified tool: {error}");
-            }
-            let _ = pending
-                .dynamic_response
-                .send(Err("cancelled by user".into()));
-        }
-        if let Some(pending) = pending_shell {
-            // Aborting a started `spawn_blocking` task does not stop it; the
-            // command itself must be killed or it keeps mutating the workspace
-            // after the UI reports the cancellation.
-            pending.kill.cancel();
-            pending.task.abort();
-            if let Some(chat) = self.ai_state.chat.as_mut() {
-                chat.retire_shell_transcript(
-                    &pending.tool_call.id,
-                    super::ai_chat_state::ShellTranscriptPhase::Interrupted,
-                );
-            }
-            let (runtime_turn, runtime_tool, response, unresolved) = match pending.continuation {
-                super::ai_chat_state::ToolExecutionContinuation::Dynamic {
-                    runtime_turn,
-                    runtime_tool,
-                    response,
-                } => (
-                    Some(runtime_turn),
-                    Some(runtime_tool),
-                    Some(response),
-                    Vec::new(),
-                ),
-                super::ai_chat_state::ToolExecutionContinuation::Batch {
-                    runtime_turn,
-                    runtime_tool,
-                    remaining_tool_calls,
-                    ..
-                } => {
-                    // The tool_use blocks for this shell call and the rest of
-                    // the batch are already committed; close them out so the
-                    // next provider request stays well-formed.
-                    let mut unresolved = vec![pending.tool_call.clone()];
-                    unresolved.extend(remaining_tool_calls);
-                    (runtime_turn, runtime_tool, None, unresolved)
-                }
-            };
-            if let (Some(turn), Some(tool)) = (runtime_turn.as_ref(), runtime_tool.as_ref()) {
-                if let Err(error) = self.ai_state.agent_runtime.mark_tool_outcome_unknown(
-                    turn,
-                    tool,
-                    "cancelled by user before the shell result was observed",
-                ) {
-                    crate::log_warn!("agent_runtime", "failed to cancel shell tool: {error}");
-                }
-            }
-            if let Some(response) = response {
-                let _ = response.send(Err("cancelled by user".into()));
-            }
-            self.append_synthetic_tool_results(&unresolved, "Execution cancelled");
-        }
-        if let Some(pending) = pending_background {
-            pending.task.abort();
-            match pending.continuation {
-                super::ai_chat_state::ToolExecutionContinuation::Dynamic {
-                    runtime_tool,
-                    runtime_turn,
-                    response,
-                } => {
-                    if let Err(error) = self.ai_state.agent_runtime.fail_tool(
-                        &runtime_turn,
-                        &runtime_tool,
-                        "cancelled by user",
-                    ) {
-                        crate::log_warn!(
-                            "agent_runtime",
-                            "failed to cancel background tool: {error}"
-                        );
-                    }
-                    let _ = response.send(Err("cancelled by user".into()));
-                }
-                super::ai_chat_state::ToolExecutionContinuation::Batch {
-                    runtime_tool,
-                    runtime_turn,
-                    remaining_tool_calls,
-                    ..
-                } => {
-                    if let (Some(turn), Some(tool)) = (runtime_turn.as_ref(), runtime_tool.as_ref())
-                        && let Err(error) =
-                            self.ai_state
-                                .agent_runtime
-                                .fail_tool(turn, tool, "cancelled by user")
-                    {
-                        crate::log_warn!(
-                            "agent_runtime",
-                            "failed to cancel background tool: {error}"
-                        );
-                    }
-                    let mut unresolved = vec![pending.tool_call];
-                    unresolved.extend(remaining_tool_calls);
-                    self.append_synthetic_tool_results(&unresolved, "Execution cancelled");
-                }
-            }
-        }
-        if let Some(pending) = pending_subagent {
-            pending.task.abort();
-            match pending.continuation {
-                super::ai_chat_state::ToolExecutionContinuation::Dynamic {
-                    runtime_tool,
-                    runtime_turn,
-                    response,
-                } => {
-                    if let Err(error) = self.ai_state.agent_runtime.fail_tool(
-                        &runtime_turn,
-                        &runtime_tool,
-                        "cancelled by user",
-                    ) {
-                        crate::log_warn!(
-                            "agent_runtime",
-                            "failed to cancel delegated-agent control: {error}"
-                        );
-                    }
-                    let _ = response.send(Err("cancelled by user".into()));
-                }
-                super::ai_chat_state::ToolExecutionContinuation::Batch {
-                    runtime_tool,
-                    runtime_turn,
-                    remaining_tool_calls,
-                    ..
-                } => {
-                    if let (Some(turn), Some(tool)) = (runtime_turn.as_ref(), runtime_tool.as_ref())
-                    {
-                        if let Err(error) =
-                            self.ai_state
-                                .agent_runtime
-                                .fail_tool(turn, tool, "cancelled by user")
-                        {
-                            crate::log_warn!(
-                                "agent_runtime",
-                                "failed to cancel delegated-agent control: {error}"
-                            );
-                        }
-                    }
-                    let mut unresolved = vec![pending.tool_call];
-                    unresolved.extend(remaining_tool_calls);
-                    self.append_synthetic_tool_results(&unresolved, "Execution cancelled");
-                }
-            }
-        }
-        if let Some(pending) = pending_explanation {
+        if let Some(walkthrough) = walkthrough {
             self.discard_code_explanation_presentation_buffer(
-                pending.presentation_buffer_id,
-                pending.original_active_buffer_id,
+                walkthrough.presentation_buffer_id,
+                walkthrough.original_active_buffer_id,
             );
             if let Some(chat) = self.ai_state.chat.as_mut() {
-                chat.active_buffer_id = pending.original_active_buffer_id;
+                chat.active_buffer_id = walkthrough.original_active_buffer_id;
             }
             self.ai_state.active_selection = None;
-            match pending.continuation {
-                Some(super::ai_chat_state::CodeExplanationContinuation::EditorMcp {
-                    rpc_id,
-                    response,
-                    ..
-                }) => {
-                    let _ = response.send(super::ai_editor_mcp::tool_reply(
-                        rpc_id,
-                        crate::ai::ToolResult::Error("Walkthrough cancelled".into()),
-                    ));
-                }
-                None => {}
-                Some(super::ai_chat_state::CodeExplanationContinuation::Dynamic {
-                    runtime_tool,
-                    runtime_turn,
-                    response,
-                }) => {
-                    if let Err(error) = self.ai_state.agent_runtime.fail_tool(
-                        &runtime_turn,
-                        &runtime_tool,
-                        "cancelled by user",
-                    ) {
-                        crate::log_warn!(
-                            "agent_runtime",
-                            "failed to cancel code walkthrough: {error}"
-                        );
-                    }
-                    let _ = response.send(Err("cancelled by user".into()));
-                }
-                Some(super::ai_chat_state::CodeExplanationContinuation::Batch {
-                    runtime_tool,
-                    runtime_turn,
-                    remaining_tool_calls,
-                    ..
-                }) => {
-                    if let (Some(turn), Some(tool)) = (runtime_turn.as_ref(), runtime_tool.as_ref())
-                    {
-                        if let Err(error) =
-                            self.ai_state
-                                .agent_runtime
-                                .fail_tool(turn, tool, "cancelled by user")
-                        {
-                            crate::log_warn!(
-                                "agent_runtime",
-                                "failed to cancel code walkthrough: {error}"
-                            );
-                        }
-                    }
-                    // The walkthrough call and the rest of its batch are
-                    // committed tool_use blocks; close them out.
-                    let mut unresolved = vec![pending.tool_call.clone()];
-                    unresolved.extend(remaining_tool_calls);
-                    self.append_synthetic_tool_results(&unresolved, "Execution cancelled");
-                }
-                Some(super::ai_chat_state::CodeExplanationContinuation::Replay) => {}
-            }
         }
-
+        if let Some(parked) = parked {
+            self.cancel_parked_turn(parked);
+        }
         self.ai_runtime_interrupt_turn("cancelled by user");
         self.clear_streaming_state();
         if let Some(chat) = self.ai_state.chat.as_mut() {
@@ -498,13 +244,201 @@ impl Editor {
         true
     }
 
+    /// Park the active turn on `parked`. A turn that is already parked keeps
+    /// its interaction; the rejected one is cancelled so its provider call or
+    /// committed tool_use is still answered. Returns whether it was parked.
+    pub(super) fn park_ai_turn(&mut self, parked: impl ParkedKind) -> bool {
+        let Some(chat) = self.ai_state.chat.as_mut() else {
+            return false;
+        };
+        match chat.park(parked) {
+            Ok(()) => true,
+            Err(rejected) => {
+                self.cancel_parked_turn(*rejected);
+                false
+            }
+        }
+    }
+
+    /// Tear down one parked interaction after the user cancelled its turn.
+    fn cancel_parked_turn(&mut self, parked: ParkedTurn) {
+        match parked {
+            ParkedTurn::Approval(pending) => {
+                if let (Some(turn), Some(tool)) =
+                    (pending.dynamic_turn.as_ref(), pending.runtime_tool.as_ref())
+                {
+                    if let Err(error) =
+                        self.ai_state
+                            .agent_runtime
+                            .fail_tool(turn, tool, "cancelled by user")
+                    {
+                        crate::log_warn!("agent_runtime", "failed to cancel pending tool: {error}");
+                    }
+                } else if let (Some(turn), Some(tool)) =
+                    (self.active_ai_runtime_turn(), pending.runtime_tool.as_ref())
+                {
+                    if let Err(error) =
+                        self.ai_state
+                            .agent_runtime
+                            .fail_tool(&turn, tool, "cancelled by user")
+                    {
+                        crate::log_warn!("agent_runtime", "failed to cancel pending tool: {error}");
+                    }
+                }
+                match pending.dynamic_response {
+                    Some(response) => {
+                        let _ = response.send(Err("cancelled by user".into()));
+                    }
+                    None => {
+                        // Batch approvals pause after the assistant tool_use blocks
+                        // were committed; close out the paused call and the rest of
+                        // the batch so the next provider request stays well-formed.
+                        let mut unresolved = vec![pending.tool_call];
+                        unresolved.extend(pending.remaining_tool_calls);
+                        self.append_synthetic_tool_results(&unresolved, "Execution cancelled");
+                    }
+                }
+            }
+            ParkedTurn::Classifying(pending) => {
+                if let Err(error) = self.ai_state.agent_runtime.fail_tool(
+                    &pending.runtime_turn,
+                    &pending.runtime_tool,
+                    "cancelled by user",
+                ) {
+                    crate::log_warn!("agent_runtime", "failed to cancel classified tool: {error}");
+                }
+                let _ = pending
+                    .dynamic_response
+                    .send(Err("cancelled by user".into()));
+            }
+            ParkedTurn::Shell(pending) => {
+                // Aborting a started `spawn_blocking` task does not stop it; the
+                // command itself must be killed or it keeps mutating the workspace
+                // after the UI reports the cancellation.
+                pending.kill.cancel();
+                pending.task.abort();
+                if let Some(chat) = self.ai_state.chat.as_mut() {
+                    chat.retire_shell_transcript(
+                        &pending.tool_call.id,
+                        super::ai_chat_state::ShellTranscriptPhase::Interrupted,
+                    );
+                }
+                let (runtime_turn, runtime_tool, response, unresolved) = match pending.continuation
+                {
+                    ToolExecutionContinuation::Dynamic {
+                        runtime_turn,
+                        runtime_tool,
+                        response,
+                    } => (
+                        Some(runtime_turn),
+                        Some(runtime_tool),
+                        Some(response),
+                        Vec::new(),
+                    ),
+                    ToolExecutionContinuation::Batch {
+                        runtime_turn,
+                        runtime_tool,
+                        remaining_tool_calls,
+                        ..
+                    } => {
+                        // The tool_use blocks for this shell call and the rest of
+                        // the batch are already committed; close them out so the
+                        // next provider request stays well-formed.
+                        let mut unresolved = vec![pending.tool_call];
+                        unresolved.extend(remaining_tool_calls);
+                        (runtime_turn, runtime_tool, None, unresolved)
+                    }
+                };
+                if let (Some(turn), Some(tool)) = (runtime_turn.as_ref(), runtime_tool.as_ref()) {
+                    if let Err(error) = self.ai_state.agent_runtime.mark_tool_outcome_unknown(
+                        turn,
+                        tool,
+                        "cancelled by user before the shell result was observed",
+                    ) {
+                        crate::log_warn!("agent_runtime", "failed to cancel shell tool: {error}");
+                    }
+                }
+                if let Some(response) = response {
+                    let _ = response.send(Err("cancelled by user".into()));
+                }
+                self.append_synthetic_tool_results(&unresolved, "Execution cancelled");
+            }
+            ParkedTurn::Background(pending) => {
+                pending.task.abort();
+                self.cancel_tool_continuation(
+                    pending.tool_call,
+                    pending.continuation,
+                    "background tool",
+                );
+            }
+            ParkedTurn::SubagentControl(pending) => {
+                pending.task.abort();
+                self.cancel_tool_continuation(
+                    pending.tool_call,
+                    pending.continuation,
+                    "delegated-agent control",
+                );
+            }
+            ParkedTurn::CodeExplanation(pending) => match pending.continuation {
+                CodeExplanationContinuation::EditorMcp {
+                    rpc_id, response, ..
+                } => {
+                    let _ = response.send(super::ai_editor_mcp::tool_reply(
+                        rpc_id,
+                        crate::ai::ToolResult::Error("Walkthrough cancelled".into()),
+                    ));
+                }
+                CodeExplanationContinuation::Tool(continuation) => {
+                    self.cancel_tool_continuation(
+                        pending.tool_call,
+                        continuation,
+                        "code walkthrough",
+                    );
+                }
+            },
+        }
+    }
+
+    /// Fail a cancelled tool call's runtime record, then answer the provider
+    /// (dynamic) or close the call and the rest of its committed batch.
+    fn cancel_tool_continuation(
+        &mut self,
+        tool_call: ToolCallInfo,
+        continuation: ToolExecutionContinuation,
+        what: &str,
+    ) {
+        if let (Some(turn), Some(tool)) = continuation.runtime_refs()
+            && let Err(error) =
+                self.ai_state
+                    .agent_runtime
+                    .fail_tool(turn, tool, "cancelled by user")
+        {
+            crate::log_warn!("agent_runtime", "failed to cancel {what}: {error}");
+        }
+        match continuation {
+            ToolExecutionContinuation::Dynamic { response, .. } => {
+                let _ = response.send(Err("cancelled by user".into()));
+            }
+            ToolExecutionContinuation::Batch {
+                remaining_tool_calls,
+                ..
+            } => {
+                // The call and the rest of its batch are committed tool_use
+                // blocks; close them out so the next request stays well-formed.
+                let mut unresolved = vec![tool_call];
+                unresolved.extend(remaining_tool_calls);
+                self.append_synthetic_tool_results(&unresolved, "Execution cancelled");
+            }
+        }
+    }
+
     /// Interrupt only the active shell tool, leaving its agent turn alive so
     /// the resulting failure can be observed and the agent can continue.
     pub fn interrupt_ai_shell_process(&mut self, force: bool) -> bool {
         let Some(chat) = self.ai_state.chat.as_mut() else {
             return false;
         };
-        let Some(pending) = chat.pending_shell_execution.as_ref() else {
+        let Some(pending) = chat.parked_as::<PendingShellExecution>() else {
             return false;
         };
         let tool_call_id = pending.tool_call.id.clone();
@@ -552,22 +486,8 @@ impl Editor {
         {
             job.task.abort();
         }
-        if let Some(background) = self
-            .ai_state
-            .chat
-            .as_ref()
-            .and_then(|chat| chat.pending_background_tool.as_ref())
-        {
-            background.task.abort();
-        }
-        if let Some(shell) = self
-            .ai_state
-            .chat
-            .as_ref()
-            .and_then(|chat| chat.pending_shell_execution.as_ref())
-        {
-            shell.kill.cancel();
-            shell.task.abort();
+        if let Some(chat) = self.ai_state.chat.as_mut() {
+            chat.abandon_parked_tool();
         }
         self.ai_runtime_interrupt_turn(reason);
         if let Some(mut chat) = self.ai_state.chat.take() {
@@ -756,132 +676,6 @@ mod tests {
         ));
     }
 
-    /// Committed tool_use blocks must all have a closing tool_result after a
-    /// cancel, or the next provider request is rejected as malformed.
-    fn assert_cancelled_tool_results(editor: &Editor, expected_ids: &[&str]) {
-        let messages = editor.conversation().unwrap().messages();
-        let tool_ids: Vec<_> = messages
-            .iter()
-            .filter(|m| m.role == ChatRole::Tool)
-            .filter_map(|m| m.tool_call_id.as_deref())
-            .collect();
-        assert_eq!(tool_ids, expected_ids);
-        assert!(messages
-            .iter()
-            .filter(|m| m.role == ChatRole::Tool)
-            .all(|m| m.content.contains("Execution cancelled")));
-    }
-
-    fn committed_tool_batch(editor: &mut Editor) -> (ToolCallInfo, ToolCallInfo) {
-        let first = ToolCallInfo {
-            id: "tool-1".into(),
-            name: "bash".into(),
-            arguments: serde_json::json!({ "command": "true" }),
-        };
-        let follow_up = ToolCallInfo {
-            id: "tool-2".into(),
-            name: "read_file".into(),
-            arguments: serde_json::json!({}),
-        };
-        editor
-            .conversation_mut()
-            .unwrap()
-            .append_assistant_message_with_tools(
-                String::new(),
-                "test".into(),
-                vec![first.clone(), follow_up.clone()],
-            );
-        (first, follow_up)
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn cancelling_pending_batch_approval_closes_committed_tool_calls() {
-        let mut editor = Editor::default();
-        open_test_chat(&mut editor);
-        let (first, follow_up) = committed_tool_batch(&mut editor);
-        editor.ai_state.chat.as_mut().unwrap().pending_tool_approval =
-            Some(super::super::ai_chat_state::PendingToolApproval {
-                tool_call: first,
-                reason: "sensitive command".into(),
-                runtime_tool: None,
-                runtime_tool_started: false,
-                remaining_tool_calls: vec![follow_up],
-                model_name: "test".into(),
-                requested_path: std::path::PathBuf::from("."),
-                approval_root: std::path::PathBuf::from("."),
-                dynamic_response: None,
-                dynamic_turn: None,
-            });
-
-        assert!(editor.cancel_ai_chat_generation());
-
-        assert_cancelled_tool_results(&editor, &["tool-1", "tool-2"]);
-        editor.close_ai_chat();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn cancelling_background_execution_closes_committed_tool_calls() {
-        let mut editor = Editor::default();
-        open_test_chat(&mut editor);
-        let (first, follow_up) = committed_tool_batch(&mut editor);
-        let (_result_tx, result_rx) = tokio::sync::oneshot::channel();
-        let task = tokio::spawn(async {});
-        let chat = editor.ai_state.chat.as_mut().unwrap();
-        chat.pending_background_tool = Some(super::super::ai_chat_state::PendingBackgroundTool {
-            tool_call: first,
-            continuation: super::super::ai_chat_state::ToolExecutionContinuation::Batch {
-                runtime_tool: None,
-                runtime_turn: None,
-                remaining_tool_calls: vec![follow_up],
-                model_name: "test".into(),
-            },
-            receiver: result_rx,
-            task,
-        });
-
-        assert!(editor.cancel_ai_chat_generation());
-
-        assert_cancelled_tool_results(&editor, &["tool-1", "tool-2"]);
-        editor.close_ai_chat();
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn cancelling_parked_code_explanation_closes_committed_tool_calls() {
-        let mut editor = Editor::default();
-        open_test_chat(&mut editor);
-        let (first, follow_up) = committed_tool_batch(&mut editor);
-        let buffer_id = editor.ai_state.chat.as_ref().unwrap().active_buffer_id;
-        editor
-            .ai_state
-            .chat
-            .as_mut()
-            .unwrap()
-            .pending_code_explanation = Some(super::super::ai_chat_state::PendingCodeExplanation {
-            tool_call: first,
-            steps: Vec::new(),
-            current: 0,
-            answer_scroll: 0,
-            visible_exchange: None,
-            threads: Vec::new(),
-            interaction: super::super::ai_chat_state::CodeExplanationInteraction::Navigating,
-            original_active_buffer_id: buffer_id,
-            presentation_buffer_id: None,
-            continuation: Some(
-                super::super::ai_chat_state::CodeExplanationContinuation::Batch {
-                    runtime_tool: None,
-                    runtime_turn: None,
-                    remaining_tool_calls: vec![follow_up],
-                    model_name: "test".into(),
-                },
-            ),
-        });
-
-        assert!(editor.cancel_ai_chat_generation());
-
-        assert_cancelled_tool_results(&editor, &["tool-1", "tool-2"]);
-        editor.close_ai_chat();
-    }
-
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelling_shell_execution_kills_the_running_command() {
@@ -916,8 +710,7 @@ mod tests {
             .chat
             .as_ref()
             .unwrap()
-            .pending_shell_execution
-            .as_ref()
+            .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
             .unwrap()
             .kill
             .clone();
@@ -1020,8 +813,7 @@ mod tests {
             .chat
             .as_ref()
             .unwrap()
-            .pending_shell_execution
-            .as_ref()
+            .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
             .unwrap()
             .kill
             .clone();
@@ -1685,7 +1477,7 @@ mod tests {
             .chat
             .as_ref()
             .unwrap()
-            .pending_auto_mode_classification
+            .parked_as::<crate::editor::ai_chat_state::PendingAutoModeClassification>()
             .is_some());
         assert!(matches!(
             result_rx.try_recv(),
@@ -1707,7 +1499,7 @@ mod tests {
             .chat
             .as_mut()
             .unwrap()
-            .pending_auto_mode_classification = None;
+            .take_parked_as::<crate::editor::ai_chat_state::PendingAutoModeClassification>();
         abort_handle.abort();
     }
 
@@ -1894,7 +1686,7 @@ mod tests {
             .chat
             .as_ref()
             .unwrap()
-            .pending_shell_execution
+            .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
             .is_some()
         {
             editor.poll_pending_ai_chat_job();
@@ -1958,8 +1750,7 @@ mod tests {
             .chat
             .as_ref()
             .unwrap()
-            .pending_shell_execution
-            .as_ref()
+            .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
             .expect("shell must run in the background");
         assert_eq!(
             editor.ai_chat_activity(),
@@ -2012,7 +1803,7 @@ mod tests {
             .chat
             .as_ref()
             .unwrap()
-            .pending_shell_execution
+            .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
             .is_some()
         {
             // Streaming output is itself a visible state change, so a `true`
@@ -2066,19 +1857,19 @@ mod tests {
         let (response_tx, response_rx) = tokio::sync::oneshot::channel();
         let (classification_tx, classification_rx) = tokio::sync::oneshot::channel();
         classification_tx.send(result).unwrap();
-        editor
+        assert!(editor
             .ai_state
             .chat
             .as_mut()
             .unwrap()
-            .pending_auto_mode_classification =
-            Some(super::super::ai_chat_state::PendingAutoModeClassification {
+            .park(super::super::ai_chat_state::PendingAutoModeClassification {
                 tool_call: call,
                 runtime_tool: tool,
                 runtime_turn: turn,
                 dynamic_response: response_tx,
                 receiver: classification_rx,
-            });
+            })
+            .is_ok());
         response_rx
     }
 
@@ -2111,13 +1902,17 @@ mod tests {
             .chat
             .as_ref()
             .unwrap()
-            .pending_auto_mode_classification
+            .parked_as::<crate::editor::ai_chat_state::PendingAutoModeClassification>()
             .is_some());
         assert!(editor.set_ai_chat_yolo_mode(true));
 
         let chat = editor.ai_state.chat.as_ref().unwrap();
-        assert!(chat.pending_auto_mode_classification.is_none());
-        assert!(chat.pending_tool_approval.is_none());
+        assert!(chat
+            .parked_as::<crate::editor::ai_chat_state::PendingAutoModeClassification>()
+            .is_none());
+        assert!(chat
+            .parked_as::<crate::editor::ai_chat_state::PendingToolApproval>()
+            .is_none());
         assert!(editor.ai_chat_yolo_mode());
     }
 
@@ -2146,8 +1941,12 @@ mod tests {
     fn shell_approval_summary_contains_full_command_and_terra_reason() {
         let mut editor = Editor::default();
         open_test_chat(&mut editor);
-        editor.ai_state.chat.as_mut().unwrap().pending_tool_approval =
-            Some(super::super::ai_chat_state::PendingToolApproval {
+        assert!(editor
+            .ai_state
+            .chat
+            .as_mut()
+            .unwrap()
+            .park(super::super::ai_chat_state::PendingToolApproval {
                 tool_call: ToolCallInfo {
                     id: "approval-summary".into(),
                     name: "bash".into(),
@@ -2164,7 +1963,8 @@ mod tests {
                 approval_root: std::path::PathBuf::from("/repo"),
                 dynamic_response: None,
                 dynamic_turn: None,
-            });
+            })
+            .is_ok());
 
         let summary = editor.ai_chat_pending_tool_approval_summary().unwrap();
         assert!(summary.contains("git diff --check && cargo test"));

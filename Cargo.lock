@@ -4350,7 +4350,6 @@ dependencies = [
  "clap",
  "crossterm",
  "dirs 5.0.1",
- "flate2",
  "futures",
  "git2",
  "ignore",
@@ -4380,7 +4379,6 @@ dependencies = [
  "shellexpand",
  "streaming-iterator",
  "sysinfo",
- "tar",
  "tauri",
  "tauri-build",
  "tempfile",
@@ -4390,7 +4388,6 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "which 6.0.3",
- "zip",
 ]
 
 [[package]]
@@ -4426,6 +4423,7 @@ dependencies = [
  "nix 0.29.0",
  "notify",
  "nucleo",
+ "open",
  "prometheus",
  "rand 0.8.7",
  "regex",
@@ -4441,6 +4439,7 @@ dependencies = [
  "similar",
  "streaming-iterator",
  "sysinfo",
+ "tar",
  "tempfile",
  "tokio",
  "toml 0.8.23",
@@ -4479,6 +4478,7 @@ dependencies = [
  "unicode-width",
  "url",
  "which 6.0.3",
+ "zip",
 ]
 
 [[package]]

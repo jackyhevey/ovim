@@ -1984,7 +1984,7 @@ async fn completed_bash_tool_batch_does_not_block_editor_polling() {
         .chat
         .as_ref()
         .unwrap()
-        .pending_shell_execution
+        .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
         .is_some()
     {
         editor.poll_pending_ai_chat_job();
@@ -2038,19 +2038,21 @@ async fn batch_shell_unknown_outcome_clears_waiting_and_closes_tool_calls() {
     drop(result_tx);
     let task = tokio::spawn(async {});
     if let Some(chat) = editor.ai_state.chat.as_mut() {
-        chat.pending_shell_execution = Some(super::super::ai_chat_state::PendingShellExecution {
-            tool_call: shell_call,
-            continuation: super::super::ai_chat_state::ToolExecutionContinuation::Batch {
-                runtime_tool: None,
-                runtime_turn: None,
-                remaining_tool_calls: vec![follow_up],
-                model_name: "test".into(),
-            },
-            receiver: result_rx,
-            progress: tokio::sync::mpsc::unbounded_channel().1,
-            task,
-            kill: std::sync::Arc::new(super::super::ai_chat_state::ShellKillHandle::default()),
-        });
+        assert!(chat
+            .park(super::super::ai_chat_state::PendingShellExecution {
+                tool_call: shell_call,
+                continuation: super::super::ai_chat_state::ToolExecutionContinuation::Batch {
+                    runtime_tool: None,
+                    runtime_turn: None,
+                    remaining_tool_calls: vec![follow_up],
+                    model_name: "test".into(),
+                },
+                receiver: result_rx,
+                progress: tokio::sync::mpsc::unbounded_channel().1,
+                task,
+                kill: std::sync::Arc::new(super::super::ai_chat_state::ShellKillHandle::default()),
+            })
+            .is_ok());
         chat.waiting = true;
     }
 
@@ -2061,7 +2063,9 @@ async fn batch_shell_unknown_outcome_clears_waiting_and_closes_tool_calls() {
         !chat.waiting,
         "unknown batch shell outcome must not re-arm the waiting spinner"
     );
-    assert!(chat.pending_shell_execution.is_none());
+    assert!(chat
+        .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
+        .is_none());
     assert!(chat.pending_job.is_none());
     assert!(!editor.ai_chat_has_pending_work());
 
@@ -2125,14 +2129,14 @@ async fn run_batch_shell_to_completion(yolo: bool) -> String {
             .chat
             .as_ref()
             .unwrap()
-            .pending_tool_approval
+            .parked_as::<crate::editor::ai_chat_state::PendingToolApproval>()
             .is_some());
         assert!(editor
             .ai_state
             .chat
             .as_ref()
             .unwrap()
-            .pending_shell_execution
+            .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
             .is_none());
         assert!(editor.ai_chat_resolve_pending_tool_approval(true, false));
     }
@@ -2142,9 +2146,9 @@ async fn run_batch_shell_to_completion(yolo: bool) -> String {
             .chat
             .as_ref()
             .unwrap()
-            .pending_shell_execution
+            .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
             .is_some(),
-        "batch shell must park on pending_shell_execution"
+        "batch shell must park on a shell execution"
     );
     assert!(
         started.elapsed() < std::time::Duration::from_millis(500),
@@ -2157,7 +2161,7 @@ async fn run_batch_shell_to_completion(yolo: bool) -> String {
         .chat
         .as_ref()
         .unwrap()
-        .pending_shell_execution
+        .parked_as::<crate::editor::ai_chat_state::PendingShellExecution>()
         .is_some()
     {
         editor.poll_pending_ai_chat_job();

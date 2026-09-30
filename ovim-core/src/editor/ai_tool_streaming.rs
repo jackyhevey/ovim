@@ -410,29 +410,7 @@ impl Editor {
                 branch_generation,
                 steer_tx,
             });
-            chat.pending_tool_approval = None;
-            chat.pending_auto_mode_classification = None;
-            if let Some(pending) = chat.pending_shell_execution.take() {
-                // Aborting a started `spawn_blocking` task does not stop it; the
-                // command itself must be killed or it keeps mutating the
-                // workspace after the UI has moved on.
-                pending.kill.cancel();
-                pending.task.abort();
-                // Retire the transcript too, exactly as the user-cancel path
-                // does. Skipping this leaves the row rendering as `running` for
-                // the rest of the session and keeps its retained output out of
-                // the LRU, so eviction can never reclaim it.
-                chat.retire_shell_transcript(
-                    &pending.tool_call.id,
-                    super::ai_chat_state::ShellTranscriptPhase::Interrupted,
-                );
-            }
-            if let Some(pending) = chat.pending_background_tool.take() {
-                pending.task.abort();
-            }
-            if let Some(pending) = chat.pending_subagent_control.take() {
-                pending.task.abort();
-            }
+            chat.abandon_parked_tool();
             chat.streaming_content = Some(String::new());
             chat.streaming_thinking = None;
             chat.streaming_provider_state.clear();
@@ -567,26 +545,7 @@ impl Editor {
             chat.waiting = false;
             chat.external_agent = None;
             chat.pending_job = None;
-            chat.pending_tool_approval = None;
-            chat.pending_auto_mode_classification = None;
-            if let Some(pending) = chat.pending_shell_execution.take() {
-                // Aborting a started `spawn_blocking` task does not stop it; the
-                // command itself must be killed or it keeps mutating the
-                // workspace after the UI has moved on.
-                pending.kill.cancel();
-                pending.task.abort();
-                // Retire the transcript too, exactly as the user-cancel path
-                // does. Skipping this leaves the row rendering as `running` for
-                // the rest of the session and keeps its retained output out of
-                // the LRU, so eviction can never reclaim it.
-                chat.retire_shell_transcript(
-                    &pending.tool_call.id,
-                    super::ai_chat_state::ShellTranscriptPhase::Interrupted,
-                );
-            }
-            if let Some(pending) = chat.pending_background_tool.take() {
-                pending.task.abort();
-            }
+            chat.abandon_parked_tool();
             chat.streaming_content = None;
             chat.streaming_thinking = None;
             chat.streaming_provider_state.clear();
@@ -968,26 +927,28 @@ mod tests {
             );
             transcript.phase = ShellTranscriptPhase::Running;
             chat.shell_transcripts.insert(call.id.clone(), transcript);
-            chat.pending_shell_execution = Some(PendingShellExecution {
-                tool_call: call.clone(),
-                continuation: ToolExecutionContinuation::Batch {
-                    runtime_tool: None,
-                    runtime_turn: None,
-                    remaining_tool_calls: Vec::new(),
-                    model_name: "test-model".into(),
-                },
-                receiver: result_rx,
-                progress: progress_rx,
-                task,
-                kill: kill.clone(),
-            });
+            assert!(chat
+                .park(PendingShellExecution {
+                    tool_call: call.clone(),
+                    continuation: ToolExecutionContinuation::Batch {
+                        runtime_tool: None,
+                        runtime_turn: None,
+                        remaining_tool_calls: Vec::new(),
+                        model_name: "test-model".into(),
+                    },
+                    receiver: result_rx,
+                    progress: progress_rx,
+                    task,
+                    kill: kill.clone(),
+                })
+                .is_ok());
         }
 
         editor.clear_streaming_state();
 
         let chat = editor.ai_state.chat.as_ref().expect("chat");
         assert!(
-            chat.pending_shell_execution.is_none(),
+            chat.parked().is_none(),
             "the pending execution should have been taken"
         );
         let transcript = chat

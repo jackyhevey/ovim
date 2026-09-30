@@ -93,7 +93,15 @@ async fn a_test_run_streams_both_pipes_and_reports_success() {
     assert!(run.lines.iter().any(|l| l == "to-out"), "{:?}", run.lines);
     assert!(run.lines.iter().any(|l| l == "to-err"), "{:?}", run.lines);
     assert!(editor.test_panel().open);
-    assert_eq!(editor.last_make_output().unwrap().trim(), "to-out\nto-err");
+    // The two pipes are read concurrently, so their relative order is not defined.
+    let mut output: Vec<_> = editor
+        .last_make_output()
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    output.sort();
+    assert_eq!(output, ["to-err", "to-out"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]

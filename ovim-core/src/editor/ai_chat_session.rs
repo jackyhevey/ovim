@@ -299,11 +299,9 @@ impl Editor {
             if self.ai_chat_has_pending_tool_approval() {
                 self.ai_chat_resolve_pending_tool_approval(true, false);
             }
-            let pending_classifier = self
-                .ai_state
-                .chat
-                .as_mut()
-                .and_then(|chat| chat.pending_auto_mode_classification.take());
+            let pending_classifier = self.ai_state.chat.as_mut().and_then(|chat| {
+                chat.take_parked_as::<super::ai_chat_state::PendingAutoModeClassification>()
+            });
             if let Some(pending) = pending_classifier {
                 self.execute_dynamic_tool_after_policy(
                     pending.runtime_turn,
@@ -349,7 +347,10 @@ impl Editor {
         self.ai_state
             .chat
             .as_ref()
-            .map(|c| c.pending_tool_approval.is_some())
+            .map(|c| {
+                c.parked_as::<super::ai_chat_state::PendingToolApproval>()
+                    .is_some()
+            })
             .unwrap_or(false)
     }
 
@@ -384,7 +385,7 @@ impl Editor {
             .ai_state
             .chat
             .as_ref()
-            .and_then(|c| c.pending_tool_approval.as_ref())?;
+            .and_then(|c| c.parked_as::<super::ai_chat_state::PendingToolApproval>())?;
         if pending.tool_call.name == "bash" {
             let command = pending
                 .tool_call

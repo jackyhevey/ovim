@@ -1,7 +1,7 @@
 mod helpers;
 
 use helpers::EditorTest;
-use ovim::frontend::{process_editor_tick, FrontendChannels};
+use ovim::frontend::TickState;
 use ovim_core::language_catalog::{DynamicLanguageSpec, DynamicLspSpec, RegistrationOwner};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ use std::time::Duration;
 /// the shared frontend tick, so a blocked startup fails before that release.
 struct StartupSession {
     test: EditorTest,
-    channels: FrontendChannels,
+    channels: TickState,
     dir: tempfile::TempDir,
 }
 
@@ -57,15 +57,15 @@ impl StartupSession {
         test.editor.request_lsp_init();
         Self {
             test,
-            channels: FrontendChannels::new(),
+            channels: TickState::new(),
             dir,
         }
     }
 
     async fn tick(&mut self) {
-        tokio::time::timeout(
+        let _report = tokio::time::timeout(
             Duration::from_secs(1),
-            process_editor_tick(&mut self.test.editor, &mut self.channels),
+            self.test.editor.tick(&mut self.channels),
         )
         .await
         .expect("LSP startup blocked the input/render tick");
@@ -341,7 +341,7 @@ async fn cancelled_startup_reaps_its_process_and_can_be_retried() {
     let pid = Pid::from_raw(initialization["peerPid"].as_i64().unwrap() as i32);
 
     // Closing the frontend aborts its pending startup without a server response.
-    session.channels = FrontendChannels::new();
+    session.channels = TickState::new();
     tokio::time::timeout(Duration::from_secs(5), async {
         while kill(pid, None).is_ok() {
             tokio::time::sleep(Duration::from_millis(10)).await;
