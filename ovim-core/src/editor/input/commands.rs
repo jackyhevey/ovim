@@ -1,19 +1,8 @@
 use crate::command_result::CommandResult;
-use crate::edit::Edit;
 use crate::editor::path_completion::extract_path_from_command;
-use crate::editor::{CursorPos, Editor, Mode};
-use crate::unicode::{CharCol, GraphemeCol};
+use crate::editor::{Editor, Mode};
 use crate::{KeyCode, KeyEvent};
 use anyhow::Result;
-
-mod pattern;
-mod range;
-mod shell;
-
-use pattern::{handle_global_command, handle_substitute_command};
-pub use range::parse_range;
-use range::{parse_range_endpoint_with_status, parse_range_with_status};
-use shell::{handle_read_shell_command, handle_shell_command, handle_write_to_command};
 
 /// Handles input in Command mode
 pub fn handle_command_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()> {
@@ -147,15 +136,6 @@ pub fn handle_command_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<(
         _ => {}
     }
     Ok(())
-}
-
-fn expand_tilde_in_path(path: &str) -> std::path::PathBuf {
-    if path == "~" || path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
-            return home.join(path.trim_start_matches("~/"));
-        }
-    }
-    std::path::PathBuf::from(path)
 }
 
 /// Updates the path completion popup based on current command line content.
@@ -420,50 +400,6 @@ fn accept_selected_into_command_line(editor: &mut Editor) {
     }
 }
 
-/// Finds the byte index where the command name begins — the end of the leading
-/// `[range]` prefix. The prefix may include mark addresses (`'a`, `'<`, `'>`),
-/// whose following letter must NOT be mistaken for the command name. Skipping
-/// the char after each `'` keeps `:'a,'bd` parsing as range `'a,'b` + command
-/// `d` rather than range `'` + command `a,'bd`. Returns None when the whole
-/// string is a bare range with no command.
-fn command_name_start(command: &str) -> Option<usize> {
-    let mut chars = command.char_indices();
-    while let Some((idx, ch)) = chars.next() {
-        if ch == '\'' {
-            // Mark address: consume the mark-name char that follows.
-            chars.next();
-            continue;
-        }
-        if ch.is_alphabetic() {
-            return Some(idx);
-        }
-    }
-    None
-}
-
-/// Extracts the destination address of a `:copy`/`:t` or `:move`/`:m` command
-/// from the command portion, accepting both the spaced (`t 3`) and the unspaced
-/// (`t3`, `t0`, `t.`) Vim forms. Returns `None` when `cmd_part` isn't this
-/// command — a trailing letter (`tabnew`, `marks`) is rejected so it doesn't get
-/// mistaken for a copy/move to a mark.
-fn parse_copy_move_dest<'a>(cmd_part: &'a str, long: &str, short: &str) -> Option<&'a str> {
-    for word in [long, short] {
-        if let Some(rest) = cmd_part.strip_prefix(word) {
-            if rest.is_empty() {
-                return Some("");
-            }
-            let first = rest.chars().next().unwrap();
-            if first.is_whitespace()
-                || first.is_ascii_digit()
-                || matches!(first, '.' | '$' | '\'' | '+' | '-' | '/' | '?')
-            {
-                return Some(rest.trim());
-            }
-        }
-    }
-    None
-}
-
 /// Executes a command string directly (used for API/Lua commands)
 pub fn execute_command_string(editor: &mut Editor, command: &str) -> Result<()> {
     editor.with_execution_scope(|editor| execute_command_impl(editor, command))
@@ -484,6 +420,11 @@ pub fn execute_command_string_api(editor: &mut Editor, command: &str) -> Command
 }
 
 fn execute_command_string_api_inner(editor: &mut Editor, command: &str) -> CommandResult {
+    let result = execute_command_string_api_legacy(editor, command);
+    crate::commands::run_queued_without_terminal(editor, result)
+}
+
+fn execute_command_string_api_legacy(editor: &mut Editor, command: &str) -> CommandResult {
     use crate::command_result::{err, ok, ok_silent};
 
     let command = command.trim();
@@ -509,9 +450,6 @@ fn execute_command_string_api_inner(editor: &mut Editor, command: &str) -> Comma
     editor.set_status_message(String::new());
     match execute_command_string(editor, command) {
         Ok(()) => {
-            if editor.take_pending_terminal_session().is_some() {
-                return err("Interactive terminal sessions require the TUI frontend");
-            }
             let status = editor.status_message().trim().to_string();
             if status.is_empty() {
                 ok_silent()
@@ -621,8 +559,10 @@ fn split_after_substitute(command: &str) -> Option<(&str, &str)> {
 /// false positives on commands like `:e files/foo | set number`.
 fn command_owns_bar(command: &str) -> bool {
     let trimmed = command.trim();
-    if parse_terminal_session(trimmed).is_some() || parse_quickfix_do(trimmed).is_some() {
-        return true;
+    if let Ok(parsed) = crate::commands::parse(trimmed) {
+        if parsed.next.is_none() {
+            return true;
+        }
     }
     // Skip past range prefix: digits, commas, %, ., $, ', <, >, +, -, spaces
     let cmd = trimmed.trim_start_matches(|c: char| c.is_ascii_digit() || ",%.$ '<>+-".contains(c));
@@ -636,137 +576,11 @@ fn command_owns_bar(command: &str) -> bool {
         || cmd.starts_with("v/")
 }
 
-/// `:cdo {cmd}` / `:cfdo {cmd}`: returns `(per_file, cmd)`. The command owns the
-/// rest of the line, so `:cfdo %s/a/b/g | update` chains inside each entry.
-fn parse_quickfix_do(command: &str) -> Option<(bool, &str)> {
-    let (name, rest) = command.split_once(char::is_whitespace)?;
-    match name {
-        "cdo" => Some((false, rest.trim())),
-        "cfdo" => Some((true, rest.trim())),
-        _ => None,
-    }
-}
-
-/// Runs `inner` for every quickfix entry (`:cdo`) or the first entry of every
-/// distinct file (`:cfdo`), jumping there first. Stops at the first error like
-/// vim, and reports how far it got.
-fn run_quickfix_do(editor: &mut Editor, per_file: bool, inner: &str) -> Result<()> {
-    let name = if per_file { "cfdo" } else { "cdo" };
-    if inner.is_empty() {
-        editor.set_status_message("E471: Argument required".to_string());
-        return Ok(());
-    }
-    let entries: Vec<(usize, crate::editor::QuickfixEntry)> = {
-        let list = editor.quickfix_list();
-        let mut seen = std::collections::HashSet::new();
-        list.entries()
-            .iter()
-            .cloned()
-            .enumerate()
-            .filter(|(_, entry)| {
-                !per_file
-                    || entry
-                        .filename
-                        .as_ref()
-                        .is_some_and(|file| seen.insert(file.clone()))
-            })
-            .filter(|(_, entry)| entry.filename.is_some())
-            .collect()
-    };
-    if entries.is_empty() {
-        editor.set_status_message("E42: No Errors".to_string());
-        return Ok(());
-    }
-    let total = entries.len();
-    let mut done = 0;
-    for (index, entry) in entries {
-        editor.quickfix_list_mut().set_selected(index);
-        if let CommandResult::Error(error) = crate::commands::jump_to_quickfix_entry(editor, &entry)
-        {
-            editor.set_status_message(format!("{name}: {}", error.error));
-            return Ok(());
-        }
-        editor.set_status_message(String::new());
-        execute_command_impl(editor, inner)?;
-        done += 1;
-        let status = editor.status_message().trim().to_string();
-        if is_vim_error_status(&status) {
-            editor.set_status_message(format!(
-                "{name}: stopped at entry {} of {total}: {status}",
-                index + 1
-            ));
-            return Ok(());
-        }
-    }
-    editor.set_status_message(format!(
-        "{name}: ran on {done} {}",
-        if per_file { "file(s)" } else { "entr(ies)" }
-    ));
-    Ok(())
-}
-
-/// Parse commands that request an interactive shell owned by the active
-/// frontend. `:term` is the conventional abbreviation; `:shell` exposes the
-/// same external-session behavior without pretending this is an embedded
-/// terminal buffer.
-fn parse_terminal_session(command: &str) -> Option<Option<String>> {
-    for name in ["terminal", "term", "shell"] {
-        if command == name {
-            return Some(None);
-        }
-        if let Some(rest) = command.strip_prefix(name) {
-            if rest.starts_with(char::is_whitespace) {
-                let command = rest.trim();
-                return Some((!command.is_empty()).then(|| command.to_string()));
-            }
-        }
-    }
-    None
-}
-
 /// Execute a single command (no chaining)
 fn execute_command_single(editor: &mut Editor, command: &str) -> Result<()> {
     // Update the : register with the command
     editor.registers_mut().set_last_command(command.to_string());
 
-    if let Some((per_file, inner)) = parse_quickfix_do(command) {
-        return run_quickfix_do(editor, per_file, inner);
-    }
-
-    if let Some(command) = parse_terminal_session(command) {
-        editor.build.pending_terminal_session =
-            Some(crate::editor::PendingTerminalSession { command });
-        return Ok(());
-    }
-
-    // Intercept plain :!cmd in TUI mode — queue for the event loop so it
-    // runs with full terminal access (outside alternate screen).
-    // Filter commands (:range!cmd) and :r/:w !cmd are NOT intercepted here;
-    // they're handled below by the standard command flow.
-    if let Some(shell_cmd) = command.strip_prefix('!') {
-        use super::shell_expansion::expand_shell_command;
-        let shell_cmd = shell_cmd.trim();
-        let cmd = if shell_cmd.is_empty() {
-            // Bare :! — repeat last
-            match editor.build.last_shell_command.clone() {
-                Some(last) => last,
-                None => {
-                    editor.set_status_message("No previous shell command".to_string());
-                    return Ok(());
-                }
-            }
-        } else {
-            let current_file = editor.buffer().file_path().unwrap_or("").to_string();
-            let alternate_file = editor.registers().get(Some('#'));
-            expand_shell_command(shell_cmd, &current_file, &alternate_file)
-        };
-        editor.build.last_shell_command = Some(cmd.clone());
-        editor.build.pending_shell_command =
-            Some(crate::editor::PendingShellCommand { command: cmd });
-        return Ok(());
-    }
-
-    // First, try to delegate to the top-level commands module which has all the standard commands
     let response = crate::commands::execute_command(editor, command);
     match response {
         CommandResult::Success(success_resp) => {
@@ -794,571 +608,41 @@ fn execute_command_single(editor: &mut Editor, command: &str) -> Result<()> {
         }
     }
 
-    // If we reach here, it's an unknown command - try custom input-specific handling
-
-    // Handle :w !cmd (write to command stdin) - must be checked before range parsing
-    // Note: :w! is force write (handled above), :w !cmd (with space) writes to command stdin
-    if let Some(write_cmd) = command
-        .strip_prefix("w !")
-        .or_else(|| command.strip_prefix("write !"))
+    // Check if it's a :b <n> or :buffer <n> command
+    if let Some(buffer_num_str) = command
+        .strip_prefix("b ")
+        .or_else(|| command.strip_prefix("buffer "))
     {
-        return handle_write_to_command(editor, "", write_cmd.trim());
-    }
-
-    // Handle range + w !cmd (e.g., :'<,'>w !pbcopy)
-    // This requires checking if the command ends with "w !..." pattern after a range
-    if command.contains("w !") || command.contains("write !") {
-        // Find where 'w !' or 'write !' starts
-        if let Some(pos) = command.find("w !").or_else(|| command.find("write !")) {
-            let range_str = &command[..pos];
-            let shell_cmd = if command[pos..].starts_with("write !") {
-                &command[pos + 7..]
-            } else {
-                &command[pos + 3..]
-            };
-            return handle_write_to_command(editor, range_str.trim(), shell_cmd.trim());
-        }
-    }
-
-    // Handle :r !cmd (read from command) - must be checked before range parsing
-    // Note: This is different from file reading :r filename
-    if let Some(read_cmd) = command
-        .strip_prefix("r !")
-        .or_else(|| command.strip_prefix("read !"))
-    {
-        return handle_read_shell_command(editor, "", read_cmd.trim());
-    }
-
-    // Handle range + r !cmd (e.g., :0r !cmd)
-    if command.contains("r !") || command.contains("read !") {
-        if let Some(pos) = command.find("r !").or_else(|| command.find("read !")) {
-            let range_str = &command[..pos];
-            let shell_cmd = if command[pos..].starts_with("read !") {
-                &command[pos + 6..]
-            } else {
-                &command[pos + 3..]
-            };
-            return handle_read_shell_command(editor, range_str.trim(), shell_cmd.trim());
-        }
-    }
-
-    // First, try to parse range from command
-    // Format: :[range]command
-    //
-    // BUG FIX: '!' is ambiguous:
-    // - Shell: :[range]!cmd  (the '!' starts the command)
-    // - Global invert: :g!/pat/cmd (the '!' is part of the command name)
-    //
-    // Treat '!' as the command separator only when it appears *before* the
-    // first alphabetic command character (i.e. it's the command itself).
-    let cmd_start = command_name_start(command);
-    let bang_split = command.find('!').and_then(|exclaim_idx| {
-        let is_shell_separator = match cmd_start {
-            None => true,
-            Some(alpha_idx) => exclaim_idx < alpha_idx,
-        };
-        if is_shell_separator {
-            Some(exclaim_idx)
-        } else {
-            None
-        }
-    });
-
-    let (range_str, cmd_part) = if let Some(exclaim_idx) = bang_split {
-        (&command[..exclaim_idx], &command[exclaim_idx..])
-    } else if let Some(cmd_start) = cmd_start {
-        (&command[..cmd_start], &command[cmd_start..])
-    } else {
-        (command, "")
-    };
-
-    // Handle goto line (just a number or range without command)
-    if cmd_part.is_empty() && !range_str.is_empty() {
-        if let Some((start_line, _end_line)) = parse_range_with_status(editor, range_str, None) {
-            editor
-                .buffer_mut()
-                .cursor_mut()
-                .set_position(start_line, GraphemeCol::ZERO);
-            return Ok(());
-        }
-    }
-
-    // Handle ranged delete command (:d or :delete)
-    if cmd_part == "d" || cmd_part == "delete" {
-        if let Some((start_line, end_line)) = parse_range_with_status(editor, range_str, None) {
-            let cursor_before = editor.cursor_position();
-            let (deleted_text, edits) = editor.buffer_mut().record(|buf| {
-                buf.delete_range(start_line, CharCol::ZERO, end_line + 1, CharCol::ZERO)
-            });
-
-            // Store in register (use delete, which updates " and numbered regs but not 0)
-            editor.delete_to_register(deleted_text.clone());
-
-            // Position cursor at start of deleted range
-            let new_cursor_line = start_line.min(editor.buffer().line_count().saturating_sub(1));
-            editor
-                .buffer_mut()
-                .cursor_mut()
-                .set_position(new_cursor_line, GraphemeCol::ZERO);
-
-            if !edits.is_empty() {
-                let cursor_after = CursorPos::new(new_cursor_line, GraphemeCol::ZERO);
-                editor.push_recorded_undo(edits, cursor_before, cursor_after);
+        if let Ok(buffer_num) = buffer_num_str.trim().parse::<usize>() {
+            if buffer_num > 0 {
+                // Convert from 1-indexed to 0-indexed
+                editor.switch_to_buffer(buffer_num - 1);
             }
-
-            return Ok(());
-        }
-    }
-
-    // Handle ranged yank command (:y or :yank)
-    if cmd_part == "y" || cmd_part == "yank" {
-        if let Some((start_line, end_line)) = parse_range_with_status(editor, range_str, None) {
-            // Re-add the terminator `line_text` strips so register content
-            // is linewise, matching `Y`/`yy`.
-            let mut yanked_text = String::new();
-            for line_idx in start_line..=end_line {
-                if let Some(line) = editor.buffer().line_text(line_idx) {
-                    yanked_text.push_str(&line);
-                    yanked_text.push('\n');
-                }
-            }
-
-            // Store in register (use yank, which updates " and 0)
-            editor.yank_to_register(yanked_text);
-
-            return Ok(());
-        }
-    }
-
-    // Handle :sort command (sorts lines in range)
-    if cmd_part == "sort" || cmd_part.starts_with("sort ") {
-        if !editor.buffer().is_modifiable() {
-            editor.report_unmodifiable();
-            return Ok(());
-        }
-
-        if let Some((start_line, end_line)) = parse_range_with_status(editor, range_str, None) {
-            let reverse = cmd_part.contains('!') || cmd_part.contains(" r");
-            let numeric = cmd_part.contains(" n");
-            let unique = cmd_part.contains(" u");
-            let ignore_case = cmd_part.contains(" i");
-
-            // Collect lines (terminator-stripped — we'll re-add `\n` when
-            // we serialize back to a single block below).
-            let mut lines: Vec<String> = (start_line..=end_line)
-                .filter_map(|idx| editor.buffer().line_text(idx).map(|l| l.into_owned()))
-                .collect();
-
-            // Bug 3 fix: Use stable sort (Vim's :sort is stable)
-            // sort_by is stable, but sort() uses unstable sort internally
-            if numeric {
-                // Sort by leading number
-                lines.sort_by(|a, b| {
-                    let num_a: i64 = a
-                        .split_whitespace()
-                        .next()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    let num_b: i64 = b
-                        .split_whitespace()
-                        .next()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    num_a.cmp(&num_b)
-                });
-            } else if ignore_case {
-                lines.sort_by_key(|a| a.to_lowercase());
-            } else {
-                // Use stable sort for consistency with Vim
-                lines.sort();
-            }
-
-            if reverse {
-                lines.reverse();
-            }
-
-            if unique {
-                lines.dedup();
-            }
-
-            // Replace the range with sorted lines
-            let cursor_before = CursorPos::new(
-                editor.buffer().cursor().line(),
-                editor.buffer().cursor().col(),
-            );
-
-            // Get the char positions for the range
-            let start_char = editor.buffer().rope().line_to_char(start_line);
-            let end_char = if end_line + 1 < editor.buffer().line_count() {
-                editor.buffer().rope().line_to_char(end_line + 1)
-            } else {
-                editor.buffer().rope().len_chars()
-            };
-
-            // Store original text for undo
-            let original_text = editor
-                .buffer()
-                .rope()
-                .slice(start_char..end_char)
-                .to_string();
-
-            // Remove old lines
-            editor.buffer_mut().rope_mut().remove(start_char..end_char);
-
-            // Insert sorted lines, re-adding the terminators we stripped.
-            let mut new_text = String::new();
-            for line in &lines {
-                new_text.push_str(line);
-                new_text.push('\n');
-            }
-            editor.buffer_mut().rope_mut().insert(start_char, &new_text);
-
-            let mut edits = Vec::new();
-            if !original_text.is_empty() {
-                edits.push(Edit::Delete {
-                    offset: start_char,
-                    text: original_text,
-                });
-            }
-            if !new_text.is_empty() {
-                edits.push(Edit::Insert {
-                    offset: start_char,
-                    text: new_text.clone(),
-                });
-            }
-            if !edits.is_empty() {
-                editor.push_recorded_undo(edits, cursor_before, cursor_before);
-            }
-
-            let sorted_count = lines.len();
-            editor.set_status_message(format!("{} lines sorted", sorted_count));
-            return Ok(());
-        }
-    }
-
-    // Handle :copy or :t command (copy lines to destination)
-    // Format: :[range]copy {address} or :[range]t {address}
-    // (helper `parse_copy_move_dest` accepts both the spaced and unspaced forms)
-    if let Some(dest_str) = parse_copy_move_dest(cmd_part, "copy", "t") {
-        if !editor.buffer().is_modifiable() {
-            editor.report_unmodifiable();
-            return Ok(());
-        }
-
-        if dest_str.is_empty() {
-            editor.set_status_message("E488: Trailing characters".to_string());
-            return Ok(());
-        }
-
-        if let Some((start_line, end_line)) = parse_range_with_status(editor, range_str, None) {
-            // Parse destination address
-            if let Some(dest_line) =
-                parse_range_endpoint_with_status(editor, dest_str, Some("E14: Invalid address"))
-            {
-                // Collect lines to copy. `line_text` strips terminators by
-                // design — re-add `\n` so the inserted block keeps its
-                // line breaks.
-                let mut text_to_insert = String::new();
-                let mut lines_copied = 0usize;
-                for idx in start_line..=end_line {
-                    if let Some(line) = editor.buffer().line_text(idx) {
-                        text_to_insert.push_str(&line);
-                        text_to_insert.push('\n');
-                        lines_copied += 1;
-                    }
-                }
-
-                // Insert after destination line. Address 0 is Vim's "before the
-                // first line" — insert at buffer index 0 rather than after line 1
-                // (both "0" and "1" parse to 0-based line 0, so disambiguate here).
-                let insert_line = if dest_str == "0" { 0 } else { dest_line + 1 };
-                let cursor_before = CursorPos::new(
-                    editor.buffer().cursor().line(),
-                    editor.buffer().cursor().col(),
-                );
-
-                let insert_char = if insert_line < editor.buffer().line_count() {
-                    editor.buffer().rope().line_to_char(insert_line)
-                } else {
-                    editor.buffer().rope().len_chars()
-                };
-
-                // Add newline if we're at end of file
-                let text =
-                    if insert_line >= editor.buffer().line_count() && !text_to_insert.is_empty() {
-                        format!("\n{}", text_to_insert)
-                    } else {
-                        text_to_insert.clone()
-                    };
-
-                editor.buffer_mut().rope_mut().insert(insert_char, &text);
-
-                // Move cursor to first copied line
-                let cursor_after = CursorPos::new(insert_line, GraphemeCol::ZERO);
-                editor
-                    .buffer_mut()
-                    .cursor_mut()
-                    .set_position(insert_line, GraphemeCol::ZERO);
-                editor.push_recorded_undo(
-                    vec![Edit::Insert {
-                        offset: insert_char,
-                        text: text.clone(),
-                    }],
-                    cursor_before,
-                    cursor_after,
-                );
-
-                let count = lines_copied;
-                editor.set_status_message(format!(
-                    "{} line{} copied",
-                    count,
-                    if count == 1 { "" } else { "s" }
-                ));
-                return Ok(());
-            }
-        }
-    }
-
-    // Handle :move or :m command (move lines to destination)
-    // Format: :[range]move {address} or :[range]m {address}
-    if let Some(dest_str) = parse_copy_move_dest(cmd_part, "move", "m") {
-        if !editor.buffer().is_modifiable() {
-            editor.report_unmodifiable();
-            return Ok(());
-        }
-
-        if dest_str.is_empty() {
-            editor.set_status_message("E488: Trailing characters".to_string());
-            return Ok(());
-        }
-
-        if let Some((start_line, end_line)) = parse_range_with_status(editor, range_str, None) {
-            // Parse destination address
-            if let Some(mut dest_line) =
-                parse_range_endpoint_with_status(editor, dest_str, Some("E14: Invalid address"))
-            {
-                // Bug 2 fix: Check for invalid moves (moving to within the range)
-                // Should be <= end_line to prevent moving into self
-                if dest_line >= start_line && dest_line <= end_line {
-                    editor.set_status_message("E134: Move lines into themselves".to_string());
-                    return Ok(());
-                }
-
-                let cursor_before = CursorPos::new(
-                    editor.buffer().cursor().line(),
-                    editor.buffer().cursor().col(),
-                );
-
-                // Collect lines to move. `line_text` strips terminators by
-                // design — re-add `\n` so the moved block keeps its line
-                // breaks.
-                let mut text_to_move = String::new();
-                let mut line_count = 0usize;
-                for idx in start_line..=end_line {
-                    if let Some(line) = editor.buffer().line_text(idx) {
-                        text_to_move.push_str(&line);
-                        text_to_move.push('\n');
-                        line_count += 1;
-                    }
-                }
-
-                // Delete the source lines
-                let start_char = editor.buffer().rope().line_to_char(start_line);
-                let end_char = if end_line + 1 < editor.buffer().line_count() {
-                    editor.buffer().rope().line_to_char(end_line + 1)
-                } else {
-                    editor.buffer().rope().len_chars()
-                };
-                editor.buffer_mut().rope_mut().remove(start_char..end_char);
-
-                // Adjust destination if it was after the deleted lines
-                if dest_line > end_line {
-                    dest_line = dest_line.saturating_sub(line_count);
-                }
-
-                // Insert after destination line; address 0 means the top of the
-                // file (Vim), so insert at index 0 instead of after line 1.
-                let insert_line = if dest_str == "0" { 0 } else { dest_line + 1 };
-                let insert_char = if insert_line < editor.buffer().line_count() {
-                    editor.buffer().rope().line_to_char(insert_line)
-                } else {
-                    editor.buffer().rope().len_chars()
-                };
-
-                // Add newline if we're at end of file
-                let text =
-                    if insert_line >= editor.buffer().line_count() && !text_to_move.is_empty() {
-                        format!("\n{}", text_to_move)
-                    } else {
-                        text_to_move.clone()
-                    };
-
-                editor.buffer_mut().rope_mut().insert(insert_char, &text);
-
-                // Move cursor to first moved line
-                let cursor_after = CursorPos::new(insert_line, GraphemeCol::ZERO);
-                editor
-                    .buffer_mut()
-                    .cursor_mut()
-                    .set_position(insert_line, GraphemeCol::ZERO);
-                let mut edits = Vec::new();
-                if !text_to_move.is_empty() {
-                    edits.push(Edit::Delete {
-                        offset: start_char,
-                        text: text_to_move,
-                    });
-                }
-                if !text.is_empty() {
-                    edits.push(Edit::Insert {
-                        offset: insert_char,
-                        text: text.clone(),
-                    });
-                }
-                if !edits.is_empty() {
-                    editor.push_recorded_undo(edits, cursor_before, cursor_after);
-                }
-
-                editor.set_status_message(format!(
-                    "{} line{} moved",
-                    line_count,
-                    if line_count == 1 { "" } else { "s" }
-                ));
-                return Ok(());
-            }
-        }
-    }
-
-    // Handle commands with arguments
-    if command.starts_with("w ") || command.starts_with("write ") {
-        // :w <filename> or :write <filename> - save as
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        if parts.len() >= 2 {
-            let old_path = editor.buffer().file_path().map(|s| s.to_string());
-            let filename = parts[1..].join(" ");
-            editor.buffer_mut().save_as(&filename)?;
-            let new_path = editor.buffer().file_path().map(|s| s.to_string());
-            editor.handle_file_path_transition_after_save(old_path, new_path);
-            if editor.options.blame {
-                editor.buffer_mut().load_git_blame();
-            }
-            editor.mark_saved();
-            editor.mark_buffer_saved();
         }
         return Ok(());
     }
 
-    // Handle :global and :vglobal commands (:g/pattern/command, :v/pattern/command),
-    // including when prefixed by a range (:rangeg/...).
-    if cmd_part.starts_with("g/") || cmd_part.starts_with("g!/") || cmd_part.starts_with("v/") {
-        let range = if range_str.trim().is_empty() {
-            // Vim's :global defaults to the entire buffer, not the current line.
-            None
-        } else {
-            match parse_range_with_status(editor, range_str, Some("E14: Invalid address")) {
-                Some(r) => Some(r),
-                None => return Ok(()),
-            }
-        };
-
-        handle_global_command(editor, cmd_part, range)?;
-        return Ok(());
-    }
-
-    // Handle substitute command (:s, :%s, :'<,'>s)
-    // Only treat as substitute when the command part starts with `s/`.
-    if cmd_part.starts_with("s/") {
-        handle_substitute_command(editor, range_str, cmd_part)?;
-        return Ok(());
-    }
-
-    // Handle range-prefixed shell commands (:.!cmd, :%!cmd, :1,5!cmd)
-    // Plain :!cmd is intercepted at the top of execute_command_single.
-    if let Some(shell_cmd) = cmd_part.strip_prefix('!') {
-        let shell_cmd = shell_cmd.trim();
-        if !shell_cmd.is_empty() {
-            handle_shell_command(editor, range_str, shell_cmd)?;
-            return Ok(());
-        }
-    }
-
-    // Only handle custom input-specific commands here.
-    // Standard commands are now delegated to the top-level commands module.
+    // Check if it's a :colorscheme <name> or :colo <name> command
+    if let Some(scheme_name) = command
+        .strip_prefix("colorscheme ")
+        .or_else(|| command.strip_prefix("colo "))
     {
-        // Check if it's a :r or :read command
-        if let Some(target) = command
-            .strip_prefix("r ")
-            .or_else(|| command.strip_prefix("read "))
-        {
-            let target = target.trim();
-            if !target.is_empty() {
-                if let Some(shell_cmd) = target.strip_prefix('!') {
-                    // :r !cmd - read output from shell command
-                    handle_read_shell_command(editor, range_str, shell_cmd.trim())?;
-                } else {
-                    // :r filename - read file contents
-                    let expanded_target = expand_tilde_in_path(target);
-                    let display_target = expanded_target.to_string_lossy().to_string();
-                    match std::fs::read_to_string(&expanded_target) {
-                        Ok(contents) => {
-                            // Insert contents at current cursor position
-                            let cursor = editor.buffer().cursor();
-                            let line = cursor.line() + 1; // Insert after current line
-                            editor
-                                .buffer_mut()
-                                .insert_text_at(line, CharCol::ZERO, &contents);
-                            editor.set_status_message(format!(
-                                "Read {} lines from {}",
-                                contents.lines().count(),
-                                display_target
-                            ));
-                        }
-                        Err(e) => {
-                            editor.set_status_message(format!("Error reading file: {}", e));
-                        }
-                    }
-                }
+        match editor.set_color_scheme(scheme_name.trim()) {
+            Ok(_) => {
+                let message = format!("Color scheme set to '{}'", scheme_name.trim());
+                editor.set_status_message(message);
             }
-            return Ok(());
-        }
-
-        // Check if it's a :b <n> or :buffer <n> command
-        if let Some(buffer_num_str) = command
-            .strip_prefix("b ")
-            .or_else(|| command.strip_prefix("buffer "))
-        {
-            if let Ok(buffer_num) = buffer_num_str.trim().parse::<usize>() {
-                if buffer_num > 0 {
-                    // Convert from 1-indexed to 0-indexed
-                    editor.switch_to_buffer(buffer_num - 1);
-                }
+            Err(e) => {
+                let available = editor.list_color_schemes().join(", ");
+                let message = format!("{}. Available schemes: {}", e, available);
+                editor.set_status_message(message);
             }
-            return Ok(());
         }
-
-        // Check if it's a :colorscheme <name> or :colo <name> command
-        if let Some(scheme_name) = command
-            .strip_prefix("colorscheme ")
-            .or_else(|| command.strip_prefix("colo "))
-        {
-            match editor.set_color_scheme(scheme_name.trim()) {
-                Ok(_) => {
-                    let message = format!("Color scheme set to '{}'", scheme_name.trim());
-                    editor.set_status_message(message);
-                }
-                Err(e) => {
-                    let available = editor.list_color_schemes().join(", ");
-                    let message = format!("{}. Available schemes: {}", e, available);
-                    editor.set_status_message(message);
-                }
-            }
-        } else if editor.status_message().is_empty() {
-            // Truly unrecognized ex-command (no handler set a status). Report it
-            // the way Vim does (E492) so the user gets feedback on typos instead
-            // of silence, and so the headless API can surface it as an error.
-            // Guarded on an empty status so a recognized command that failed and
-            // already set its own error (e.g. E20 from `:copy 'z`) isn't clobbered.
-            editor.set_status_message(format!("E492: Not an editor command: {}", command));
-        }
+    } else if editor.status_message().is_empty() {
+        // Truly unrecognized ex-command (no handler set a status). Report it
+        // the way Vim does (E492) so the user gets feedback on typos instead
+        // of silence, and so the headless API can surface it as an error.
+        editor.set_status_message(format!("E492: Not an editor command: {}", command));
     }
 
     Ok(())

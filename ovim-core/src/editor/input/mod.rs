@@ -537,8 +537,54 @@ impl InputHandler {
         editor.with_execution_scope(|editor| commands::handle_command_mode(editor, key_event))
     }
 
-    /// Wrapper to call commands module's parse_range
-    pub fn parse_range_wrapper(editor: &Editor, range_str: &str) -> Option<(usize, usize)> {
-        commands::parse_range(editor, range_str)
+    /// Type `keys` as if in Normal mode, for `:normal`. Each character is
+    /// one key (`\x1b` is <Esc>, `\r`/`\n` <Enter>, `\t` <Tab>). An
+    /// unfinished command or mode is ended with <Esc>, as vim does.
+    /// `remap` is false for `:normal!`.
+    pub(crate) fn type_normal_keys(editor: &mut Editor, keys: &str, remap: bool) -> Result<()> {
+        if editor.mode() != Mode::Normal {
+            Self::handle_key_event_internal(
+                editor,
+                KeyEvent::new(KeyCode::Esc, Modifiers::NONE),
+                false,
+                false,
+                0,
+            )?;
+        }
+        for ch in keys.chars() {
+            let code = match ch {
+                '\x1b' => KeyCode::Esc,
+                '\r' | '\n' => KeyCode::Enter,
+                '\t' => KeyCode::Tab,
+                '\x08' | '\x7f' => KeyCode::Backspace,
+                ch => KeyCode::Char(ch),
+            };
+            Self::handle_key_event_internal(
+                editor,
+                KeyEvent::new(code, Modifiers::NONE),
+                remap,
+                false,
+                0,
+            )?;
+        }
+        // Leave whatever the keys started: an operator waiting for a motion,
+        // Insert mode, a half-typed command line.
+        for _ in 0..3 {
+            let pending = editor.pending_operator().is_some()
+                || editor.pending_command().is_some()
+                || !matches!(editor.input_state(), InputState::Normal);
+            if editor.mode() == Mode::Normal && !pending {
+                break;
+            }
+            Self::handle_key_event_internal(
+                editor,
+                KeyEvent::new(KeyCode::Esc, Modifiers::NONE),
+                false,
+                false,
+                0,
+            )?;
+        }
+        editor.mark_dirty();
+        Ok(())
     }
 }

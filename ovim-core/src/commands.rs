@@ -1,111 +1,37 @@
-//! Command execution for ex commands (:w, :q, etc.)
+//! Ex commands: one parser ([`parse`]), one table ([`table`]) and one
+//! dispatcher ([`execute_command`]) behind every entry point — the `:`
+//! prompt, keymaps, Lua, the headless API and the GUI.
+
+mod contexts;
+mod edit;
+mod files;
+mod parse;
+mod pattern;
+mod quickfix;
+mod range;
+mod shell;
+mod table;
+
+pub(crate) use parse::{parse, ParseError, ParsedCmd};
+use range::LineRange;
 
 use crate::command_result::{err, ok, ok_silent, CommandResult};
 use crate::editor::Editor;
 use crate::editor::QuickfixEntry;
 use crate::unicode::GraphemeCol;
+use contexts::BufferKind;
+use files::{expand_tilde, save_buffer, SaveOpts};
+use table::{ExCommand, RangePolicy};
 
-/// Expands ~ to home directory in file paths
-///
-/// Returns an error if the path starts with ~ but the home directory cannot be determined.
-fn expand_tilde(path: &str) -> Result<std::path::PathBuf, String> {
-    if path.starts_with("~/") {
-        if let Some(home) = dirs::home_dir() {
-            let expanded = format!("{}{}", home.display(), &path[1..]);
-            return Ok(std::path::PathBuf::from(expanded));
-        } else {
-            return Err("Could not determine home directory".to_string());
-        }
-    } else if path == "~" {
-        if let Some(home) = dirs::home_dir() {
-            return Ok(home);
-        } else {
-            return Err("Could not determine home directory".to_string());
-        }
-    }
-    Ok(std::path::PathBuf::from(path))
-}
-
-/// Options for the `save_buffer` helper.
-struct SaveOpts<'a> {
-    /// Path to save to (None = use buffer's current path).
-    path: Option<&'a str>,
-    /// Skip the read-only check and clear the flag after save.
-    force: bool,
-    /// Quit the editor after a successful save.
-    quit_after: bool,
-}
-
-/// Common save-and-mark logic shared by :w, :w!, :wq, :wq!, and :w <file>.
-fn save_buffer(editor: &mut Editor, opts: SaveOpts<'_>) -> CommandResult {
-    if !opts.force && editor.buffer().is_read_only() {
-        return err("E45: 'readonly' option is set (add ! to override)");
-    }
-
-    let resolved = match opts.path {
-        Some(raw) => match expand_tilde(raw) {
-            Ok(p) => p.to_string_lossy().to_string(),
-            Err(e) => return err(format!("Failed to expand path '{}': {}", raw, e)),
-        },
-        None => match editor.buffer().file_path().map(|s| s.to_string()) {
-            Some(p) => p,
-            None => return err("No file name"),
-        },
-    };
-
-    let old_path = editor.buffer().file_path().map(|s| s.to_string());
-
-    // Do not silently overwrite changes made by another process. Save-as to a
-    // different file remains valid, and the bang variants are the explicit
-    // escape hatch when the user intentionally wants the in-memory copy to win.
-    let targets_current_file = old_path.as_deref().is_some_and(|current| {
-        let current = std::path::Path::new(current);
-        let resolved = std::path::Path::new(&resolved);
-        current == resolved
-            || match (current.canonicalize(), resolved.canonicalize()) {
-                (Ok(current), Ok(resolved)) => current == resolved,
-                _ => false,
-            }
-    });
-    if !opts.force && targets_current_file && editor.buffer().file_mtime().is_some() {
-        match editor.buffer().check_external_modification() {
-            Ok(true) => return err("E211: File changed since editing started (add ! to override)"),
-            Ok(false) => {}
-            Err(error) => return err(format!("Failed to check file before saving: {error}")),
-        }
-    }
-
-    match editor.buffer_mut().save_as(&resolved) {
-        Ok(_) => {
-            let new_path = editor.buffer().file_path().map(|s| s.to_string());
-            editor.handle_file_path_transition_after_save(old_path, new_path);
-            // Git refresh runs on a background thread to avoid blocking the UI.
-            editor.spawn_git_refresh(&resolved, editor.options.blame);
-            if opts.force {
-                editor.buffer_mut().set_read_only(false);
-            }
-            editor.mark_saved();
-            editor.mark_buffer_saved();
-
-            if opts.quit_after {
-                editor.quit();
-                return ok("Saved and quitting");
-            }
-
-            let saved_path = editor
-                .buffer()
-                .file_path()
-                .map(|p| p.to_string())
-                .unwrap_or(resolved);
-            let line_count = editor.buffer().rope().len_lines();
-            let char_count = editor.buffer().rope().len_chars();
-            ok(format!(
-                "\"{}\" {}L, {}C written",
-                saved_path, line_count, char_count
-            ))
-        }
-        Err(e) => err(format!("Failed to save: {}", e)),
-    }
+/// One command as its handler sees it.
+pub(crate) struct Ex<'a> {
+    pub command: &'static ExCommand,
+    pub bang: bool,
+    pub args: &'a str,
+    /// The typed range, or the command's default; `None` when it takes none.
+    pub range: Option<LineRange>,
+    /// Whether a range was typed (`:r` vs `:0r`, `:!cmd` vs `:.!filter`).
+    pub explicit_range: bool,
 }
 
 /// Write all modified buffers (:wa / :wall).
@@ -222,12 +148,106 @@ pub fn jump_to_quickfix_entry(editor: &mut Editor, entry: &QuickfixEntry) -> Com
     }
 }
 
-/// Execute a command (e.g., :w, :q, :tabnew)
+/// Execute an ex command line (`:w`, `:2,4d`, `:%s/a/b/ | update`, ...).
 pub fn execute_command(editor: &mut Editor, command: &str) -> CommandResult {
-    editor.with_execution_scope(|editor| execute_command_inner(editor, command))
+    editor.with_execution_scope(|editor| run_line(editor, command))
 }
 
-fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
+/// Run the commands of `line` in order. An error stops the rest of the line
+/// (vim); otherwise the last message is the result.
+pub(crate) fn run_line(editor: &mut Editor, line: &str) -> CommandResult {
+    let mut rest = line;
+    let mut result = ok_silent();
+    loop {
+        let text = rest.trim();
+        if text.is_empty() {
+            return result;
+        }
+        let parsed = match parse(text) {
+            Ok(parsed) => parsed,
+            Err(ParseError::Unknown) => return legacy_execute(editor, text),
+            Err(error) => return err(error.message(text)),
+        };
+        let outcome = run_parsed(editor, &parsed);
+        match &outcome {
+            CommandResult::Error(_) => return outcome,
+            CommandResult::Success(success) if success.message.is_some() => result = outcome,
+            CommandResult::Success(_) => {}
+        }
+        match parsed.next {
+            Some(next) => rest = next,
+            None => return result,
+        }
+    }
+}
+
+/// Gate on the buffer kind, resolve the range and run the handler.
+fn run_parsed(editor: &mut Editor, parsed: &ParsedCmd) -> CommandResult {
+    let command = parsed.command;
+    let kind = BufferKind::of(editor);
+    if let Some(lifecycle) = command.lifecycle {
+        if let Some(result) = contexts::finish_special(editor, kind, lifecycle, parsed.bang) {
+            return result;
+        }
+    }
+    if !command.contexts.allows(kind) {
+        return err(kind.refusal());
+    }
+    let last = range::last_line(editor);
+    let range = match (&parsed.range, command.range) {
+        (Some(_), RangePolicy::None) => return err("E481: No range allowed"),
+        (Some(spec), policy) => match range::eval_range(editor, spec) {
+            Ok(range) if policy == RangePolicy::Goto => Some(range),
+            Ok(range) if range.end > last => return err("E16: Invalid range"),
+            // Line 0 means "above the first line" only where that makes sense.
+            Ok(range) if policy == RangePolicy::LineOrZero => Some(range),
+            Ok(range) => Some(LineRange {
+                start: range.start.max(1),
+                end: range.end.max(1),
+            }),
+            Err(message) => return err(message),
+        },
+        (None, RangePolicy::None | RangePolicy::Goto) => None,
+        (None, RangePolicy::Line | RangePolicy::LineOrZero) => {
+            Some(LineRange::line(range::cursor_line(editor)))
+        }
+        (None, RangePolicy::Whole) => Some(LineRange {
+            start: 1,
+            end: last,
+        }),
+    };
+    let ex = Ex {
+        command,
+        bang: parsed.bang,
+        args: parsed.args,
+        range,
+        explicit_range: parsed.range.is_some(),
+    };
+    if command.args == table::ArgKind::None && !ex.args.is_empty() {
+        return err(format!("E488: Trailing characters: {}", ex.args));
+    }
+    (command.handler)(editor, &ex)
+}
+
+/// For callers without a terminal (the API): run a queued `:!cmd` with
+/// captured output and refuse a queued `:terminal`.
+pub(crate) fn run_queued_without_terminal(
+    editor: &mut Editor,
+    result: CommandResult,
+) -> CommandResult {
+    if let Some(shell) = editor.take_pending_shell_command() {
+        if let CommandResult::Error(_) = result {
+            return result;
+        }
+        return shell::run_captured(editor, &shell.command);
+    }
+    if editor.take_pending_terminal_session().is_some() {
+        return err("Interactive terminal sessions require the TUI frontend");
+    }
+    result
+}
+
+fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
     if editor.is_pseudocode_buffer() {
         if matches!(
             command,
@@ -313,14 +333,6 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
     }
 
     match command {
-        "u" | "undo" => {
-            editor.undo();
-            ok_silent()
-        }
-        "red" | "redo" => {
-            editor.redo();
-            ok_silent()
-        }
         "browser" => match editor.request_browser_start() {
             Ok(()) => ok("Opening browser"),
             Err(error) => err(format!("Could not open embedded browser: {error}")),
@@ -389,22 +401,6 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
         }
         "wa" | "wall" | "writeall" => write_all_buffers(editor, false),
         "wa!" | "wall!" | "writeall!" => write_all_buffers(editor, true),
-        "w" | "write" => save_buffer(
-            editor,
-            SaveOpts {
-                path: None,
-                force: false,
-                quit_after: false,
-            },
-        ),
-        "w!" | "write!" => save_buffer(
-            editor,
-            SaveOpts {
-                path: None,
-                force: true,
-                quit_after: false,
-            },
-        ),
         "wq" => save_buffer(
             editor,
             SaveOpts {
@@ -983,13 +979,6 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
                 ok(display.join("\n"))
             }
         }
-        "j" | "join" => {
-            // Join current line with the next line
-            if let Err(e) = editor.buffer_mut().join_lines(1) {
-                return err(format!("Failed to join lines: {}", e));
-            }
-            crate::command_result::ok_silent()
-        }
         "recover" | "rec" => {
             // Recover buffer content from swap file
             if !editor.buffer().has_swap_file() {
@@ -1122,19 +1111,6 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
                         }
                     }
                 }
-            // Handle :w <filename>
-            } else if let Some(raw_filename) = command
-                .strip_prefix("w ")
-                .or_else(|| command.strip_prefix("write "))
-            {
-                save_buffer(
-                    editor,
-                    SaveOpts {
-                        path: Some(raw_filename),
-                        force: false,
-                        quit_after: false,
-                    },
-                )
             // Handle :lua <code>
             } else if let Some(_code) = command.strip_prefix("lua ") {
                 #[cfg(feature = "lua")]
@@ -1494,23 +1470,6 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
                 // A live session hears about it right away.
                 editor.dap_manager_mut().request_breakpoint_sync();
                 ok("Conditional breakpoint set")
-            // Handle :! shell command execution
-            //
-            // This path runs the command inline and returns output — used by the
-            // headless API. The TUI input handler intercepts :! before reaching
-            // here and queues it for terminal-aware execution instead.
-            } else if let Some(shell_cmd) = command.strip_prefix('!') {
-                let shell_cmd = shell_cmd.trim();
-                if shell_cmd.is_empty() {
-                    if let Some(last) = editor.build.last_shell_command.clone() {
-                        execute_shell_command_with_expansion(editor, &last)
-                    } else {
-                        err("No previous shell command")
-                    }
-                } else {
-                    editor.build.last_shell_command = Some(shell_cmd.to_string());
-                    execute_shell_command_with_expansion(editor, shell_cmd)
-                }
             // Handle :file / :f — show file info (like Ctrl-G in vim)
             } else if command == "f" || command == "file" {
                 let name = editor
@@ -1562,16 +1521,6 @@ fn execute_command_inner(editor: &mut Editor, command: &str) -> CommandResult {
             } else if command == "LspInstall" || command == "LspManager" {
                 editor.open_lsp_manager();
                 crate::command_result::ok_silent()
-            // Handle line number command (e.g., :48 to go to line 48)
-            } else if let Ok(line_num) = command.parse::<usize>() {
-                let target_line = line_num.saturating_sub(1); // 1-indexed to 0-indexed
-                let max_line = editor.buffer().line_count().saturating_sub(1);
-                let final_line = target_line.min(max_line);
-                editor
-                    .buffer_mut()
-                    .cursor_mut()
-                    .set_position(final_line, GraphemeCol::ZERO);
-                ok(format!("Line {}", line_num))
             } else {
                 err(format!("Not an editor command: {}", command))
             }
@@ -1998,73 +1947,6 @@ fn parse_file_line_col(location: &str, message: &str) -> Option<QuickfixEntry> {
         ));
     }
     None
-}
-
-/// Execute a shell command with % and # expansion, and return the output
-fn execute_shell_command_with_expansion(editor: &mut Editor, cmd: &str) -> CommandResult {
-    use crate::editor::shell_expansion::expand_shell_command;
-
-    // Get current and alternate file for expansion
-    let current_file = editor.buffer().file_path().unwrap_or("").to_string();
-    let alternate_file = editor.registers().get(Some('#'));
-
-    // Expand % and # in the command
-    let expanded_cmd = expand_shell_command(cmd, &current_file, &alternate_file);
-
-    editor.with_external_effects(|_| execute_shell_command(&expanded_cmd))
-}
-
-/// Execute a shell command and return the output
-fn execute_shell_command(cmd: &str) -> CommandResult {
-    use std::process::Command;
-
-    // Determine the shell to use based on platform
-    #[cfg(target_os = "windows")]
-    let (shell, shell_arg) = ("cmd", "/C");
-    #[cfg(not(target_os = "windows"))]
-    let (shell, shell_arg) = ("sh", "-c");
-
-    match Command::new(shell).arg(shell_arg).arg(cmd).output() {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-
-            let mut result = String::new();
-
-            if !stdout.is_empty() {
-                result.push_str(&stdout);
-            }
-            if !stderr.is_empty() {
-                if !result.is_empty() {
-                    result.push('\n');
-                }
-                result.push_str(&stderr);
-            }
-
-            // Trim trailing newlines for cleaner display
-            let result = result.trim_end().to_string();
-
-            if output.status.success() {
-                if result.is_empty() {
-                    ok("Command executed successfully")
-                } else {
-                    ok(result)
-                }
-            } else {
-                let exit_code = output
-                    .status
-                    .code()
-                    .map(|c| format!(" (exit code {})", c))
-                    .unwrap_or_default();
-                if result.is_empty() {
-                    err(format!("Command failed{}", exit_code))
-                } else {
-                    err(format!("{}\n\nCommand failed{}", result, exit_code))
-                }
-            }
-        }
-        Err(e) => err(format!("Failed to execute command: {}", e)),
-    }
 }
 
 /// Handle :session start/stop/list commands

@@ -169,8 +169,10 @@ fn cases() -> Vec<Case> {
         // ---- undo / redo ----
         case("u").keys("x").after("c1\nb2\n  a3\n  d4a\n"),
         case("undo").keys("x").after("c1\nb2\n  a3\n  d4a\n"),
-        // vim: :un[do] — ovim accepts only the listed spellings.
-        case("un").keys("x").unknown().after("c1\nb\n  a3\n  d4a\n"),
+        // vim: :un[do].
+        case("un").keys("x").after("c1\nb2\n  a3\n  d4a\n"),
+        case("u!").keys("x").fails("E477: No ! allowed"),
+        case("2u").fails("E481: No range allowed"),
         case("red").keys("xu").after("c1\nb\n  a3\n  d4a\n"),
         case("redo").keys("xu").after("c1\nb\n  a3\n  d4a\n"),
         // ---- quit ----
@@ -227,13 +229,29 @@ fn cases() -> Vec<Case> {
             .file()
             .ok(Has("other.txt\" 5L, 17C written"))
             .check(|editor| {
-                // vim: `:w other` writes a copy and keeps editing f.txt;
-                // ovim renames the buffer (that is `:saveas` in vim).
+                // vim: `:w other` writes a copy and keeps editing f.txt (it
+                // used to rename the buffer, which is `:saveas`).
                 match editor.buffer().file_path() {
-                    Some(path) if path.ends_with("other.txt") => Ok(()),
+                    Some(path) if path.ends_with("f.txt") => {
+                        let other = std::path::Path::new(path).with_file_name("other.txt");
+                        if std::fs::read_to_string(other).ok().as_deref()
+                            == Some("c1\nb2\n  a3\n  d4a\n")
+                        {
+                            Ok(())
+                        } else {
+                            Err("other.txt not written".into())
+                        }
+                    }
                     other => Err(format!("buffer path {other:?}")),
                 }
             }),
+        case("w {dir}/f.txt")
+            .file()
+            .keys("x")
+            .ok(Has("f.txt\" 5L, 16C written")),
+        case("2,3w {dir}/part.txt")
+            .file()
+            .fails("E140: Use ! to write partial buffer"),
         // vim: :sav[eas].
         case("saveas {dir}/other.txt")
             .file()
@@ -372,8 +390,11 @@ fn cases() -> Vec<Case> {
         // ---- join ----
         case("j").after("c1\nb2 a3\n  d4a\n"),
         case("join").after("c1\nb2 a3\n  d4a\n"),
-        // vim: `:2,3j` joins the range; `:j!` keeps whitespace.
-        case("2,3j").unknown(),
+        case("2,3j").after("c1\nb2 a3\n  d4a\n").cursor(1, 0),
+        case("1,2j").after("c1 b2\n  a3\n  d4a\n"),
+        case("j 3").after("c1\nb2 a3 d4a\n"),
+        // The last line has nothing to join (vim: no error).
+        case("4j").after("c1\nb2\n  a3\n  d4a\n"),
         // ---- set ----
         case("set nu").check(|editor| {
             editor
@@ -408,27 +429,35 @@ fn cases() -> Vec<Case> {
         case("mapclear"),
         case("nmapclear"),
         // ---- line addresses ----
-        case("3").is("Line 3").cursor(2, 0),
-        case("100").is("Line 100").cursor(3, 0),
-        case("0").is("Line 0").cursor(0, 0),
+        // vim prints nothing (the old dispatcher said "Line N").
+        case("3").cursor(2, 0),
+        case("100").cursor(3, 0),
+        case("0").cursor(0, 0),
         case("$").cursor(3, 0),
-        // Parsed as the line number 1: vim goes to line 3.
-        case("+1").is("Line 1").cursor(0, 0),
+        // Was parsed as the line number 1.
+        case("+1").cursor(2, 0),
         case("'a").keys("ggma").cursor(0, 0),
         case("'a").fails("E20: Mark not set"),
-        // vim: `.+1` is line 3.
-        case(".+1").unknown().cursor(1, 1),
+        case(".+1").cursor(2, 0),
+        case("/a3/").cursor(2, 0),
+        case("?c1?").cursor(0, 0),
+        case("/zz/").fails("E486: Pattern not found: zz"),
+        case("2;+1d").after("c1\n  d4a\n"),
+        case("1;/a/d").after("  d4a\n"),
+        case("$-1d").after("c1\nb2\n  d4a\n"),
         // ---- :d / :y ----
-        case("2,3d").after("c1\n  d4a\n").cursor(1, 0),
-        case("d").after("c1\n  a3\n  d4a\n").cursor(1, 0),
+        // vim: the cursor lands on the first non-blank.
+        case("2,3d").after("c1\n  d4a\n").cursor(1, 2),
+        case("d").after("c1\n  a3\n  d4a\n").cursor(1, 2),
         case("delete").after("c1\n  a3\n  d4a\n"),
-        // vim: the cursor lands on the first non-blank (column 2).
-        case("d").at(3, 0).after("c1\nb2\n  a3\n").cursor(2, 0),
-        // vim: :d[elete].
-        case("de").unknown(),
+        case("d").at(3, 0).after("c1\nb2\n  a3\n").cursor(2, 2),
+        case("de").after("c1\n  a3\n  d4a\n"),
         case("%d").after(""),
-        // vim: "E16: Invalid range"; ovim clamps to the last line.
-        case("10d").after("c1\nb2\n  a3\n"),
+        // Used to clamp to the last line.
+        case("10d")
+            .fails("E16: Invalid range")
+            .after("c1\nb2\n  a3\n  d4a\n"),
+        case("0d").after("b2\n  a3\n  d4a\n"),
         // vim prompts before swapping a backwards range; ovim swaps.
         case("4,2d").after("c1\n"),
         case("'a,'bd")
@@ -437,11 +466,18 @@ fn cases() -> Vec<Case> {
         case("'a,'bd")
             .keys("ggmajmb")
             .after("  a3\n  d4a\n")
-            .cursor(0, 0),
+            .cursor(0, 2),
         case("2,3d").check(|editor| register_is(editor, "b2\n  a3\n")),
-        // vim: `:d x` deletes into register x, `:3d 2` deletes two lines.
-        case("d x").unknown(),
-        case("3d 2").unknown(),
+        case("d x").check(|editor| {
+            let x = editor.registers().get(Some('x'));
+            (x == "b2\n")
+                .then_some(())
+                .ok_or(format!("register x {x:?}"))
+        }),
+        case("3d 2").after("c1\nb2\n"),
+        case("3d 9").after("c1\nb2\n"),
+        case("d 0").fails("E939: Positive count required"),
+        case("d x y").fails("E488: Trailing characters: y"),
         case("2,3y")
             .after("c1\nb2\n  a3\n  d4a\n")
             .cursor(1, 1)
@@ -449,18 +485,37 @@ fn cases() -> Vec<Case> {
         case("y").check(|editor| register_is(editor, "b2\n")),
         case("yank").check(|editor| register_is(editor, "b2\n")),
         case(".,+2y").check(|editor| register_is(editor, "b2\n  a3\n  d4a\n")),
-        // vim: `:y a` yanks into register a.
-        case("y a").unknown(),
+        case("y a").check(|editor| {
+            let a = editor.registers().get(Some('a'));
+            (a == "b2\n")
+                .then_some(())
+                .ok_or(format!("register a {a:?}"))
+        }),
         // ---- :sort ----
-        // vim: without a range :sort sorts the whole buffer.
+        // Used to sort only the cursor line.
         case("sort")
-            .is("1 lines sorted")
-            .after("c1\nb2\n  a3\n  d4a\n"),
+            .is("4 lines sorted")
+            .after("  a3\n  d4a\nb2\nc1\n")
+            .cursor(0, 2),
+        case("2,3sort")
+            .is("2 lines sorted")
+            .after("c1\n  a3\nb2\n  d4a\n"),
         case("%sort")
             .is("4 lines sorted")
             .after("  a3\n  d4a\nb2\nc1\n"),
-        // The bang is taken for a `:!` filter separator.
-        case("%sort!").unknown(),
+        // Used to be taken for a `:!` filter.
+        case("%sort!")
+            .is("4 lines sorted")
+            .after("c1\nb2\n  d4a\n  a3\n"),
+        case("sort n")
+            .is("5 lines sorted")
+            .text("x 10\nb\na 2\nB\n9")
+            .after("b\nB\na 2\n9\nx 10\n"),
+        case("sort iu")
+            .is("2 lines sorted")
+            .text("b\nB\na\nA\nb")
+            .after("a\nb\n"),
+        case("sort z").fails("E474: Invalid argument: z"),
         case("%sort u")
             .text("b\na\nb")
             .is("2 lines sorted")
@@ -469,8 +524,7 @@ fn cases() -> Vec<Case> {
             .text("10\n9\n100")
             .is("3 lines sorted")
             .after("9\n10\n100\n"),
-        // vim: :sor[t].
-        case("sor").unknown(),
+        case("sor").is("4 lines sorted"),
         // ---- :t / :copy / :m / :move ----
         case("1t3")
             .is("1 line copied")
@@ -479,9 +533,9 @@ fn cases() -> Vec<Case> {
         // vim: the cursor ends on the LAST copied line (5, not 4).
         case("1,2t$")
             .is("2 lines copied")
-            // vim: no blank line before the copy.
-            .after("c1\nb2\n  a3\n  d4a\n\nc1\nb2\n")
-            .cursor(4, 0),
+            // Used to add a blank line before the copy.
+            .after("c1\nb2\n  a3\n  d4a\nc1\nb2\n")
+            .cursor(5, 0),
         case("t0")
             .is("1 line copied")
             .after("b2\nc1\nb2\n  a3\n  d4a\n")
@@ -490,43 +544,55 @@ fn cases() -> Vec<Case> {
         case("t.")
             .is("1 line copied")
             .after("c1\nb2\nb2\n  a3\n  d4a\n"),
-        // vim: :co[py].
-        case("co 0").unknown(),
-        case("t").fails("E488: Trailing characters"),
+        case("co 0").is("1 line copied"),
+        case("2,3t.")
+            .is("2 lines copied")
+            .after("c1\nb2\nb2\n  a3\n  a3\n  d4a\n")
+            .cursor(3, 0),
+        case("t").fails("E16: Invalid range"),
+        case("1t9").fails("E16: Invalid range"),
         case("1t'z").fails("E20: Mark not set"),
         case("1tx").unknown(),
+        case("1t3 x").fails("E488: Trailing characters: x"),
         case("1m$")
             .is("1 line moved")
-            // vim: no blank line before the moved line.
-            .after("b2\n  a3\n  d4a\n\nc1\n")
+            .after("b2\n  a3\n  d4a\nc1\n")
             .cursor(3, 0),
         case("m0").is("1 line moved").after("b2\nc1\n  a3\n  d4a\n"),
         case("move 0")
             .is("1 line moved")
             .after("b2\nc1\n  a3\n  d4a\n"),
-        // vim: the cursor ends on the LAST moved line (3, not 2).
+        // vim: the cursor ends on the LAST moved line.
         case("1,2m3")
             .is("2 lines moved")
             .after("  a3\nc1\nb2\n  d4a\n")
-            .cursor(1, 0),
-        case("2,3m2").fails("E134: Move lines into themselves"),
-        // vim: :m[ove], so `:mo` is :move.
-        case("mo 0").unknown(),
+            .cursor(2, 0),
+        case("2,3m2").fails("E134: Cannot move a range of lines into itself"),
+        // vim: moving a block to its own end or just above itself is a no-op.
+        case("2,3m3")
+            .is("2 lines moved")
+            .after("c1\nb2\n  a3\n  d4a\n"),
+        case("2,3m1")
+            .is("2 lines moved")
+            .after("c1\nb2\n  a3\n  d4a\n"),
+        case("mo 0").is("1 line moved"),
         // ---- :s ----
-        case("s/b/X/").after("c1\nX2\n  a3\n  d4a\n").cursor(1, 1),
+        // vim: the cursor goes to the last substituted line.
+        case("s/b/X/").after("c1\nX2\n  a3\n  d4a\n").cursor(1, 0),
+        case("%s/a/X/").cursor(3, 2),
         case("%s/a/X/g").after("c1\nb2\n  X3\n  d4X\n"),
         case("2,3s/./Z/").after("c1\nZ2\nZ a3\n  d4a\n"),
         case("%s/zz/y/").fails("E486: Pattern not found: zz"),
         case("%s/zz/y/e"),
-        // A bad pattern is reported on the status line without an E-number,
-        // so the API reported it as success.
-        case("s/(/x/").is("Invalid regex pattern: ("),
+        // The API used to report this as success (no E-number).
+        case("s/(/x/").fails("Invalid regex pattern: ("),
         case("s//x/").fails("E35: No previous regular expression"),
-        // vim: `:s/b` replaces with nothing.
-        case("s/b").fails("E146: Invalid substitute syntax"),
-        // vim: :s[ubstitute] and any non-alphanumeric delimiter.
-        case("substitute/b/X/").unknown(),
-        case("s#b#X#").unknown(),
+        // vim: `:s/b` replaces with nothing (used to be E146).
+        case("s/b").after("c1\n2\n  a3\n  d4a\n"),
+        case("substitute/b/X/").after("c1\nX2\n  a3\n  d4a\n"),
+        case("s#b#X#").after("c1\nX2\n  a3\n  d4a\n"),
+        case("s").fails("E33: No previous substitute regular expression"),
+        case("sabc").fails("E492: Not an editor command: sabc"),
         case("%s/a\\/b/X/").text("a/b").after("X\n"),
         case("%s/b/X/|%s/c/Y/").after("Y1\nX2\n  a3\n  d4a\n"),
         case("%s/a/X/gc").ok(Starts("replace with X (2 matches)")),
@@ -553,12 +619,16 @@ fn cases() -> Vec<Case> {
             .text("a\nb\nc")
             .is("Deleted 2 line(s)")
             .after("a\n"),
-        case("g/zz/d").is("No matching lines found"),
-        case("g/(/d").is("Invalid regex pattern: ("),
-        // vim: :g accepts any ex command.
-        case("g/a/normal Ax").is("Unsupported global command: normal Ax"),
-        // vim: :g[lobal], :v[global].
-        case("global/a/d").unknown(),
+        // vim's messages; not errors.
+        case("g/zz/d").is("Pattern not found: zz"),
+        case("v/./d").is("Pattern found in every line: ."),
+        case("g/(/d").fails("Invalid regex pattern: ("),
+        case("g/a/normal Ax").after("c1\nb2\n  a3x\n  d4ax\n"),
+        case("g/b/normal dd").text("a\nb\nb\nc").after("a\nc\n"),
+        // vim: :g accepts any ex command; ovim runs :d, :y, :s, :p, :normal.
+        case("g/a/m0").fails("Unsupported global command: m0"),
+        case("global/a/d").is("Deleted 2 line(s)"),
+        case("g/b/d|3d").is("Deleted 1 line(s)"),
         // ---- shell ----
         // The API ran `:!cmd` inline and returned its output; the interactive
         // path queues it for the frontend.
@@ -582,15 +652,21 @@ fn cases() -> Vec<Case> {
             .is("1 line inserted")
             .after("c1\nb2\ninserted\n  a3\n  d4a\n")
             .cursor(2, 0),
-        // vim: `:0r` inserts above line 1.
+        // Used to insert below line 1.
         case("0r !echo top")
             .is("1 line inserted")
-            .after("c1\ntop\nb2\n  a3\n  d4a\n"),
+            .after("top\nc1\nb2\n  a3\n  d4a\n"),
+        case("$r !echo end")
+            .is("1 line inserted")
+            .text("a\nb")
+            .after("a\nb\nend\n"),
         // `:w !cmd` is not characterized here: the standard dispatcher takes
         // it for `:w {file}` and writes a file named "!cmd" into the working
         // directory, so the interactive pipe-to-command handler is dead code.
-        // vim: the range keeps its line breaks when piped.
-        case("2,3w !true").is("1 line written"),
+        // The range used to lose its line breaks when piped.
+        case("w !true").is("4 lines written"),
+        case("2,3w !cat").is("2 lines written: b2\n  a3"),
+        case("write !true").is("4 lines written"),
         case("terminal")
             .fails("Interactive terminal sessions require the TUI frontend")
             .interactive(Out::Silent),
@@ -601,8 +677,8 @@ fn cases() -> Vec<Case> {
             .fails("Interactive terminal sessions require the TUI frontend")
             .interactive(Out::Silent),
         case("terminally").unknown(),
-        // vim: "E484: Can't open file nosuch"; reported as success.
-        case("r /nonexistent/nosuch").ok(Starts("Error reading file")),
+        // Used to be "Error reading file" reported as success.
+        case("r /nonexistent/nosuch").fails("E484: Can't open file /nonexistent/nosuch"),
         case("r {dir}/f.txt")
             .file()
             .ok(Starts("Read 4 lines from"))
@@ -624,8 +700,7 @@ fn cases() -> Vec<Case> {
         case("clast").fails("Quickfix list is empty"),
         case("cdo s/a/b/").fails("E42: No Errors"),
         case("cfdo update").fails("E42: No Errors"),
-        // vim: "E471: Argument required".
-        case("cdo").unknown(),
+        case("cdo").fails("E471: Argument required"),
         case("grep").fails("E471: Argument required"),
         case("gr").fails("E471: Argument required"),
         case("vimgrep").fails("E471: Argument required"),
@@ -677,16 +752,21 @@ fn cases() -> Vec<Case> {
             "Could not open embedded browser: The embedded browser is unavailable in this frontend",
         ),
         // ---- :normal ----
-        // vim: :norm[al] {keys} runs normal-mode keys, per line with a range.
-        case("normal Ax").unknown(),
-        case("norm Ax").unknown(),
+        case("normal Ax").after("c1\nb2x\n  a3\n  d4a\n"),
+        case("norm Ax").after("c1\nb2x\n  a3\n  d4a\n"),
+        case("2,3normal ix").after("c1\nxb2\nx  a3\n  d4a\n"),
+        // An unfinished insert is ended as if <Esc> was typed.
+        case("normal ofoo").after("c1\nb2\nfoo\n  a3\n  d4a\n"),
+        case("normal! Ax").after("c1\nb2x\n  a3\n  d4a\n"),
+        case("normal").fails("E471: Argument required"),
         // ---- unknown / malformed ----
         case("foo").unknown(),
         case("Foo").unknown(),
         // vim: leading colons are skipped.
         case(":q").unknown(),
-        // vim: an empty command line does nothing.
-        case("").err(Starts("E492: Not an editor command:")),
+        // An empty command line does nothing (it used to be E492).
+        case(""),
+        case(":"),
     ]
 }
 
