@@ -30,42 +30,24 @@ impl Editor {
 
     /// Jumps to a mark (exact position with backtick)
     pub fn jump_to_mark(&mut self, name: char) -> bool {
-        // Special exact-position marks
-        match name {
-            // `.` - last change position
-            '.' => {
-                if let Some(change) = self.last_change() {
-                    let pos = change.cursor_after();
-                    self.buffer_mut()
-                        .cursor_mut()
-                        .set_position(pos.line, pos.col.saturating_sub(1));
-                    self.center_cursor_in_viewport();
-                    return true;
-                }
-            }
-            // `^ - last insert exit position (cursor-on-char semantics)
-            '^' => {
-                if let Some(change) = self.last_change() {
-                    let inserted = change.get_inserted_text();
-                    if !inserted.is_empty() {
-                        let pos = change.cursor_after();
-                        self.buffer_mut()
-                            .cursor_mut()
-                            .set_position(pos.line, pos.col.saturating_sub(1));
-                        self.center_cursor_in_viewport();
-                        return true;
-                    }
-                }
-
-                if let Some((line, col)) = self.editing.last_insert_position {
-                    self.buffer_mut()
-                        .cursor_mut()
-                        .set_position(line, GraphemeCol(col.saturating_sub(1)));
-                    self.center_cursor_in_viewport();
-                    return true;
-                }
-            }
-            _ => {}
+        // Special exact-position marks: `.` where the last change started
+        // (the newest changelist entry), `^` where Insert mode was last
+        // stopped. Both clamp to the cursor-on-char range like vim.
+        let special = match name {
+            '.' => self
+                .last_edit_position()
+                .map(|pos| (pos.line, pos.col.0)),
+            '^' => self.editing.last_insert_position,
+            _ => None,
+        };
+        if let Some((line, col)) = special {
+            let line = line.min(self.buffer().line_count().saturating_sub(1));
+            let col = clamp_grapheme_col(self.buffer(), line, col);
+            self.buffer_mut()
+                .cursor_mut()
+                .set_position(line, GraphemeCol(col));
+            self.center_cursor_in_viewport();
+            return true;
         }
 
         // Try local mark first (a-z)
