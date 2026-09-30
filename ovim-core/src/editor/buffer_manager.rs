@@ -617,13 +617,12 @@ impl Editor {
             return all_applied;
         }
 
-        // LSP-applied edits should be undoable but should not become dot-repeat
-        // templates, so we push directly to undo/redo stacks without touching
-        // last_change/last_repeat_action.
+        // LSP-applied edits are undoable but do not become the dot-repeat
+        // target: push_change leaves last_repeat_action alone.
         let change = Change::recorded(recorded_edits, cursor_before, cursor_after);
         {
             let cm = self.buffers[buffer_index].change_manager_mut();
-            cm.push_undo_change_preserving_repeat(change);
+            cm.push_change(change);
         }
 
         // Ensure the edited document is re-synced to LSP. We do NOT set

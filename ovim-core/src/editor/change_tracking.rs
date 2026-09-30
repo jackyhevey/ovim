@@ -86,12 +86,6 @@ impl Editor {
         f(self.buffer_mut())
     }
 
-    /// Pops the last change from the undo stack (without undoing it)
-    /// Used when replacing a change with a composite version
-    pub fn pop_last_change(&mut self) -> Option<Change> {
-        self.buffer_mut().change_manager_mut().pop_last_change()
-    }
-
     /// Undoes the last change.
     ///
     /// Surfaces an error toast if a `ResourceOp` snapshot restore fails
@@ -168,95 +162,63 @@ impl Editor {
         }
     }
 
-    /// Repeats the last change with proper cursor position tracking.
-    ///
-    /// Records cursor_before/cursor_after so undo after dot-repeat restores
-    /// the cursor to where the repeat happened, not the original change.
-    /// Buffer mutations are captured via `record()` so the undo entry uses
-    /// mechanical inverse edits rather than semantic replay.
+    /// Repeats the last change (`.`) by re-running its `RepeatAction` at the
+    /// cursor. The buffer mutations are captured via `record()` so undo uses
+    /// mechanical inverse edits and restores the cursor to where the repeat
+    /// happened.
     pub fn repeat_last_change(&mut self) {
         self.repeat_last_change_with_count(None);
     }
 
     pub fn repeat_last_change_with_count(&mut self, count: Option<usize>) {
-        // Try RepeatAction first (semantic repeat for Pattern B operations)
-        if let Some(action) = self.buffer().change_manager().last_repeat_action.clone() {
-            let action = if let Some(count) = count {
-                let action = action.with_count(count);
-                self.set_repeat_action(action.clone());
-                action
-            } else {
-                action
-            };
-            let register = self
-                .input
-                .pending_register
-                .take()
-                .or(self.buffer().change_manager().last_repeat_register);
-            // Paste repeat needs Editor-level access (registers), handle specially
-            match &action {
-                RepeatAction::PasteAfter { count } | RepeatAction::PasteBefore { count } => {
-                    self.input.pending_register = register;
-                    let count = *count;
-                    let is_after = matches!(action, RepeatAction::PasteAfter { .. });
-                    let _ = if is_after {
-                        crate::editor::input::helpers::paste_after(self, count)
-                    } else {
-                        crate::editor::input::helpers::paste_before(self, count)
-                    };
-                    return;
-                }
-                _ => {}
-            }
-
-            let original = self.buffer().rope().clone();
-            let (before, after, edits) = {
-                let buf = self.buffer_mut();
-                let before = CursorPos::new(buf.cursor().line(), buf.cursor().col());
-                let ((), edits) = buf.record(|b| {
-                    action.execute(b);
-                });
-                let after = CursorPos::new(buf.cursor().line(), buf.cursor().col());
-                (before, after, edits)
-            };
-
-            if !edits.is_empty() {
-                if let Some((text, register_type)) = action.deleted_register(&edits, &original) {
-                    self.input.pending_register = register;
-                    self.delete_to_register_with_type(text, register_type);
-                }
-                self.push_recorded_undo(edits, before, after);
-            }
+        let Some(action) = self.buffer().change_manager().last_repeat_action.clone() else {
             return;
+        };
+        let action = if let Some(count) = count {
+            let action = action.with_count(count);
+            self.set_repeat_action(action.clone());
+            action
+        } else {
+            action
+        };
+        let register = self
+            .input
+            .pending_register
+            .take()
+            .or(self.buffer().change_manager().last_repeat_register);
+        // Paste repeat needs Editor-level access (registers), handle specially
+        match &action {
+            RepeatAction::PasteAfter { count } | RepeatAction::PasteBefore { count } => {
+                self.input.pending_register = register;
+                let count = *count;
+                let is_after = matches!(action, RepeatAction::PasteAfter { .. });
+                let _ = if is_after {
+                    crate::editor::input::helpers::paste_after(self, count)
+                } else {
+                    crate::editor::input::helpers::paste_before(self, count)
+                };
+                return;
+            }
+            _ => {}
         }
 
-        // Fall back to Change-based repeat
-        if let Some(mut repeated) = self.buffer().change_manager().last_change().cloned() {
-            let (before, after, edits) = {
-                let buf = self.buffer_mut();
-                let before = CursorPos::new(buf.cursor().line(), buf.cursor().col());
+        let original = self.buffer().rope().clone();
+        let (before, after, edits) = {
+            let buf = self.buffer_mut();
+            let before = CursorPos::new(buf.cursor().line(), buf.cursor().col());
+            let ((), edits) = buf.record(|b| {
+                action.execute(b);
+            });
+            let after = CursorPos::new(buf.cursor().line(), buf.cursor().col());
+            (before, after, edits)
+        };
 
-                // Record the repeat's buffer mutations for mechanical undo.
-                let ((), edits) = buf.record(|b| {
-                    // Call repeat() BEFORE set_cursor_before() — repeat() uses the
-                    // original cursor_before to detect deletion direction (forward vs
-                    // backward). It also updates range/deleted_text so undo works.
-                    repeated.repeat(b);
-                });
-
-                let after = CursorPos::new(buf.cursor().line(), buf.cursor().col());
-                (before, after, edits)
-            };
-
-            if !edits.is_empty() {
-                // Push recorded undo (mechanical) — single `u` undoes the whole repeat.
-                self.push_recorded_undo(edits, before, after);
-
-                // Update repeat template positions for next repeat.
-                repeated.set_cursor_before(before);
-                repeated.set_cursor_after(after);
-                self.buffer_mut().change_manager_mut().last_change = Some(repeated);
+        if !edits.is_empty() {
+            if let Some((text, register_type)) = action.deleted_register(&edits, &original) {
+                self.input.pending_register = register;
+                self.delete_to_register_with_type(text, register_type);
             }
+            self.push_recorded_undo(edits, before, after);
         }
     }
 
@@ -294,7 +256,7 @@ impl Editor {
             Change::recorded(edits, cursor_before, cursor_after)
         };
         let cm = self.buffer_mut().change_manager_mut();
-        let token = cm.push_undo_change_preserving_repeat(change);
+        let token = cm.push_change(change);
         // Ensure LSP is notified of buffer changes — callers that use record()
         // directly instead of record_operation() were previously missing this.
         self.mark_buffer_modified();
@@ -307,11 +269,9 @@ impl Editor {
         self.buffer_mut().change_manager_mut().pop_by_token(token)
     }
 
-    /// Sets a semantic repeat action for dot-repeat (mutually exclusive with last_change).
+    /// Sets the semantic repeat action for dot-repeat.
     pub fn set_repeat_action(&mut self, action: RepeatAction) {
-        let cm = self.buffer_mut().change_manager_mut();
-        cm.last_repeat_action = Some(action);
-        cm.last_change = None; // Mutual exclusion: RepeatAction wins
+        self.buffer_mut().change_manager_mut().last_repeat_action = Some(action);
     }
 
     /// Returns the current cursor position (grapheme-space).

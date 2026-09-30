@@ -2235,11 +2235,6 @@ impl Editor {
         self.buffer_mut().change_manager_mut().set_entry_mode(mode);
     }
 
-    /// Adds a change to the change manager
-    pub fn add_change(&mut self, change: Change) {
-        self.buffer_mut().change_manager_mut().add_change(change);
-    }
-
     /// Finalizes the current insert-session change.
     ///
     /// Closes the stateful recording session and, if it produced edits,
@@ -2301,22 +2296,18 @@ impl Editor {
             ),
             None => Change::recorded(edits.clone(), cursor_before, cursor_after),
         };
-        let token = self
-            .buffer_mut()
-            .change_manager_mut()
-            .push_change_returning_token(change);
+        let token = self.buffer_mut().change_manager_mut().push_change(change);
 
-        // Install dot-repeat. push_change above cleared last_repeat_action;
-        // set InsertSession now.
-        if let Some(origin_offset) = origin {
-            let cm = self.buffer_mut().change_manager_mut();
-            cm.last_repeat_action = Some(RepeatAction::InsertSession {
-                count: 1,
-                entry_mode,
-                origin_offset,
-                edits,
-            });
-        }
+        // Install dot-repeat. Session edits always start at a recorded
+        // origin; without one there is nothing to re-anchor, so `.` must not
+        // keep repeating the command before this insert either.
+        let cm = self.buffer_mut().change_manager_mut();
+        cm.last_repeat_action = origin.map(|origin_offset| RepeatAction::InsertSession {
+            count: 1,
+            entry_mode,
+            origin_offset,
+            edits,
+        });
         Some(token)
     }
 
@@ -2465,11 +2456,6 @@ impl Editor {
     /// Clear last escape time
     pub fn clear_last_escape_time(&mut self) {
         self.ui_panels.last_escape_time = None;
-    }
-
-    /// Gets a reference to the last change
-    pub fn last_change(&self) -> Option<&Change> {
-        self.buffer().change_manager().last_change()
     }
 
     /// Jump to next diagnostic (]d).

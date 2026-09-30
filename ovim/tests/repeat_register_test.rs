@@ -62,6 +62,7 @@ fn dot_register_holds_the_text_of_the_last_insert() {
         ("iAB<Esc>ccXY<Esc>", "XY"),
         ("iAB<Esc>sXY<Esc>", "XY"),
         ("iAB<Esc>wdw", "AB"),
+        ("iAB<Esc>i<Esc>", ""),
         ("iAB<Esc>w<C-v>jIXY<Esc>", "XY"),
     ] {
         let mut test = EditorTest::new("abc def ghi\nabc def ghi");
