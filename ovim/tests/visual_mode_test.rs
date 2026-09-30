@@ -1315,3 +1315,27 @@ fn test_shift_v_switches_from_visual_to_visual_line() {
     test.press('V');
     test.assert_mode(Mode::VisualLine);
 }
+
+// nvim --clean: "  alpha beta" cursor on 'b', `vIX<Esc>` → "X  alpha beta",
+// cursor on X; `u` restores the line (the insert is one undoable change).
+#[test]
+fn test_v_I_inserts_at_line_start_as_one_change() {
+    let mut test = EditorTest::new("foo\n  alpha beta\nxdelta");
+    test.set_cursor(1, 8);
+    test.keys("vjIX<Esc>");
+    assert_eq!(test.buffer_content(), "foo\nX  alpha beta\nxdelta\n");
+    test.assert_cursor(1, 0);
+    test.keys("u");
+    assert_eq!(test.buffer_content(), "foo\n  alpha beta\nxdelta\n");
+}
+
+// nvim --clean: cursor on 'b' of "  alpha beta", `vlAX<Esc>` → "  alpha beXta".
+#[test]
+fn test_v_A_appends_after_selection_as_one_change() {
+    let mut test = EditorTest::new("  alpha beta");
+    test.set_cursor(0, 8);
+    test.keys("vlAX<Esc>");
+    assert_eq!(test.buffer_content(), "  alpha beXta\n");
+    test.keys("u");
+    assert_eq!(test.buffer_content(), "  alpha beta\n");
+}

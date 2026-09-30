@@ -734,16 +734,17 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
                     editor.start_change_building(cursor_before);
                     editor.set_mode(Mode::Insert);
                 }
-            } else {
-                // Regular visual mode - just enter insert at start of selection
-                if let Some(((start_line, start_col), _)) = editor.visual_selection() {
-                    editor
-                        .buffer_mut()
-                        .cursor_mut()
-                        .set_position(start_line, GraphemeCol(start_col));
-                    editor.clear_visual_start();
-                    editor.set_mode(Mode::Insert);
-                }
+            } else if let Some(((start_line, _), _)) = editor.visual_selection() {
+                // Char/line visual: vim makes `I` linewise, inserting at
+                // column 0 of the first selected line (nvim: `vjIX` puts X
+                // at the very start of the first line only).
+                editor
+                    .buffer_mut()
+                    .cursor_mut()
+                    .set_position(start_line, GraphemeCol::ZERO);
+                editor.clear_visual_start();
+                editor.start_change_building(editor.cursor_position());
+                editor.set_mode(Mode::Insert);
             }
         }
         KeyCode::Char('A') => {
@@ -784,16 +785,15 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
                     editor.start_change_building(cursor_before);
                     editor.set_mode(Mode::Insert);
                 }
-            } else {
-                // Regular visual mode - just enter insert at end of selection
-                if let Some((_, (end_line, end_col))) = editor.visual_selection() {
-                    editor
-                        .buffer_mut()
-                        .cursor_mut()
-                        .set_position(end_line, GraphemeCol(end_col + 1));
-                    editor.clear_visual_start();
-                    editor.set_mode(Mode::Insert);
-                }
+            } else if let Some((_, (end_line, end_col))) = editor.visual_selection() {
+                // Char/line visual: append after the end of the selection.
+                editor
+                    .buffer_mut()
+                    .cursor_mut()
+                    .set_position(end_line, GraphemeCol(end_col + 1));
+                editor.clear_visual_start();
+                editor.start_change_building(editor.cursor_position());
+                editor.set_mode(Mode::Insert);
             }
         }
         // Replace in visual mode (all visual variants)
