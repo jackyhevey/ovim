@@ -4,7 +4,7 @@
 //! g*, z*, Z*, "*, q*, @*, [*, ]*, W* (Ctrl-W)
 
 use crate::editor::input::helpers;
-use crate::editor::{CursorPos, Editor, Motions, Operator, PendingChangeRepeat};
+use crate::editor::{CursorPos, Editor, InputState, Motions, Operator, PendingChangeRepeat};
 use crate::mode::Mode;
 use crate::repeat_action::RepeatAction;
 use crate::unicode::{char_to_grapheme_col, grapheme_count, grapheme_to_char_col, GraphemeCol};
@@ -15,12 +15,13 @@ use anyhow::Result;
 ///
 /// Returns `Ok(true)` if the key was handled, `Ok(false)` otherwise.
 pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
-    let pending = match editor.pending_command() {
-        Some(p) => p,
-        None => return Ok(false),
+    let state = editor.input_state().clone();
+    let Some(pending) = state.prefix_key() else {
+        return Ok(false);
     };
-
-    editor.clear_pending_command();
+    // An operator reaches a prefix only as `dgn` / `cgN` (see operators.rs).
+    let operator = state.pending_operator();
+    editor.reset_input_state();
 
     match (pending, key_event.code) {
         // =====================================================================
@@ -101,18 +102,21 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             editor.clear_count();
         }
         ('g', KeyCode::Char('u')) => {
-            editor.set_pending_operator(Operator::Lowercase);
+            editor.set_input_state(InputState::OperatorPending {
+                operator: Operator::Lowercase,
+            });
         }
         ('g', KeyCode::Char('U')) => {
-            editor.set_pending_operator(Operator::Uppercase);
+            editor.set_input_state(InputState::OperatorPending {
+                operator: Operator::Uppercase,
+            });
         }
         ('g', KeyCode::Char('~')) => {
-            editor.set_pending_operator(Operator::ToggleCase);
+            editor.set_input_state(InputState::OperatorPending {
+                operator: Operator::ToggleCase,
+            });
         }
-        ('g', KeyCode::Char('r')) => {
-            // gr prefix for LSP commands
-            editor.set_pending_command('R');
-        }
+        ('g', KeyCode::Char('r')) => editor.set_input_state(InputState::LspPrefix),
         ('g', KeyCode::Char('i')) => {
             // gi - go to last insert position and enter insert mode
             if let Some((line, col)) = editor.editing.last_insert_position {
@@ -165,7 +169,7 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             editor.clear_count();
         }
         ('g', KeyCode::Char('\'')) => {
-            editor.set_input_state(crate::editor::InputState::AwaitingChar {
+            editor.set_input_state(InputState::AwaitingChar {
                 motion: crate::editor::CharMotion::JumpMarkLine,
                 operator: None,
             });
@@ -184,31 +188,16 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             editor.previous_tab();
             editor.clear_count();
         }
-        ('g', KeyCode::Char('n')) => {
-            // gn - select next search match
-            // Save pending operator before search_select_next, as set_mode() clears it
-            let saved_operator = editor.pending_operator();
-
-            if editor.search_select_next() {
-                // If we have a pending operator, apply it to the visual selection
-                if let Some(op) = saved_operator {
-                    apply_operator_to_visual_selection(editor, op)?;
-                    editor.clear_pending_operator();
-                }
-            }
-            editor.clear_count();
-        }
-        ('g', KeyCode::Char('N')) => {
-            // gN - select previous search match
-            // Save pending operator before search_select_prev, as set_mode() clears it
-            let saved_operator = editor.pending_operator();
-
-            if editor.search_select_prev() {
-                // If we have a pending operator, apply it to the visual selection
-                if let Some(op) = saved_operator {
-                    apply_operator_to_visual_selection(editor, op)?;
-                    editor.clear_pending_operator();
-                }
+        ('g', KeyCode::Char(key @ ('n' | 'N'))) => {
+            // gn / gN - select the next / previous search match, then apply
+            // a pending operator (dgn, cgN) to it. No match cancels.
+            let found = if key == 'n' {
+                editor.search_select_next()
+            } else {
+                editor.search_select_prev()
+            };
+            if let (true, Some(op)) = (found, operator) {
+                apply_operator_to_visual_selection(editor, op)?;
             }
             editor.clear_count();
         }
@@ -382,7 +371,9 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // =====================================================================
         ('z', KeyCode::Char(key)) if editor.fold_command(key) => {}
         ('z', KeyCode::Char('f')) => {
-            editor.set_pending_operator(Operator::Fold);
+            editor.set_input_state(InputState::OperatorPending {
+                operator: Operator::Fold,
+            });
         }
         ('z', KeyCode::Char('z')) => {
             // [count]zz — scroll cursor line (or line [count]) to center
@@ -820,7 +811,7 @@ mod tests {
             .buffer_mut()
             .cursor_mut()
             .set_position(0, GraphemeCol::ZERO);
-        editor.set_pending_command('g');
+        editor.set_input_state(InputState::GPrefix { operator: None });
 
         try_handle(
             &mut editor,
