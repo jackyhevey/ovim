@@ -1,145 +1,33 @@
-//! Project-level ex commands: replace in files, `:grep`.
-//!
-//! Kept out of `commands.rs` so that file does not keep growing. `try_handle`
-//! returns `None` for commands it does not own.
+//! Project-wide commands: replace in files, `:grep`, `:Problems`,
+//! `:Symbols`.
 
-use crate::command_result::{err, ok, CommandResult};
+use super::Ex;
+use crate::command_result::{err, ok, ok_silent, CommandResult};
 use crate::editor::{Editor, QuickfixEntry, QuickfixEntryType};
 use crate::project_search::{self, SearchOptions};
 use std::sync::atomic::AtomicBool;
 
-pub fn try_handle(editor: &mut Editor, command: &str) -> Option<CommandResult> {
-    let (name, args) = match command.split_once(char::is_whitespace) {
-        Some((name, args)) => (name, args.trim()),
-        None => (command, ""),
-    };
-    match name {
-        "SearchReplace" | "Sr" | "ReplaceInFiles" => Some(search_replace(editor, args)),
-        "ReplaceApply" => Some(replace_apply(editor)),
-        "ReplaceUndo" => Some(replace_undo(editor)),
-        "Recent" | "RecentFiles" => {
-            editor.open_recent_files_picker();
-            Some(crate::command_result::ok_silent())
+/// `:Problems [all|warnings|errors]` / `:Diagnostics`.
+pub(super) fn problems(editor: &mut Editor, ex: &Ex) -> CommandResult {
+    match crate::editor::problems::ProblemFilter::parse(ex.args) {
+        Some(filter) => {
+            editor.open_problems_picker(filter);
+            ok_silent()
         }
-        "Buffers" => {
-            editor.open_buffer_picker();
-            Some(crate::command_result::ok_silent())
-        }
-        "Problems" | "Diagnostics" => {
-            Some(match crate::editor::problems::ProblemFilter::parse(args) {
-                Some(filter) => {
-                    editor.open_problems_picker(filter);
-                    crate::command_result::ok_silent()
-                }
-                None => err("Problems: use all, warnings or errors"),
-            })
-        }
-        "Outline" | "DocumentSymbols" => {
-            editor.open_outline_picker();
-            Some(crate::command_result::ok_silent())
-        }
-        "Symbols" | "WorkspaceSymbols" => {
-            editor.open_workspace_symbol_picker();
-            if !args.is_empty() {
-                if let Some(picker) = editor.picker_mut() {
-                    picker.set_query(args.to_string());
-                    picker.mark_filter_pending();
-                }
-            }
-            Some(crate::command_result::ok_silent())
-        }
-        "GitStatus" | "Gstatus" => {
-            editor.open_git_status_picker();
-            Some(crate::command_result::ok_silent())
-        }
-        "GitStage" | "GitStageFile" => {
-            editor.git_stage_file();
-            Some(crate::command_result::ok_silent())
-        }
-        "GitUnstage" | "GitUnstageFile" => {
-            editor.git_unstage_file();
-            Some(crate::command_result::ok_silent())
-        }
-        "GitStageHunk" => {
-            editor.git_stage_hunk();
-            Some(crate::command_result::ok_silent())
-        }
-        "GitUnstageHunk" => {
-            editor.git_unstage_hunk();
-            Some(crate::command_result::ok_silent())
-        }
-        "GitStageAll" => {
-            editor.git_stage_all();
-            Some(crate::command_result::ok_silent())
-        }
-        "GitCommit" | "Gcommit" => {
-            editor.open_commit_message(false);
-            Some(crate::command_result::ok_silent())
-        }
-        "GitAmend" => {
-            editor.open_commit_message(true);
-            Some(crate::command_result::ok_silent())
-        }
-        "GitLog" | "GitFileLog" => {
-            editor.open_file_history_picker();
-            Some(crate::command_result::ok_silent())
-        }
-        "GitLogAll" => {
-            editor.open_repo_history_picker();
-            Some(crate::command_result::ok_silent())
-        }
-        "GitLineLog" | "GitLineHistory" => {
-            editor.open_line_history_picker();
-            Some(crate::command_result::ok_silent())
-        }
-        "GitDiffFile" if !args.is_empty() => Some(
-            match editor.git_show_file_diff(std::path::Path::new(args)) {
-                Ok(()) => crate::command_result::ok_silent(),
-                Err(error) => err(format!("GitDiffFile: {error:#}")),
-            },
-        ),
-        "GitEdit" if !args.is_empty() => Some(match editor.load_file(args) {
-            Ok(()) => crate::command_result::ok_silent(),
-            Err(error) => err(format!("Failed to open {args}: {error}")),
-        }),
-        "GitShow" if !args.is_empty() => {
-            let (oid, path) = match args.split_once(' ') {
-                Some((oid, path)) => (oid, Some(path.trim())),
-                None => (args, None),
-            };
-            Some(match editor.git_show_commit(oid, path) {
-                Ok(()) => crate::command_result::ok_silent(),
-                Err(error) => err(format!("GitShow: {error:#}")),
-            })
-        }
-        "ConflictNext" => {
-            editor.goto_conflict(true);
-            Some(crate::command_result::ok_silent())
-        }
-        "ConflictPrev" => {
-            editor.goto_conflict(false);
-            Some(crate::command_result::ok_silent())
-        }
-        "ConflictOurs" => {
-            editor.resolve_conflict(crate::git::conflict::Resolution::Ours);
-            Some(crate::command_result::ok_silent())
-        }
-        "ConflictTheirs" => {
-            editor.resolve_conflict(crate::git::conflict::Resolution::Theirs);
-            Some(crate::command_result::ok_silent())
-        }
-        "ConflictBoth" => {
-            editor.resolve_conflict(crate::git::conflict::Resolution::Both);
-            Some(crate::command_result::ok_silent())
-        }
-        "ConflictNone" => {
-            editor.resolve_conflict(crate::git::conflict::Resolution::Neither);
-            Some(crate::command_result::ok_silent())
-        }
-
-        "grep" | "gr" | "vimgrep" | "vim" => Some(grep(editor, args)),
-        _ => None,
+        None => err("Problems: use all, warnings or errors"),
     }
+}
+
+/// `:Symbols [query]` / `:WorkspaceSymbols`.
+pub(super) fn symbols(editor: &mut Editor, ex: &Ex) -> CommandResult {
+    editor.open_workspace_symbol_picker();
+    if !ex.args.is_empty() {
+        if let Some(picker) = editor.picker_mut() {
+            picker.set_query(ex.args.to_string());
+            picker.mark_filter_pending();
+        }
+    }
+    ok_silent()
 }
 
 /// Splits `/find/replace/flags rest` on an unescaped delimiter.
@@ -196,7 +84,8 @@ fn parse_substitution(args: &str) -> Option<(String, String, String, String)> {
 /// arguments the last review (or an empty one) opens. With arguments the
 /// search runs immediately so the review is populated when the command
 /// returns.
-fn search_replace(editor: &mut Editor, args: &str) -> CommandResult {
+pub(super) fn search_replace(editor: &mut Editor, ex: &Ex) -> CommandResult {
+    let args = ex.args;
     if args.is_empty() {
         editor.open_search_replace(None);
         return ok("Replace in files");
@@ -233,7 +122,7 @@ fn search_replace(editor: &mut Editor, args: &str) -> CommandResult {
     }
 }
 
-fn replace_apply(editor: &mut Editor) -> CommandResult {
+pub(super) fn replace_apply(editor: &mut Editor, _ex: &Ex) -> CommandResult {
     match editor.apply_search_replace() {
         Ok(report) => {
             editor.discard_search_replace();
@@ -243,7 +132,7 @@ fn replace_apply(editor: &mut Editor) -> CommandResult {
     }
 }
 
-fn replace_undo(editor: &mut Editor) -> CommandResult {
+pub(super) fn replace_undo(editor: &mut Editor, _ex: &Ex) -> CommandResult {
     match editor.undo_last_search_replace() {
         Ok((undone, skipped)) => {
             let mut message = format!(
@@ -261,7 +150,8 @@ fn replace_undo(editor: &mut Editor) -> CommandResult {
 
 /// `:grep pattern [-- globs]` — fill the quickfix list with matching lines
 /// (regex, smart case, respects .gitignore). Pair with `:cdo` / `:cfdo`.
-fn grep(editor: &mut Editor, args: &str) -> CommandResult {
+pub(super) fn grep(editor: &mut Editor, ex: &Ex) -> CommandResult {
+    let args = ex.args;
     if args.is_empty() {
         return err("E471: Argument required");
     }
@@ -320,7 +210,7 @@ fn grep(editor: &mut Editor, args: &str) -> CommandResult {
     editor.set_quickfix_list(entries, format!(":grep {pattern}"));
     editor.open_quickfix_window();
     if let Some(entry) = editor.quickfix_list().current_entry().cloned() {
-        let _ = crate::commands::jump_to_quickfix_entry(editor, &entry);
+        let _ = super::jump_to_quickfix_entry(editor, &entry);
     }
     ok(format!(
         "{count} match{} for {pattern}{}",

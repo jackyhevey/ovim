@@ -228,7 +228,7 @@ pub fn parse_test_failures(output: &str, cwd: &Path) -> Vec<TestFailure> {
 
     // Preserve compiler errors and Rust panic support already understood by
     // the quickfix parser, then supplement it with runtime stack formats.
-    for entry in crate::commands::parse_compiler_output(output) {
+    for entry in crate::launch::diagnostics::parse_compiler_output(output) {
         if entry.entry_type != crate::editor::QuickfixEntryType::Error {
             continue;
         }

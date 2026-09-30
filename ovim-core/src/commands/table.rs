@@ -4,9 +4,15 @@
 //! read this one table.
 
 use super::contexts::{Contexts, Lifecycle};
-use super::{edit, files, options, pattern, quickfix, shell, windows, Ex};
+use super::{
+    debug, edit, files, git, launch, lsp, options, pattern, project, quickfix, session, shell,
+    windows, Ex,
+};
 use crate::command_result::CommandResult;
+use crate::command_result::{ok, ok_silent};
 use crate::editor::Editor;
+use crate::git::conflict::Resolution;
+use crate::launch::LaunchMode;
 
 pub(crate) type Handler = fn(&mut Editor, &Ex) -> CommandResult;
 
@@ -245,9 +251,242 @@ pub(crate) static COMMANDS: &[ExCommand] = &[
     ex(&["luaf[ile]"], options::luafile).args(A::File),
     ex(&["so[urce]"], options::source).args(A::File),
     ex(&["reload", "ConfigReload"], options::reload),
-    // ---- quickfix ----
+    // ---- quickfix and project ----
+    ex(&["mak[e]"], quickfix::make).bang().args(A::Rest),
+    ex(&["cope[n]"], quickfix::open),
+    ex(&["ccl[ose]"], quickfix::close),
+    ex(&["cn[ext]"], quickfix::next).bang(),
+    ex(&["cp[revious]", "cN[ext]"], quickfix::previous).bang(),
+    ex(&["cfir[st]", "cr[ewind]"], quickfix::first).bang(),
+    ex(&["cla[st]"], quickfix::last).bang(),
     ex(&["cdo"], quickfix::quickfix_do).args(A::Rest),
     ex(&["cfdo"], quickfix::quickfix_do).args(A::Rest),
+    ex(&["gr[ep]", "vim[grep]"], project::grep).args(A::Rest),
+    ex(
+        &["SearchReplace", "Sr", "ReplaceInFiles"],
+        project::search_replace,
+    )
+    .args(A::Rest),
+    ex(&["ReplaceApply"], project::replace_apply),
+    ex(&["ReplaceUndo"], project::replace_undo),
+    ex(&["Problems", "Diagnostics"], project::problems).args(A::Text),
+    ex(&["Symbols", "WorkspaceSymbols"], project::symbols).args(A::Text),
+    ex(&["Outline", "DocumentSymbols"], |e, _| {
+        e.open_outline_picker();
+        ok_silent()
+    }),
+    ex(&["Recent", "RecentFiles"], |e, _| {
+        e.open_recent_files_picker();
+        ok_silent()
+    }),
+    ex(&["Buffers"], |e, _| {
+        e.open_buffer_picker();
+        ok_silent()
+    }),
+    // ---- git ----
+    ex(&["GitDiff", "gitdiff", "DiffReview"], git::diff_review).args(A::Text),
+    ex(&["GitDiffLayout", "gitdifflayout"], git::diff_layout).args(A::Text),
+    ex(&["GitDiffFile"], git::diff_file).args(A::File),
+    ex(&["GitEdit"], git::edit).args(A::File),
+    ex(&["GitShow"], git::show).args(A::Text),
+    ex(&["GitFetch", "gitfetch"], |e, _| {
+        e.fetch_review_base();
+        ok_silent()
+    }),
+    ex(&["GitStatus", "Gstatus"], |e, _| {
+        e.open_git_status_picker();
+        ok_silent()
+    }),
+    ex(&["GitStage", "GitStageFile"], |e, _| {
+        e.git_stage_file();
+        ok_silent()
+    }),
+    ex(&["GitUnstage", "GitUnstageFile"], |e, _| {
+        e.git_unstage_file();
+        ok_silent()
+    }),
+    ex(&["GitStageHunk"], |e, _| {
+        e.git_stage_hunk();
+        ok_silent()
+    }),
+    ex(&["GitUnstageHunk"], |e, _| {
+        e.git_unstage_hunk();
+        ok_silent()
+    }),
+    ex(&["GitStageAll"], |e, _| {
+        e.git_stage_all();
+        ok_silent()
+    }),
+    ex(&["GitCommit", "Gcommit"], |e, _| {
+        e.open_commit_message(false);
+        ok_silent()
+    }),
+    ex(&["GitAmend"], |e, _| {
+        e.open_commit_message(true);
+        ok_silent()
+    }),
+    ex(&["GitLog", "GitFileLog"], |e, _| {
+        e.open_file_history_picker();
+        ok_silent()
+    }),
+    ex(&["GitLogAll"], |e, _| {
+        e.open_repo_history_picker();
+        ok_silent()
+    }),
+    ex(&["GitLineLog", "GitLineHistory"], |e, _| {
+        e.open_line_history_picker();
+        ok_silent()
+    }),
+    ex(&["ConflictNext"], |e, _| {
+        e.goto_conflict(true);
+        ok_silent()
+    }),
+    ex(&["ConflictPrev"], |e, _| {
+        e.goto_conflict(false);
+        ok_silent()
+    }),
+    ex(&["ConflictOurs"], |e, _| {
+        e.resolve_conflict(Resolution::Ours);
+        ok_silent()
+    }),
+    ex(&["ConflictTheirs"], |e, _| {
+        e.resolve_conflict(Resolution::Theirs);
+        ok_silent()
+    }),
+    ex(&["ConflictBoth"], |e, _| {
+        e.resolve_conflict(Resolution::Both);
+        ok_silent()
+    }),
+    ex(&["ConflictNone"], |e, _| {
+        e.resolve_conflict(Resolution::Neither);
+        ok_silent()
+    }),
+    // ---- language servers ----
+    ex(&["LspInfo"], lsp::info),
+    ex(&["LspStatus"], lsp::status),
+    ex(&["LspLog"], lsp::log),
+    ex(&["LspRestart"], lsp::restart).args(A::Text),
+    ex(&["LspExec"], lsp::exec).args(A::Rest),
+    ex(&["LspRename"], lsp::rename).args(A::Text),
+    ex(&["LspReloadProject"], |e, _| {
+        e.lsp_execute_command("hyperion.reloadProject", Vec::new());
+        ok_silent()
+    }),
+    ex(&["LspInstall", "LspManager"], |e, _| {
+        e.open_lsp_manager();
+        ok_silent()
+    }),
+    ex(&["format", "Format"], |e, _| {
+        e.request_format_document();
+        ok("Formatting document...")
+    }),
+    // ---- run, test, debug ----
+    ex(&["Run", "RunCursor"], |e, _| {
+        e.launch_at_cursor(LaunchMode::Run);
+        ok_silent()
+    }),
+    ex(&["Debug"], |e, _| {
+        e.launch_at_cursor(LaunchMode::Debug);
+        ok_silent()
+    }),
+    ex(&["RunConfig", "RunPick"], |e, _| {
+        e.launch_pick_config(LaunchMode::Run);
+        ok_silent()
+    }),
+    ex(&["DebugConfig", "DebugPick"], |e, _| {
+        e.launch_pick_config(LaunchMode::Debug);
+        ok_silent()
+    }),
+    ex(&["RunLast", "DebugLast"], |e, _| {
+        e.launch_last();
+        ok_silent()
+    }),
+    ex(&["RunStop"], |e, _| {
+        e.launch_stop();
+        ok_silent()
+    }),
+    ex(&["RunConsole", "RunToggle"], |e, _| {
+        e.toggle_run_console();
+        ok_silent()
+    }),
+    ex(&["RunFocus"], |e, _| {
+        e.focus_run_console();
+        ok_silent()
+    }),
+    ex(&["RunPrev"], |e, _| {
+        e.run_console_mut().view_previous();
+        ok_silent()
+    }),
+    ex(&["RunNext"], |e, _| {
+        e.run_console_mut().view_next();
+        ok_silent()
+    }),
+    ex(&["RunEof"], |e, _| {
+        e.run_eof();
+        ok_silent()
+    }),
+    ex(&["RunClear"], |e, _| {
+        e.clear_run_console();
+        ok_silent()
+    }),
+    ex(&["RunJump"], launch::run_jump).args(A::Text),
+    ex(&["RunInput"], launch::run_input).args(A::Rest),
+    ex(&["CodeLens", "CodeLensRun"], |e, _| {
+        e.run_code_lens_at_cursor(LaunchMode::Run);
+        ok_silent()
+    }),
+    ex(&["CodeLensDebug"], |e, _| {
+        e.run_code_lens_at_cursor(LaunchMode::Debug);
+        ok_silent()
+    }),
+    ex(&["TestFile", "TF"], |e, _| {
+        e.run_test_file();
+        ok("Running tests for current file...")
+    }),
+    ex(&["TestNearest", "TN"], |e, _| {
+        e.run_test_nearest();
+        ok("Running nearest test...")
+    }),
+    ex(&["TestAll", "TA", "TestSuite", "TS"], |e, _| {
+        e.run_test_all();
+        ok("Running all tests...")
+    }),
+    ex(&["TestDebug", "TD"], |e, _| {
+        e.debug_test_nearest();
+        ok("Debugging nearest test...")
+    }),
+    ex(&["TestDebugFile", "TDF"], |e, _| {
+        e.debug_test_file();
+        ok("Debugging tests of current file...")
+    }),
+    ex(&["TestLast", "TL"], |e, _| {
+        e.run_test_last();
+        ok("Re-running last test...")
+    }),
+    ex(&["TestVisit", "TV"], |e, _| {
+        e.test_visit();
+        ok("Visiting last-tested position...")
+    }),
+    ex(&["TestPanel", "TestToggle", "TP"], launch::test_panel),
+    ex(&["TestOutput", "MakeOutput"], launch::test_output),
+    ex(&["PanelSize"], launch::panel_size).args(A::Text),
+    ex(&["debug"], debug::debug).args(A::Text),
+    ex(&["eval"], debug::eval).args(A::Rest),
+    ex(&["DebugPanel", "DebugFocus"], debug::focus_panel),
+    ex(&["DebugWatch"], debug::watch).args(A::Rest),
+    ex(&["DebugUnwatch"], debug::unwatch).args(A::Rest),
+    ex(&["DebugBreakpoints"], debug::breakpoints).args(A::Text),
+    ex(&["DebugException"], debug::exception).args(A::Text),
+    ex(&["DebugExpand"], debug::expand).args(A::Text),
+    ex(&["DebugLogpoint"], debug::logpoint).args(A::Rest),
+    ex(&["DebugHitCount"], debug::hit_count).args(A::Text),
+    ex(&["DebugCondition"], debug::condition).args(A::Rest),
+    // ---- sessions, workflows, AI ----
+    ex(&["ai"], session::ai).args(A::Text),
+    ex(&["workflow"], session::workflow).args(A::Text),
+    ex(&["session"], session::session).args(A::Text),
+    ex(&["clearaedits"], session::clear_agent_edits),
+    ex(&["browser"], session::browser),
 ];
 
 /// The full form of a `:help`-style name: `quit` for `q[uit]`.
