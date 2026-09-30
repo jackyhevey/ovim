@@ -123,7 +123,9 @@ impl InputState {
             Self::TextObjectPending { prefix, .. } => prefix.as_char(),
             Self::WindowCommand => 'W',
             Self::MacroPrefix { is_recording: true } => 'q',
-            Self::MacroPrefix { is_recording: false } => '@',
+            Self::MacroPrefix {
+                is_recording: false,
+            } => '@',
             Self::RegisterPending => '"',
             Self::Normal
             | Self::Leader { .. }

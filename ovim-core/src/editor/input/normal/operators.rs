@@ -14,8 +14,8 @@
 
 use crate::editor::input::helpers;
 use crate::editor::{
-    CharMotion, CursorPos, Editor, InputState, Motions, Operator, PendingChangeRepeat, RegisterType,
-    TextObjectPrefix,
+    CharMotion, CursorPos, Editor, InputState, Motions, Operator, PendingChangeRepeat,
+    RegisterType, TextObjectPrefix,
 };
 use crate::mode::Mode;
 use crate::repeat_action::RepeatAction;

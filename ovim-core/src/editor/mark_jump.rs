@@ -34,9 +34,7 @@ impl Editor {
         // (the newest changelist entry), `^` where Insert mode was last
         // stopped. Both clamp to the cursor-on-char range like vim.
         let special = match name {
-            '.' => self
-                .last_edit_position()
-                .map(|pos| (pos.line, pos.col.0)),
+            '.' => self.last_edit_position().map(|pos| (pos.line, pos.col.0)),
             '^' => self.editing.last_insert_position,
             _ => None,
         };

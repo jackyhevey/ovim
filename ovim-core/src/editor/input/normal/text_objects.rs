@@ -27,9 +27,11 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
     editor.reset_input_state();
     editor.clear_count();
 
-    let Some(object_type) =
-        super::super::text_objects::from_key(editor, key_event.code, prefix == TextObjectPrefix::Inner)
-    else {
+    let Some(object_type) = super::super::text_objects::from_key(
+        editor,
+        key_event.code,
+        prefix == TextObjectPrefix::Inner,
+    ) else {
         return Ok(true);
     };
     let result = if operator == Operator::Change {

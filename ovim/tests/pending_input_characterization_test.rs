@@ -14,7 +14,8 @@ use helpers::EditorTest;
 use ovim::editor::InputState;
 use std::fmt::Write;
 
-const CONTENT: &str = "foo bar(baz, qux) \"str\" end\n  alpha beta gamma\nxdelta\n\nlast line here\n";
+const CONTENT: &str =
+    "foo bar(baz, qux) \"str\" end\n  alpha beta gamma\nxdelta\n\nlast line here\n";
 
 /// Split key notation into single keys: `<Esc>`, `<C-w>` or one char.
 fn tokens(keys: &str) -> Vec<String> {
@@ -98,8 +99,8 @@ fn operator_cases() -> Vec<String> {
     let prefixes = ["", "2", "\"a"];
     let targets = [
         "w", "e", "b", "$", "0", "j", "k", "G", "gg", "gn", "iw", "aw", "i(", "a\"", "ip", "fa",
-        "ta", "Fa", "l", "}", "2w", "d", "c", "y", "<", ">", "u", "U", "~", "<Esc>", "x", "v", "i<Esc>",
-        "K", "z", "\"", "g<Esc>", "gx", "q", ":",
+        "ta", "Fa", "l", "}", "2w", "d", "c", "y", "<", ">", "u", "U", "~", "<Esc>", "x", "v",
+        "i<Esc>", "K", "z", "\"", "g<Esc>", "gx", "q", ":",
     ];
     let mut cases = Vec::new();
     for prefix in prefixes {
@@ -113,7 +114,9 @@ fn operator_cases() -> Vec<String> {
 }
 
 fn prefix_cases() -> Vec<String> {
-    let prefixes = ["g", "z", "Z", "[", "]", "\"", "q", "@", "<C-w>", "2g", "\"ag"];
+    let prefixes = [
+        "g", "z", "Z", "[", "]", "\"", "q", "@", "<C-w>", "2g", "\"ag",
+    ];
     let seconds = [
         "g", "e", "E", "_", "J", "u", "U", "~", "i", "I", "v", "'", "r", "z", "t", "f", "a", "b",
         "Q", "[", "]", "m", "{", "(", "c", "\"", "q", "@", "<Esc>", "x", "d", "y", "p", "0", "$",
@@ -128,10 +131,45 @@ fn prefix_cases() -> Vec<String> {
     // Three-key prefix sequences and pending state after a third key.
     cases.extend(
         [
-            "grn<Esc>", "grx", "gr<Esc>", "gu<Esc>w", "guw.", "gUiw", "zfj", "zfjzo", "qaxq", "qaxq@a",
-            "\"ayy\"ap", "\"a2yy", "2\"ayy", "\"<Esc>x", "\"_dd", "\"Ayw", "d\"ayw", "m<Esc>x", "ma'a",
-            "fa;", "ra", "r<Esc>", "<Space><Esc>x", "d<Space>", "c<Esc>x", "diw.", "dw.u", "ciwX<Esc>.",
-            "cwY<Esc>j.", "3dd", "d3d", "2d2w", "dfa.", "dta;", "yiwP", "2yyP", "v<Esc>", "gv", "ZZ",
+            "grn<Esc>",
+            "grx",
+            "gr<Esc>",
+            "gu<Esc>w",
+            "guw.",
+            "gUiw",
+            "zfj",
+            "zfjzo",
+            "qaxq",
+            "qaxq@a",
+            "\"ayy\"ap",
+            "\"a2yy",
+            "2\"ayy",
+            "\"<Esc>x",
+            "\"_dd",
+            "\"Ayw",
+            "d\"ayw",
+            "m<Esc>x",
+            "ma'a",
+            "fa;",
+            "ra",
+            "r<Esc>",
+            "<Space><Esc>x",
+            "d<Space>",
+            "c<Esc>x",
+            "diw.",
+            "dw.u",
+            "ciwX<Esc>.",
+            "cwY<Esc>j.",
+            "3dd",
+            "d3d",
+            "2d2w",
+            "dfa.",
+            "dta;",
+            "yiwP",
+            "2yyP",
+            "v<Esc>",
+            "gv",
+            "ZZ",
         ]
         .map(String::from),
     );
@@ -141,9 +179,39 @@ fn prefix_cases() -> Vec<String> {
 fn visual_cases() -> Vec<String> {
     let starts = ["v", "V", "<C-v>"];
     let seconds = [
-        "iw", "aw", "i(", "a\"", "ip", "gg", "gn", "g<Esc>", "gx", "\"ay", "\"<Esc>", "i<Esc>", "fa",
-        "ta", "ra", "d", "y", "c<Esc>", "<Esc>", "jd", "u", "U", "~", ">", "<Space><Esc>", "2iw",
-        "IX<Esc>", "AX<Esc>", "$AX<Esc>", "jIX<Esc>", "jAX<Esc>", "jcX<Esc>", "j$AX<Esc>",
+        "iw",
+        "aw",
+        "i(",
+        "a\"",
+        "ip",
+        "gg",
+        "gn",
+        "g<Esc>",
+        "gx",
+        "\"ay",
+        "\"<Esc>",
+        "i<Esc>",
+        "fa",
+        "ta",
+        "ra",
+        "d",
+        "y",
+        "c<Esc>",
+        "<Esc>",
+        "jd",
+        "u",
+        "U",
+        "~",
+        ">",
+        "<Space><Esc>",
+        "2iw",
+        "IX<Esc>",
+        "AX<Esc>",
+        "$AX<Esc>",
+        "jIX<Esc>",
+        "jAX<Esc>",
+        "jcX<Esc>",
+        "j$AX<Esc>",
     ];
     let mut cases = Vec::new();
     for start in starts {
