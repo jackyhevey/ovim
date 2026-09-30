@@ -4,7 +4,7 @@
 //! read this one table.
 
 use super::contexts::{Contexts, Lifecycle};
-use super::{edit, files, pattern, quickfix, shell, windows, Ex};
+use super::{edit, files, options, pattern, quickfix, shell, windows, Ex};
 use crate::command_result::CommandResult;
 use crate::editor::Editor;
 
@@ -212,6 +212,39 @@ pub(crate) static COMMANDS: &[ExCommand] = &[
     ex(&["bd[elete]"], windows::delete_buffer)
         .bang()
         .lifecycle(Lifecycle::Delete),
+    // ---- options, mappings, listings, configuration ----
+    ex(&["se[t]"], options::set).args(A::Text).anywhere(),
+    ex(&["unset"], options::unset).args(A::Text),
+    ex(&["colo[rscheme]"], options::colorscheme).args(A::Text),
+    ex(&["map"], options::map_all).args(A::Text),
+    ex(&["nm[ap]"], options::map_normal).args(A::Text),
+    ex(&["im[ap]"], options::map_insert).args(A::Text),
+    ex(&["vm[ap]", "xm[ap]"], options::map_visual).args(A::Text),
+    ex(&["cm[ap]"], options::map_command).args(A::Text),
+    ex(&["no[remap]"], options::noremap_all).args(A::Text),
+    ex(&["nn[oremap]"], options::noremap_normal).args(A::Text),
+    ex(&["ino[remap]"], options::noremap_insert).args(A::Text),
+    ex(&["vn[oremap]", "xn[oremap]"], options::noremap_visual).args(A::Text),
+    ex(&["cno[remap]"], options::noremap_command).args(A::Text),
+    ex(&["unm[ap]"], options::unmap_all).args(A::Text),
+    ex(&["nun[map]"], options::unmap_normal).args(A::Text),
+    ex(&["iu[nmap]"], options::unmap_insert).args(A::Text),
+    ex(&["vu[nmap]", "xu[nmap]"], options::unmap_visual).args(A::Text),
+    ex(&["cu[nmap]"], options::unmap_command).args(A::Text),
+    ex(&["mapc[lear]"], options::mapclear_all),
+    ex(&["nmapc[lear]"], options::mapclear_normal),
+    ex(&["imapc[lear]"], options::mapclear_insert),
+    ex(&["vmapc[lear]", "xmapc[lear]"], options::mapclear_visual),
+    ex(&["cmapc[lear]"], options::mapclear_command),
+    ex(&["noh[lsearch]"], options::nohlsearch),
+    ex(&["reg[isters]", "di[splay]"], options::registers).args(A::Text),
+    ex(&["marks"], options::marks).args(A::Text),
+    ex(&["h[elp]"], options::help).args(A::Text),
+    ex(&["blame"], options::blame),
+    ex(&["lua"], options::lua).args(A::Rest),
+    ex(&["luaf[ile]"], options::luafile).args(A::File),
+    ex(&["so[urce]"], options::source).args(A::File),
+    ex(&["reload", "ConfigReload"], options::reload),
     // ---- quickfix ----
     ex(&["cdo"], quickfix::quickfix_do).args(A::Rest),
     ex(&["cfdo"], quickfix::quickfix_do).args(A::Rest),

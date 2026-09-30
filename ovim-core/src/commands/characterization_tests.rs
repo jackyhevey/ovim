@@ -355,26 +355,31 @@ fn cases() -> Vec<Case> {
         // ---- information ----
         case("noh").is("Search highlighting cleared"),
         case("nohlsearch").is("Search highlighting cleared"),
-        // vim: :noh[lsearch].
-        case("nohl").unknown(),
+        case("nohl").is("Search highlighting cleared"),
         // The interactive path stores the command in `":` before running it,
         // so the listing includes the `:reg` being executed; the API does not.
         case("reg")
             .is("No registers in use")
-            .interactive(Out::Ok(Is("\":: reg"))),
+            .interactive(Out::Ok(Is("--- Registers ---\n\":   reg"))),
         case("registers")
             .is("No registers in use")
-            .interactive(Out::Ok(Is("\":: registers"))),
-        // The `reg {arg}` spelling reaches a second, differently formatted
-        // listing further down the old chain.
+            .interactive(Out::Ok(Is("--- Registers ---\n\":   registers"))),
+        // `:reg {names}` lists only those (vim); `:reg` and `:reg a` used to
+        // reach two differently formatted listings.
+        case("reg a").is("No registers in use"),
+        case("di a").is("No registers in use"),
         case("reg a")
-            .is("No registers set")
-            .interactive(Out::Ok(Is("--- Registers ---\n\":   reg a"))),
+            .keys("\"ayy")
+            .ok(Starts("--- Registers ---\n\"a   b2")),
         case("marks").is("No marks set"),
         case("marks")
             .keys("ma")
             .ok(Starts("mark  line   col  file\n 'a")),
-        case("marks a").keys("ma").ok(Starts("--- Marks ---")),
+        // One listing for `:marks` and `:marks {names}` (used to be two).
+        case("marks a")
+            .keys("ma")
+            .ok(Starts("mark  line   col  file\n 'a")),
+        case("marks b").keys("ma").is("No marks set"),
         case("f").is("\"[No Name]\" line 2 of 4 --50%--"),
         case("file").is("\"[No Name]\" line 2 of 4 --50%--"),
         case("f")
@@ -383,8 +388,8 @@ fn cases() -> Vec<Case> {
         case("pwd").ok(Starts("/")),
         case("help keybindings").ok(Starts("Keybinding compatibility guide")),
         case("help keys").ok(Starts("Keybinding compatibility guide")),
-        // vim: :h[elp].
-        case("help").unknown(),
+        case("help").err(Starts("E149: Sorry, no help")),
+        case("h foo").fails("E149: Sorry, no help for foo"),
         case("colo").ok(Starts("Current: ")),
         case("colorscheme").ok(Starts("Current: ")),
         case("colo nosuch").err(Has("Available schemes")),
@@ -413,22 +418,25 @@ fn cases() -> Vec<Case> {
         case("set nonu"),
         case("set nu?").is("  number"),
         case("set bogus").err(Has("bogus")),
-        // vim: bare :se[t] lists changed options.
-        case("set").unknown(),
-        case("se").unknown(),
-        // The API passes the whole line to :set, which rejects `|`; the
-        // interactive path splits at the bar and runs both.
-        case("set nu | set rnu")
-            .err(Has("|"))
-            .interactive(Out::Silent),
+        // Bare :se[t] lists options (it used to be unknown).
+        case("set").ok(Starts("  number\n")),
+        case("se").ok(Starts("  number\n")),
+        // vim: several options per :set.
+        case("set nonu rnu").check(|editor| {
+            (!editor.options.number && editor.options.relative_number)
+                .then_some(())
+                .ok_or_else(|| "both options must apply".to_string())
+        }),
+        // The API used to pass the whole line to :set, which rejected `|`.
+        case("set nu | set rnu"),
         // ---- mappings ----
         case("nnoremap Q x"),
         case("nmap Q x"),
         case("map").is("No mappings"),
         case("nmap").is("No mappings"),
         case("nnoremap Q").is("No mapping found"),
-        // vim: :nn[oremap].
-        case("nn Q x").unknown(),
+        case("nn Q x"),
+        case("nn Q").keys("").pre(&["nnoremap Q x"]).is("n  Q  x"),
         case("unmap Q").fails("E31: No such mapping"),
         case("unmap").fails("E474: Invalid argument"),
         case("mapclear"),

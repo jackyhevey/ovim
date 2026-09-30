@@ -608,23 +608,7 @@ fn execute_command_single(editor: &mut Editor, command: &str) -> Result<()> {
         }
     }
 
-    // Check if it's a :colorscheme <name> or :colo <name> command
-    if let Some(scheme_name) = command
-        .strip_prefix("colorscheme ")
-        .or_else(|| command.strip_prefix("colo "))
-    {
-        match editor.set_color_scheme(scheme_name.trim()) {
-            Ok(_) => {
-                let message = format!("Color scheme set to '{}'", scheme_name.trim());
-                editor.set_status_message(message);
-            }
-            Err(e) => {
-                let available = editor.list_color_schemes().join(", ");
-                let message = format!("{}. Available schemes: {}", e, available);
-                editor.set_status_message(message);
-            }
-        }
-    } else if editor.status_message().is_empty() {
+    if editor.status_message().is_empty() {
         // Truly unrecognized ex-command (no handler set a status). Report it
         // the way Vim does (E492) so the user gets feedback on typos instead
         // of silence, and so the headless API can surface it as an error.

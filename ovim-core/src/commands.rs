@@ -5,10 +5,12 @@
 mod contexts;
 mod edit;
 mod files;
+mod options;
 mod parse;
 mod pattern;
 mod quickfix;
 mod range;
+mod set;
 mod shell;
 mod table;
 mod windows;
@@ -21,7 +23,6 @@ use crate::editor::Editor;
 use crate::editor::QuickfixEntry;
 use crate::unicode::GraphemeCol;
 use contexts::BufferKind;
-use files::expand_tilde;
 use table::{ExCommand, RangePolicy};
 
 /// One command as its handler sees it.
@@ -194,10 +195,7 @@ pub(crate) fn run_queued_without_terminal(
 
 fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
     if editor.is_pseudocode_buffer() {
-        let verb = command.split_whitespace().next().unwrap_or("");
-        if !matches!(verb, "set" | "se") {
-            return err("Pseudocode is a reading view; press Enter to edit or save source");
-        }
+        return err(contexts::BufferKind::Pseudocode.refusal());
     }
 
     if let Some(result) = crate::cmd_project::try_handle(editor, command) {
@@ -249,11 +247,6 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
                 None => err("GitDiffLayout: use split or unified"),
             }
         }
-        cmd if cmd.starts_with("unset pullbase path=") => {
-            let path = cmd.strip_prefix("unset pullbase path=").unwrap();
-            crate::cmd_set::handle_set_command(editor, &format!("pullbase= path={path}"))
-        }
-        "unset pullbase" => crate::cmd_set::handle_set_command(editor, "pullbase="),
         "GitFetch" | "gitfetch" => {
             editor.fetch_review_base();
             ok_silent()
@@ -690,67 +683,6 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
                 }
             }
         }
-        "blame" => {
-            let new_val = !editor.options.blame;
-            editor.options.blame = new_val;
-            if new_val {
-                editor.buffer_mut().load_git_blame();
-                ok("blame on")
-            } else {
-                editor.buffer_mut().clear_git_blame();
-                ok("blame off")
-            }
-        }
-        "noh" | "nohlsearch" => {
-            // Clear search highlighting
-            editor.clear_search_highlight();
-            ok("Search highlighting cleared")
-        }
-        "reg" | "registers" => {
-            // Display all registers
-            let registers = editor.registers().list_registers();
-            if registers.is_empty() {
-                ok("No registers in use")
-            } else {
-                let display: Vec<String> = registers
-                    .iter()
-                    .map(|(name, content)| format!("{}: {}", name, content))
-                    .collect();
-                ok(display.join("\n"))
-            }
-        }
-        "marks" => {
-            // Display all marks
-            let mut lines = Vec::new();
-
-            // Local marks (a-z)
-            let mut local_marks: Vec<_> = editor.marks().iter().collect();
-            local_marks.sort_by_key(|(c, _)| *c);
-            for (name, mark) in local_marks {
-                lines.push(format!(" '{}  {:>5}  {:>3}", name, mark.line + 1, mark.col));
-            }
-
-            // Global marks (A-Z)
-            let mut global_marks: Vec<_> = editor.marks().iter_global().collect();
-            global_marks.sort_by_key(|(c, _)| *c);
-            for (name, mark) in global_marks {
-                let file = mark.file_path.as_deref().unwrap_or("[No Name]");
-                lines.push(format!(
-                    " '{}  {:>5}  {:>3}  {}",
-                    name,
-                    mark.line + 1,
-                    mark.col,
-                    file
-                ));
-            }
-
-            if lines.is_empty() {
-                ok("No marks set")
-            } else {
-                lines.insert(0, "mark  line   col  file".to_string());
-                ok(lines.join("\n"))
-            }
-        }
         "clearaedits" => {
             if let Some(chat) = editor.ai_state.chat.as_mut() {
                 chat.agent_edits.clear();
@@ -758,178 +690,7 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
             ok("Agent edit markers cleared.")
         }
         _ => {
-            if let Some(_code) = command.strip_prefix("lua ") {
-                #[cfg(feature = "lua")]
-                {
-                    match editor.execute_lua(_code) {
-                        Ok(result) => ok(result),
-                        Err(e) => err(format!("Lua error: {}", e)),
-                    }
-                }
-                #[cfg(not(feature = "lua"))]
-                err("Lua support not compiled in")
-            // Handle :luafile <path>
-            } else if let Some(raw_path) = command.strip_prefix("luafile ") {
-                let _expanded_path = match expand_tilde(raw_path.trim()) {
-                    Ok(path) => path.to_string_lossy().to_string(),
-                    Err(e) => {
-                        return err(format!("Failed to expand path '{}': {}", raw_path, e));
-                    }
-                };
-                #[cfg(feature = "lua")]
-                {
-                    match editor.execute_lua_file(&_expanded_path) {
-                        Ok(_) => ok(format!("Executed {}", _expanded_path)),
-                        Err(e) => err(format!("Lua error: {}", e)),
-                    }
-                }
-                #[cfg(not(feature = "lua"))]
-                err("Lua support not compiled in")
-            // Handle :colorscheme <name> or :colorscheme (to show current)
-            // Also support :colo abbreviation
-            } else if command == "colorscheme" || command == "colo" {
-                let current = editor.current_color_scheme_name();
-                let schemes = editor.list_color_schemes().join(", ");
-                ok(format!("Current: {}\nAvailable: {}", current, schemes))
-            } else if let Some(scheme_name) = command
-                .strip_prefix("colorscheme ")
-                .or_else(|| command.strip_prefix("colo "))
-            {
-                match editor.set_color_scheme(scheme_name.trim()) {
-                    Ok(_) => ok(format!("Color scheme set to '{}'", scheme_name.trim())),
-                    Err(e) => {
-                        let available = editor.list_color_schemes().join(", ");
-                        err(format!("{}. Available schemes: {}", e, available))
-                    }
-                }
-            // Handle :set commands
-            } else if let Some(set_cmd) = command
-                .strip_prefix("set ")
-                .or_else(|| command.strip_prefix("se "))
-            {
-                crate::cmd_set::handle_set_command(editor, set_cmd.trim())
-            // Handle config reload
-            } else if command == "ConfigReload" || command == "reload" {
-                #[cfg(feature = "lua")]
-                {
-                    match editor.reload_lua_config() {
-                        Ok(msg) => ok(msg),
-                        Err(e) => err(format!("Failed to reload config: {}", e)),
-                    }
-                }
-                #[cfg(not(feature = "lua"))]
-                err("Lua support not compiled in")
-            // Handle :source - load and execute a Lua file
-            } else if let Some(file) = command
-                .strip_prefix("source ")
-                .or_else(|| command.strip_prefix("so "))
-            {
-                let file = file.trim();
-                let _expanded = match expand_tilde(file) {
-                    Ok(path) => path,
-                    Err(e) => {
-                        return err(format!("Failed to expand path '{}': {}", file, e));
-                    }
-                };
-                #[cfg(feature = "lua")]
-                {
-                    if let Some(context) = editor.lua_context_mut() {
-                        let path = _expanded;
-                        match context.execute_file(&path) {
-                            Ok(_) => {
-                                // Process any commands from the sourced file,
-                                // reporting the first failure instead of
-                                // silently dropping it (OV-00197).
-                                let commands = editor.get_lua_commands();
-                                let mut failed = Vec::new();
-                                for cmd in commands {
-                                    if let Err(error) =
-                                        crate::editor::InputHandler::execute_command_string(
-                                            editor, &cmd,
-                                        )
-                                    {
-                                        crate::log_warn!(
-                                            "lua",
-                                            "sourced command '{}' failed: {}",
-                                            cmd,
-                                            error
-                                        );
-                                        failed.push(cmd);
-                                    }
-                                }
-                                if failed.is_empty() {
-                                    ok(format!("Sourced: {}", path.display()))
-                                } else {
-                                    ok(format!(
-                                        "Sourced: {} ({} command(s) failed: {}; see log)",
-                                        path.display(),
-                                        failed.len(),
-                                        failed.join(", ")
-                                    ))
-                                }
-                            }
-                            Err(e) => err(format!("Failed to source {}: {}", file, e)),
-                        }
-                    } else {
-                        err("Lua not enabled")
-                    }
-                }
-                #[cfg(not(feature = "lua"))]
-                err("Lua support not compiled in")
-            // Handle :registers or :reg (list registers)
-            } else if command == "registers"
-                || command == "reg"
-                || command.starts_with("registers ")
-                || command.starts_with("reg ")
-            {
-                let registers = editor.registers().list_registers();
-                if registers.is_empty() {
-                    ok("No registers set")
-                } else {
-                    let lines: Vec<String> = registers
-                        .into_iter()
-                        .map(|(name, content)| format!("{:<4} {}", name, content))
-                        .collect();
-                    ok(format!("--- Registers ---\n{}", lines.join("\n")))
-                }
-            // Handle :marks (list marks)
-            } else if command == "marks" || command.starts_with("marks ") {
-                let marks = editor.marks().list_marks();
-                if marks.is_empty() {
-                    ok("No marks set")
-                } else {
-                    let lines: Vec<String> = marks
-                        .into_iter()
-                        .map(|(name, line, col, file)| {
-                            if let Some(path) = file {
-                                format!(" {}  {:>5}  {:>3}  {}", name, line + 1, col, path)
-                            } else {
-                                format!(" {}  {:>5}  {:>3}", name, line + 1, col)
-                            }
-                        })
-                        .collect();
-                    ok(format!(
-                        "--- Marks ---\nmark  line  col  file\n{}",
-                        lines.join("\n")
-                    ))
-                }
-            // Handle :help keybindings
-            } else if command == "help keybindings" || command == "help keys" {
-                ok(
-                    "Keybinding compatibility guide: architecture/knowledge/keybinding-compat.md"
-                        .to_string(),
-                )
-            // Handle :map, :noremap and variants
-            } else if is_map_command(command) {
-                handle_map_command(editor, command)
-            // Handle :unmap and variants
-            } else if is_unmap_command(command) {
-                handle_unmap_command(editor, command)
-            // Handle :mapclear and variants
-            } else if is_mapclear_command(command) {
-                handle_mapclear_command(editor, command)
-            // Handle :session start/stop/list commands
-            } else if command == "ai status" || command == "ai env" {
+            if command == "ai status" || command == "ai env" {
                 handle_ai_status(editor)
             } else if command == "workflow" || command.starts_with("workflow ") {
                 handle_workflow_command(editor, command)
@@ -1088,174 +849,6 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
             }
         }
     }
-}
-
-/// Check if this is a map command
-fn is_map_command(cmd: &str) -> bool {
-    let cmd_word = cmd.split_whitespace().next().unwrap_or("");
-    matches!(
-        cmd_word,
-        "map"
-            | "nmap"
-            | "imap"
-            | "vmap"
-            | "xmap"
-            | "cmap"
-            | "noremap"
-            | "nnoremap"
-            | "inoremap"
-            | "vnoremap"
-            | "xnoremap"
-            | "cnoremap"
-    )
-}
-
-/// Check if this is an unmap command
-fn is_unmap_command(cmd: &str) -> bool {
-    let cmd_word = cmd.split_whitespace().next().unwrap_or("");
-    matches!(
-        cmd_word,
-        "unmap" | "nunmap" | "iunmap" | "vunmap" | "xunmap" | "cunmap"
-    )
-}
-
-/// Check if this is a mapclear command
-fn is_mapclear_command(cmd: &str) -> bool {
-    let cmd_word = cmd.split_whitespace().next().unwrap_or("");
-    matches!(
-        cmd_word,
-        "mapclear" | "nmapclear" | "imapclear" | "vmapclear" | "xmapclear" | "cmapclear"
-    )
-}
-
-/// Parse key notation for map/unmap commands with `<leader>` expansion.
-fn parse_map_keys(editor: &Editor, input: &str) -> String {
-    use crate::editor::KeyMapManager;
-
-    let leader = editor.leader_key().to_string();
-    let expanded = input
-        .replace("<leader>", &leader)
-        .replace("<Leader>", &leader);
-
-    KeyMapManager::parse_key_notation(&expanded)
-}
-
-/// Handle map and noremap commands
-fn handle_map_command(editor: &mut Editor, command: &str) -> CommandResult {
-    use crate::editor::MapMode;
-
-    let parts: Vec<&str> = command.splitn(3, char::is_whitespace).collect();
-    let cmd_word = parts.first().copied().unwrap_or("");
-
-    // Determine mode and whether it's noremap
-    let (mode, noremap) = match cmd_word {
-        "map" => (MapMode::All, false),
-        "noremap" => (MapMode::All, true),
-        "nmap" => (MapMode::Normal, false),
-        "nnoremap" => (MapMode::Normal, true),
-        "imap" => (MapMode::Insert, false),
-        "inoremap" => (MapMode::Insert, true),
-        "vmap" | "xmap" => (MapMode::Visual, false),
-        "vnoremap" | "xnoremap" => (MapMode::Visual, true),
-        "cmap" => (MapMode::Command, false),
-        "cnoremap" => (MapMode::Command, true),
-        _ => (MapMode::Normal, false),
-    };
-
-    // If no arguments, list mappings for this mode
-    if parts.len() == 1 {
-        let mappings = editor.keymaps().list_mappings(Some(mode));
-        if mappings.is_empty() {
-            return ok("No mappings");
-        }
-        let lines: Vec<String> = mappings
-            .into_iter()
-            .map(|(m, mapping)| {
-                let noremap_char = if mapping.noremap { '*' } else { ' ' };
-                format!(
-                    "{}{}  {}  {}",
-                    m.display_char(),
-                    noremap_char,
-                    mapping.lhs,
-                    mapping.rhs
-                )
-            })
-            .collect();
-        return ok(format!("--- Mappings ---\n{}", lines.join("\n")));
-    }
-
-    // If only lhs provided, show mapping for that key
-    if parts.len() == 2 {
-        let lhs = parse_map_keys(editor, parts[1]);
-        if let Some(mapping) = editor.keymaps().get_mapping(mode, &lhs) {
-            return ok(format!(
-                "{}  {}  {}",
-                mode.display_char(),
-                mapping.lhs,
-                mapping.rhs
-            ));
-        } else {
-            return ok("No mapping found");
-        }
-    }
-
-    // parts.len() >= 3: lhs and rhs provided
-    let lhs = parse_map_keys(editor, parts[1]);
-    let rhs = parse_map_keys(editor, parts[2]);
-
-    editor
-        .keymaps_mut()
-        .add_mapping(mode, lhs.clone(), rhs, noremap);
-
-    crate::command_result::ok_silent()
-}
-
-/// Handle unmap commands
-fn handle_unmap_command(editor: &mut Editor, command: &str) -> CommandResult {
-    use crate::editor::MapMode;
-
-    let parts: Vec<&str> = command.split_whitespace().collect();
-    let cmd_word = parts.first().copied().unwrap_or("");
-
-    let mode = match cmd_word {
-        "unmap" => MapMode::All,
-        "nunmap" => MapMode::Normal,
-        "iunmap" => MapMode::Insert,
-        "vunmap" | "xunmap" => MapMode::Visual,
-        "cunmap" => MapMode::Command,
-        _ => MapMode::Normal,
-    };
-
-    if parts.len() < 2 {
-        return err("E474: Invalid argument");
-    }
-
-    let lhs = parse_map_keys(editor, parts[1]);
-    if editor.keymaps_mut().remove_mapping(mode, &lhs) {
-        crate::command_result::ok_silent()
-    } else {
-        err("E31: No such mapping")
-    }
-}
-
-/// Handle mapclear commands
-fn handle_mapclear_command(editor: &mut Editor, command: &str) -> CommandResult {
-    use crate::editor::MapMode;
-
-    let cmd_word = command.split_whitespace().next().unwrap_or("");
-
-    let mode = match cmd_word {
-        "mapclear" => MapMode::All,
-        "nmapclear" => MapMode::Normal,
-        "imapclear" => MapMode::Insert,
-        "vmapclear" | "xmapclear" => MapMode::Visual,
-        "cmapclear" => MapMode::Command,
-        _ => MapMode::Normal,
-    };
-
-    editor.keymaps_mut().clear_mappings(mode);
-
-    crate::command_result::ok_silent()
 }
 
 /// Execute :make command — runs makeprg through the launch pipeline (so
@@ -1859,14 +1452,6 @@ fn handle_debug_command(editor: &mut Editor, command: &str) -> CommandResult {
                 subcmd
             )),
     }
-}
-
-/// Handle :set commands for options.
-///
-/// **Deprecated**: Use [`crate::cmd_set::handle_set_command`] directly.
-/// This wrapper exists for backwards compatibility with any external callers.
-pub fn handle_set_command(editor: &mut Editor, args: &str) -> CommandResult {
-    crate::cmd_set::handle_set_command(editor, args)
 }
 
 #[cfg(test)]

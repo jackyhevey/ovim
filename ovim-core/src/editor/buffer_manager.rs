@@ -1261,7 +1261,7 @@ mod tests {
         let first_index = editor.current_buffer_index();
         editor.open_file(&second).expect("open second");
 
-        let result = crate::cmd_set::handle_set_command(&mut editor, "shiftwidth=2");
+        let result = crate::commands::execute_command(&mut editor, "set shiftwidth=2");
         assert!(matches!(result, crate::CommandResult::Success(_)));
         assert_eq!(editor.indent_options().shift_width, 2);
 
