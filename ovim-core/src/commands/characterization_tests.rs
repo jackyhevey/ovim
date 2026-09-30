@@ -664,9 +664,9 @@ fn cases() -> Vec<Case> {
         case(".!tr a-z A-Z")
             .is("1 lines filtered")
             .after("c1\nB2\n  a3\n  d4a\n"),
-        case("%!sort")
+        case("%!LC_ALL=C sort")
             .is("4 lines filtered")
-            .after("  a3\nb2\nc1\n  d4a\n"),
+            .after("  a3\n  d4a\nb2\nc1\n"),
         case("r !echo inserted")
             .is("1 line inserted")
             .after("c1\nb2\ninserted\n  a3\n  d4a\n")

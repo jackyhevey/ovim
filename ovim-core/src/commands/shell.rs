@@ -49,7 +49,12 @@ fn run_piped(editor: &mut Editor, command: &str, input: Option<&str>) -> std::io
             .stderr(Stdio::piped())
             .spawn()?;
         if let (Some(input), Some(stdin)) = (input, child.stdin.as_mut()) {
-            stdin.write_all(input.as_bytes())?;
+            // A command that exits without reading its input (`:w !true`)
+            // closes the pipe; vim does not treat that as a failure.
+            match stdin.write_all(input.as_bytes()) {
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {}
+                other => other?,
+            }
         }
         child.wait_with_output()
     })
