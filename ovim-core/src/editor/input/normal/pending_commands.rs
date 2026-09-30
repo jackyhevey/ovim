@@ -435,32 +435,14 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
         // =====================================================================
         // 'Z' - Save/quit commands
         // =====================================================================
+        // ZZ is `:x` and ZQ is `:q!` (vim), including what they mean in the
+        // commit message and chat scratch buffers. A failed save keeps the
+        // editor open (OV-00204).
         ('Z', KeyCode::Char('Z')) => {
-            if editor.is_commit_message_buffer() {
-                editor.finish_commit_message(true);
-            } else if editor.is_chat_scratch_buffer() {
-                if let Err(error) = editor.finish_chat_scratch(true) {
-                    editor.set_status_message(format!("Could not finish chat scratch: {error}"));
-                }
-            } else {
-                if editor.buffer().file_path().is_some()
-                    && tokio::runtime::Handle::try_current().is_ok()
-                {
-                    // OV-00204: Don't quit if save fails — show error instead
-                    if let Err(e) = editor.buffer_mut().save() {
-                        editor.set_status_message(format!("Save failed: {}", e));
-                        return Ok(true);
-                    }
-                }
-                editor.quit();
-            }
+            crate::commands::execute_and_show(editor, "x");
         }
         ('Z', KeyCode::Char('Q')) => {
-            if editor.is_commit_message_buffer() {
-                editor.finish_commit_message(false);
-            } else {
-                editor.quit();
-            }
+            crate::commands::execute_and_show(editor, "q!");
         }
 
         // =====================================================================

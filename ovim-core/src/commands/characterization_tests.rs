@@ -181,11 +181,11 @@ fn cases() -> Vec<Case> {
         case("q!").is("Quitting (forced)").quits(),
         case("quit!").is("Quitting (forced)").quits(),
         // vim: :q[uit] — every prefix from "q" works.
-        case("qu").unknown(),
-        // vim: "E37: No write since last change (add ! to override)".
+        case("qu").is("Quitting").quits(),
+        // The E37 number is new (vim's message).
         case("q")
             .keys("x")
-            .fails("No write since last change (add ! to override)"),
+            .fails("E37: No write since last change (add ! to override)"),
         case("q").pre(&["tabnew"]).is("Tab closed. Now on tab 1"),
         case("qa").is("Quitting all").quits(),
         case("qall").is("Quitting all").quits(),
@@ -193,23 +193,24 @@ fn cases() -> Vec<Case> {
         case("qall!").is("Quitting all (forced)").quits(),
         case("qa")
             .keys("x")
-            .fails("No write since last change (add ! to override)"),
-        // vim: :quita[ll] is :qall.
-        case("quitall").unknown(),
+            .fails("E37: No write since last change (add ! to override)"),
+        case("quitall").is("Quitting all").quits(),
         case("cq").is("Quitting with error code 1").quits(),
         case("cquit").is("Quitting with error code 1").quits(),
         case("cq 3").is("Quitting with error code 3").quits(),
         case("cq x").fails("Invalid exit code: x"),
-        // vim: "E488: Trailing characters: foo".
-        case("q foo").unknown(),
-        // vim: :x[it] / :exi[t] write when modified, then quit; :wqa / :xa.
-        case("x").unknown(),
-        case("xit").unknown(),
-        case("exit").unknown(),
-        case("wqa").unknown(),
-        case("xa").unknown(),
-        // vim: :clo[se] on the last window is "E444: Cannot close last window".
-        case("close").unknown(),
+        case("q foo").fails("E488: Trailing characters: foo"),
+        // :x[it] / :exi[t] write only a modified buffer, then quit; :wqa /
+        // :xa write all, then quit. All four were unknown before.
+        case("x").is("Quitting").quits(),
+        case("xit").is("Quitting").quits(),
+        case("exit").is("Quitting").quits(),
+        case("x").keys("x").fails("No file name"),
+        case("x").file().keys("x").is("Saved and quitting").quits(),
+        case("wqa").is("Quitting all").quits(),
+        case("xa").is("Quitting all").quits(),
+        case("close").fails("E444: Cannot close last window"),
+        case("close").pre(&["sp"]),
         // ---- write ----
         // vim: "E32: No file name".
         case("w").fails("No file name"),
@@ -252,10 +253,17 @@ fn cases() -> Vec<Case> {
         case("2,3w {dir}/part.txt")
             .file()
             .fails("E140: Use ! to write partial buffer"),
-        // vim: :sav[eas].
+        // New: :sav[eas] renames the buffer; an existing file needs `!`.
         case("saveas {dir}/other.txt")
             .file()
-            .err(Starts("E492: Not an editor command: saveas ")),
+            .ok(Has("other.txt\" 5L, 17C written"))
+            .check(|editor| match editor.buffer().file_path() {
+                Some(path) if path.ends_with("other.txt") => Ok(()),
+                other => Err(format!("buffer path {other:?}")),
+            }),
+        case("sav {dir}/f.txt")
+            .file()
+            .fails("E13: File exists (add ! to override)"),
         case("update"),
         case("up"),
         case("update").keys("x").fails("No file name"),
@@ -275,8 +283,7 @@ fn cases() -> Vec<Case> {
             .after("c1\nb2\n  a3\n  d4a\n"),
         case("e {dir}/f.txt").file().ok(Starts("Editing: ")),
         case("edit {dir}/f.txt").file().ok(Starts("Editing: ")),
-        // vim: :e[dit].
-        case("ed").unknown(),
+        case("ed").fails("No file name"),
         // ---- tabs ----
         case("tabnew").is("Created tab 2"),
         case("tabe").is("Created tab 2"),
@@ -304,19 +311,18 @@ fn cases() -> Vec<Case> {
         case("tabonly").is("Already only one tab"),
         case("tabonly").pre(&["tabnew"]).is("Closed 1 tabs"),
         case("tabs").ok(Starts("> 1 ")),
-        // vim: :tabN[ext], :tabm[ove].
-        case("tabN").unknown(),
+        case("tabN").is("Tab 1"),
+        case("tabr").is("Tab 1"),
+        // Not implemented (it used to be offered by tab completion).
         case("tabm").unknown(),
         // ---- windows ----
         case("sp").ok(Starts("Split horizontally")),
         case("split").ok(Starts("Split horizontally")),
         case("vsp").ok(Starts("Split vertically")),
         case("vsplit").ok(Starts("Split vertically")),
-        // vim: :vs[plit]; `:sp file` splits and edits file.
-        case("vs").unknown(),
-        case("sp {dir}/f.txt")
-            .file()
-            .err(Starts("E492: Not an editor command: sp ")),
+        case("vs").ok(Starts("Split vertically")),
+        // New: `:sp file` splits and edits the file.
+        case("sp {dir}/f.txt").file().ok(Starts("Editing: ")),
         case("only").is("Already only one window"),
         case("on").is("Already only one window"),
         // ---- buffers ----
@@ -328,14 +334,13 @@ fn cases() -> Vec<Case> {
         case("bp").is("Buffer 1 of 1: [No Name]"),
         case("bprev").is("Buffer 1 of 1: [No Name]"),
         case("bprevious").is("Buffer 1 of 1: [No Name]"),
-        // vim: :bN[ext].
-        case("bN").unknown(),
+        case("bN").is("Buffer 1 of 1: [No Name]"),
         // vim: :bd on the last buffer leaves an empty buffer instead of quitting.
         case("bd").is("Last buffer deleted, quitting").quits(),
         case("bdelete").is("Last buffer deleted, quitting").quits(),
         case("bd")
             .keys("x")
-            .fails("No write since last change (add ! to override)"),
+            .fails("E37: No write since last change (add ! to override)"),
         case("bd!")
             .keys("x")
             .is("Last buffer deleted, quitting")
@@ -343,10 +348,10 @@ fn cases() -> Vec<Case> {
         case("bdelete!").is("Last buffer deleted, quitting").quits(),
         case("b 1"),
         case("buffer 1"),
-        // vim: "E86: Buffer 9 does not exist".
-        case("b 9"),
-        // vim: bare :b stays on the current buffer.
-        case("b").unknown(),
+        // Used to be ignored silently.
+        case("b 9").fails("E86: Buffer 9 does not exist"),
+        case("b"),
+        case("b nosuch").fails("E94: No matching buffer for nosuch"),
         // ---- information ----
         case("noh").is("Search highlighting cleared"),
         case("nohlsearch").is("Search highlighting cleared"),
@@ -763,7 +768,7 @@ fn cases() -> Vec<Case> {
         case("foo").unknown(),
         case("Foo").unknown(),
         // vim: leading colons are skipped.
-        case(":q").unknown(),
+        case(":q").is("Quitting").quits(),
         // An empty command line does nothing (it used to be E492).
         case(""),
         case(":"),

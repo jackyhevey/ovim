@@ -11,6 +11,7 @@ mod quickfix;
 mod range;
 mod shell;
 mod table;
+mod windows;
 
 pub(crate) use parse::{parse, ParseError, ParsedCmd};
 use range::LineRange;
@@ -20,7 +21,7 @@ use crate::editor::Editor;
 use crate::editor::QuickfixEntry;
 use crate::unicode::GraphemeCol;
 use contexts::BufferKind;
-use files::{expand_tilde, save_buffer, SaveOpts};
+use files::expand_tilde;
 use table::{ExCommand, RangePolicy};
 
 /// One command as its handler sees it.
@@ -34,11 +35,6 @@ pub(crate) struct Ex<'a> {
     pub explicit_range: bool,
 }
 
-/// Write all modified buffers (:wa / :wall).
-///
-/// Vim semantics verified in `nvim --clean` (2026-08-14): every modified
-/// named buffer is written; a modified unnamed buffer reports
-/// "E141: No file name for buffer N" without stopping the other writes.
 /// `:LspRestart [server|language]` — restart language servers now, resetting
 /// their automatic-restart budget. Open documents are re-sent by the sync tick.
 fn restart_lsp_servers(editor: &mut Editor, target: Option<&str>) -> CommandResult {
@@ -51,76 +47,6 @@ fn restart_lsp_servers(editor: &mut Editor, target: Option<&str>) -> CommandResu
             ok_silent()
         }
         Err(message) => err(message),
-    }
-}
-
-fn write_all_buffers(editor: &mut Editor, force: bool) -> CommandResult {
-    let (written, errors) = editor.write_all_modified_buffers(force);
-    if !errors.is_empty() {
-        return err(errors.join("; "));
-    }
-    if written == 0 {
-        return ok_silent();
-    }
-    ok(format!(
-        "{} buffer{} written",
-        written,
-        if written == 1 { "" } else { "s" }
-    ))
-}
-
-/// Reload the current buffer from disk (:e / :e!).
-fn reload_buffer(editor: &mut Editor, force: bool) -> CommandResult {
-    if !force && editor.is_modified() {
-        return err("No write since last change (add ! to override)");
-    }
-    let path = match editor.buffer().file_path().map(|s| s.to_string()) {
-        Some(p) => p,
-        None => {
-            return err(if force {
-                "No file to reload"
-            } else {
-                "No file name"
-            })
-        }
-    };
-    match editor.buffer_mut().reload_from_disk() {
-        Ok(_) => {
-            editor.mark_saved();
-            editor.mark_buffer_modified_force_send();
-            let line_count = editor.buffer().rope().len_lines();
-            ok(format!("\"{}\" {}L reloaded", path, line_count))
-        }
-        Err(e) => err(format!("Failed to reload: {}", e)),
-    }
-}
-
-/// Open a file for editing (:e <file> / :e! <file>).
-fn edit_file(editor: &mut Editor, raw_filename: &str, force: bool) -> CommandResult {
-    if !force && editor.is_modified() {
-        return err("No write since last change (add ! to override)");
-    }
-    let filename = match expand_tilde(raw_filename) {
-        Ok(path) => path.to_string_lossy().to_string(),
-        Err(e) => return err(format!("Failed to expand path '{}': {}", raw_filename, e)),
-    };
-    let path = std::path::Path::new(&filename);
-    if path.is_dir() {
-        return match editor.open_directory(path) {
-            Ok(()) => ok(format!("Exploring: {}", path.display())),
-            Err(error) => err(format!("Failed to open directory: {error}")),
-        };
-    }
-    match editor.load_file(&filename) {
-        Ok(_) => {
-            let buf_name = editor
-                .buffer()
-                .file_path()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "[No Name]".to_string());
-            ok(format!("Editing: {}", buf_name))
-        }
-        Err(e) => err(format!("Failed to load file: {}", e)),
     }
 }
 
@@ -229,6 +155,25 @@ fn run_parsed(editor: &mut Editor, parsed: &ParsedCmd) -> CommandResult {
     (command.handler)(editor, &ex)
 }
 
+/// Run a command line the user typed (`:` prompt, keymaps, Lua, `ZZ`) and
+/// show the outcome: errors and one-line messages on the status line,
+/// longer output in the hover popup.
+pub fn execute_and_show(editor: &mut Editor, line: &str) {
+    match execute_command(editor, line) {
+        CommandResult::Success(success) => {
+            if let Some(message) = success.message {
+                let message = message.into_owned();
+                if message.contains('\n') {
+                    editor.set_hover_info(message);
+                } else {
+                    editor.set_status_message(message);
+                }
+            }
+        }
+        CommandResult::Error(error) => editor.set_status_message(error.error),
+    }
+}
+
 /// For callers without a terminal (the API): run a queued `:!cmd` with
 /// captured output and refuse a queued `:terminal`.
 pub(crate) fn run_queued_without_terminal(
@@ -249,60 +194,9 @@ pub(crate) fn run_queued_without_terminal(
 
 fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
     if editor.is_pseudocode_buffer() {
-        if matches!(
-            command,
-            "q" | "q!" | "quit" | "quit!" | "bd" | "bd!" | "bdelete" | "bdelete!"
-        ) {
-            return match editor.set_pseudocode(false) {
-                Ok(()) => ok_silent(),
-                Err(error) => err(error.to_string()),
-            };
-        }
         let verb = command.split_whitespace().next().unwrap_or("");
-        if !matches!(
-            verb,
-            "set"
-                | "se"
-                | "ls"
-                | "buffers"
-                | "bn"
-                | "bnext"
-                | "bp"
-                | "bprev"
-                | "e"
-                | "edit"
-                | "tabnext"
-                | "tabprevious"
-                | "tabnew"
-                | "sp"
-                | "split"
-                | "vsp"
-                | "vsplit"
-                | "qa"
-                | "qa!"
-                | "qall"
-                | "qall!"
-        ) && !command.chars().all(|c| c.is_ascii_digit())
-        {
+        if !matches!(verb, "set" | "se") {
             return err("Pseudocode is a reading view; press Enter to edit or save source");
-        }
-    }
-    // Intercept write/quit commands when in a chat scratch buffer
-    if editor.is_chat_scratch_buffer() {
-        match command {
-            "w" | "write" | "wq" | "x" => {
-                return match editor.finish_chat_scratch(true) {
-                    Ok(()) => ok("Scratch content transferred to chat input"),
-                    Err(error) => err(format!("Could not finish chat scratch: {error}")),
-                };
-            }
-            "q!" | "quit!" | "bd!" | "bdelete!" | "q" | "quit" => {
-                return match editor.finish_chat_scratch(false) {
-                    Ok(()) => ok("Scratch buffer discarded"),
-                    Err(error) => err(format!("Could not discard chat scratch: {error}")),
-                };
-            }
-            _ => {}
         }
     }
 
@@ -310,113 +204,11 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
         return result;
     }
 
-    // The commit message buffer is written with :w / :x and aborted with :q!
-    if editor.is_commit_message_buffer() {
-        match command {
-            "w" | "write" | "wq" | "x" | "xit" | "exit" | "wq!" | "x!" => {
-                editor.finish_commit_message(true);
-                return ok_silent();
-            }
-            "q!" | "quit!" | "bd!" | "bdelete!" | "close" | "close!" => {
-                editor.finish_commit_message(false);
-                return ok_silent();
-            }
-            "q" | "quit" | "bd" | "bdelete" => {
-                if editor.is_modified() {
-                    return err("E37: No write since last change (:w commits, :q! aborts)");
-                }
-                editor.finish_commit_message(false);
-                return ok_silent();
-            }
-            _ => {}
-        }
-    }
-
     match command {
         "browser" => match editor.request_browser_start() {
             Ok(()) => ok("Opening browser"),
             Err(error) => err(format!("Could not open embedded browser: {error}")),
         },
-        "q" | "quit" => {
-            if !editor.tab_page_manager().is_single_tab() {
-                editor.close_current_tab();
-                ok(format!(
-                    "Tab closed. Now on tab {}",
-                    editor.current_tab_index() + 1
-                ))
-            } else if editor.any_buffer_modified() {
-                // Quitting the last window discards ALL buffers, so hidden
-                // modified buffers must block it too (OV-00331). Verified in
-                // `nvim --clean` (2026-08-14): :q on the last window with a
-                // hidden modified buffer fails with E37.
-                err("No write since last change (add ! to override)")
-            } else {
-                editor.quit();
-                ok("Quitting")
-            }
-        }
-        "q!" | "quit!" => {
-            if !editor.tab_page_manager().is_single_tab() {
-                editor.close_current_tab();
-                ok(format!(
-                    "Tab closed. Now on tab {}",
-                    editor.current_tab_index() + 1
-                ))
-            } else {
-                editor.quit();
-                ok("Quitting (forced)")
-            }
-        }
-        "cq" | "cquit" => {
-            editor.quit_with_code(1);
-            ok("Quitting with error code 1")
-        }
-        cmd if cmd.starts_with("cq ") || cmd.starts_with("cquit ") => {
-            // :cq N - quit with specific exit code
-            let code_str = cmd.split_whitespace().nth(1).unwrap_or("1");
-            match code_str.parse::<i32>() {
-                Ok(code) => {
-                    editor.quit_with_code(code);
-                    ok(format!("Quitting with error code {}", code))
-                }
-                Err(_) => err(format!("Invalid exit code: {}", code_str)),
-            }
-        }
-        "qa" | "qall" => {
-            // ANY modified buffer blocks :qa — checking only the current one
-            // silently discarded hidden buffers, e.g. files a multi-file
-            // rename loaded and edited (OV-00331). Verified in `nvim --clean`
-            // (2026-08-14): :qa with a modified non-current buffer fails
-            // with E37.
-            if editor.any_buffer_modified() {
-                err("No write since last change (add ! to override)")
-            } else {
-                editor.quit();
-                ok("Quitting all")
-            }
-        }
-        "qa!" | "qall!" => {
-            editor.quit();
-            ok("Quitting all (forced)")
-        }
-        "wa" | "wall" | "writeall" => write_all_buffers(editor, false),
-        "wa!" | "wall!" | "writeall!" => write_all_buffers(editor, true),
-        "wq" => save_buffer(
-            editor,
-            SaveOpts {
-                path: None,
-                force: false,
-                quit_after: true,
-            },
-        ),
-        "wq!" => save_buffer(
-            editor,
-            SaveOpts {
-                path: None,
-                force: true,
-                quit_after: true,
-            },
-        ),
         "format" | "Format" => {
             editor.request_format_document();
             ok("Formatting document...")
@@ -898,58 +690,6 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
                 }
             }
         }
-        "tabnew" | "tabe" | "tabedit" => {
-            // Create new tab with default name
-            editor.new_tab();
-            let tab_index = editor.current_tab_index() + 1; // 1-indexed for display
-            ok(format!("Created tab {}", tab_index))
-        }
-        "tabnext" | "tabn" => {
-            // Switch to next tab
-            editor.next_tab();
-            let tab_index = editor.current_tab_index() + 1; // 1-indexed for display
-            ok(format!("Tab {}", tab_index))
-        }
-        "tabprev" | "tabp" | "tabprevious" => {
-            // Switch to previous tab
-            editor.previous_tab();
-            let tab_index = editor.current_tab_index() + 1; // 1-indexed for display
-            ok(format!("Tab {}", tab_index))
-        }
-        "tabfirst" | "tabfir" => {
-            // Switch to first tab
-            editor.first_tab();
-            ok("Tab 1")
-        }
-        "tablast" | "tabl" => {
-            // Switch to last tab
-            editor.last_tab();
-            let tab_index = editor.current_tab_index() + 1; // 1-indexed for display
-            ok(format!("Tab {}", tab_index))
-        }
-        "tabclose" | "tabc" => {
-            // Close current tab
-            if editor.tab_page_manager().is_single_tab() {
-                err("Cannot close last tab")
-            } else {
-                editor.close_current_tab();
-                let tab_index = editor.current_tab_index() + 1; // 1-indexed for display
-                ok(format!("Tab closed. Now on tab {}", tab_index))
-            }
-        }
-        // Buffer commands (ls, bn, bp, bd) — dispatched to cmd_buffer module
-        "ls" | "buffers" | "files" | "bnext" | "bn" | "bprev" | "bp" | "bprevious" | "bd"
-        | "bdelete" | "bd!" | "bdelete!" => crate::cmd_buffer::try_handle(editor, command).unwrap(),
-        "tabonly" | "tabo" => {
-            // Close all tabs except the current one
-            if editor.tab_page_manager().is_single_tab() {
-                ok("Already only one tab")
-            } else {
-                let closed_count = editor.tab_count() - 1;
-                editor.close_other_tabs();
-                ok(format!("Closed {} tabs", closed_count))
-            }
-        }
         "blame" => {
             let new_val = !editor.options.blame;
             editor.options.blame = new_val;
@@ -977,32 +717,6 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
                     .map(|(name, content)| format!("{}: {}", name, content))
                     .collect();
                 ok(display.join("\n"))
-            }
-        }
-        "recover" | "rec" => {
-            // Recover buffer content from swap file
-            if !editor.buffer().has_swap_file() {
-                return err("No swap file exists for this buffer");
-            }
-            match editor.buffer_mut().recover_from_swap_file() {
-                Ok(true) => ok("Buffer recovered from swap file"),
-                Ok(false) => err("Failed to recover: swap file is empty or missing"),
-                Err(e) => err(format!("Failed to recover: {}", e)),
-            }
-        }
-        "checktime" => {
-            // Check if file has been modified externally and reload if so
-            match editor.buffer().check_external_modification() {
-                Ok(true) => match editor.buffer_mut().reload_if_changed_sync() {
-                    Ok(true) => {
-                        editor.mark_buffer_modified_force_send();
-                        ok("File reloaded from disk (external changes detected)".to_string())
-                    }
-                    Ok(false) => ok("No external changes detected"),
-                    Err(e) => err(format!("Failed to reload: {}", e)),
-                },
-                Ok(false) => ok("No external changes detected"),
-                Err(e) => err(format!("Failed to check file: {}", e)),
             }
         }
         "marks" => {
@@ -1037,20 +751,6 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
                 ok(lines.join("\n"))
             }
         }
-        "tabs" => {
-            // List all tabs
-            let tabs = editor.tab_page_manager().tabs();
-            let current_index = editor.current_tab_index();
-            let tab_list: Vec<String> = tabs
-                .iter()
-                .enumerate()
-                .map(|(i, _tab)| {
-                    let marker = if i == current_index { ">" } else { " " };
-                    format!("{} {} {}", marker, i + 1, editor.get_tab_title(i))
-                })
-                .collect();
-            ok(tab_list.join("\n"))
-        }
         "clearaedits" => {
             if let Some(chat) = editor.ai_state.chat.as_mut() {
                 chat.agent_edits.clear();
@@ -1058,61 +758,7 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
             ok("Agent edit markers cleared.")
         }
         _ => {
-            // Handle :tabnew <filename>, :tabe <filename>, :tabedit <filename>
-            if let Some(raw_filename) = command
-                .strip_prefix("tabnew ")
-                .or_else(|| command.strip_prefix("tabe "))
-                .or_else(|| command.strip_prefix("tabedit "))
-            {
-                // Expand ~ to home directory
-                let filename = match expand_tilde(raw_filename) {
-                    Ok(path) => path.to_string_lossy().to_string(),
-                    Err(e) => {
-                        return err(format!("Failed to expand path '{}': {}", raw_filename, e));
-                    }
-                };
-
-                // Create new tab and load file (or create if doesn't exist)
-                editor.new_tab();
-
-                // Try to load the file, if it doesn't exist create an empty buffer
-                match editor.load_file(&filename) {
-                    Ok(_) => {
-                        let tab_index = editor.current_tab_index() + 1;
-                        ok(format!("Opened {} in tab {}", filename, tab_index))
-                    }
-                    Err(e) => {
-                        // Check if error is because file doesn't exist
-                        if e.to_string().contains("Failed to read file")
-                            || e.to_string().contains("No such file")
-                        {
-                            // Create a new empty buffer with the given filename
-                            use crate::buffer::Buffer;
-                            let new_buffer = Buffer::new();
-                            // Normalize the path
-                            let absolute_path = std::path::absolute(&filename)
-                                .unwrap_or_else(|_| std::path::PathBuf::from(&filename));
-                            let path_str = absolute_path.to_string_lossy().to_string();
-                            editor.add_buffer(new_buffer);
-                            editor.set_file_path(path_str);
-                            editor.mark_dirty();
-
-                            // Point the current tab at the new buffer (the
-                            // tab title derives from the buffer's file path)
-                            editor.sync_current_tab_buffer();
-
-                            let tab_index = editor.current_tab_index() + 1;
-                            ok(format!(
-                                "Created new file {} in tab {}",
-                                filename, tab_index
-                            ))
-                        } else {
-                            err(format!("Failed to load file: {}", e))
-                        }
-                    }
-                }
-            // Handle :lua <code>
-            } else if let Some(_code) = command.strip_prefix("lua ") {
+            if let Some(_code) = command.strip_prefix("lua ") {
                 #[cfg(feature = "lua")]
                 {
                     match editor.execute_lua(_code) {
@@ -1162,27 +808,6 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
                 .or_else(|| command.strip_prefix("se "))
             {
                 crate::cmd_set::handle_set_command(editor, set_cmd.trim())
-            // Handle split commands
-            } else if command == "sp" || command == "split" {
-                editor.split_window_horizontal();
-                ok(format!(
-                    "Split horizontally ({} windows)",
-                    editor.window_count()
-                ))
-            } else if command == "vsp" || command == "vsplit" {
-                editor.split_window_vertical();
-                ok(format!(
-                    "Split vertically ({} windows)",
-                    editor.window_count()
-                ))
-            } else if command == "only" || command == "on" {
-                // :only - close all other windows
-                if editor.window_count() == 1 {
-                    ok("Already only one window")
-                } else {
-                    editor.close_other_windows();
-                    ok("All other windows closed")
-                }
             // Handle config reload
             } else if command == "ConfigReload" || command == "reload" {
                 #[cfg(feature = "lua")]
@@ -1251,22 +876,6 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
                 }
                 #[cfg(not(feature = "lua"))]
                 err("Lua support not compiled in")
-            // Handle :e and :edit (bare) - reload current file if unmodified
-            } else if command == "e" || command == "edit" {
-                reload_buffer(editor, false)
-            } else if command == "e!" || command == "edit!" {
-                reload_buffer(editor, true)
-            // :e! <filename> must be checked before :e <filename> since "e " prefix matches "e! "
-            } else if let Some(raw_filename) = command
-                .strip_prefix("e! ")
-                .or_else(|| command.strip_prefix("edit! "))
-            {
-                edit_file(editor, raw_filename, true)
-            } else if let Some(raw_filename) = command
-                .strip_prefix("e ")
-                .or_else(|| command.strip_prefix("edit "))
-            {
-                edit_file(editor, raw_filename, false)
             // Handle :registers or :reg (list registers)
             } else if command == "registers"
                 || command == "reg"
@@ -1470,53 +1079,6 @@ fn legacy_execute(editor: &mut Editor, command: &str) -> CommandResult {
                 // A live session hears about it right away.
                 editor.dap_manager_mut().request_breakpoint_sync();
                 ok("Conditional breakpoint set")
-            // Handle :file / :f — show file info (like Ctrl-G in vim)
-            } else if command == "f" || command == "file" {
-                let name = editor
-                    .buffer()
-                    .file_path()
-                    .map(|s| format!("\"{}\"", s))
-                    .unwrap_or_else(|| "\"[No Name]\"".to_string());
-                let modified = if editor.is_modified() {
-                    " [Modified]"
-                } else {
-                    ""
-                };
-                let line = editor.buffer().cursor().line() + 1;
-                let total = editor.buffer().line_count();
-                let pct = (line * 100).checked_div(total).unwrap_or(0);
-                ok(format!(
-                    "{}{} line {} of {} --{}%--",
-                    name, modified, line, total, pct
-                ))
-            // Handle :pwd — print working directory
-            } else if command == "pwd" {
-                let cwd = std::env::current_dir()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "(unknown)".to_string());
-                ok(cwd)
-            // Handle :cd / :lcd — change working directory
-            } else if command == "cd" || command == "lcd" {
-                // :cd with no args → go to $HOME
-                match dirs::home_dir() {
-                    Some(home) => match std::env::set_current_dir(&home) {
-                        Ok(_) => ok(home.display().to_string()),
-                        Err(e) => err(format!("Failed to cd: {}", e)),
-                    },
-                    None => err("Could not determine home directory"),
-                }
-            } else if let Some(path) = command
-                .strip_prefix("cd ")
-                .or_else(|| command.strip_prefix("lcd "))
-            {
-                let path = path.trim();
-                match expand_tilde(path) {
-                    Ok(expanded) => match std::env::set_current_dir(&expanded) {
-                        Ok(_) => ok(expanded.display().to_string()),
-                        Err(e) => err(format!("E344: Can't find directory \"{}\" ({})", path, e)),
-                    },
-                    Err(e) => err(e),
-                }
             // Handle :LspInstall / :LspManager - open LSP manager panel
             } else if command == "LspInstall" || command == "LspManager" {
                 editor.open_lsp_manager();

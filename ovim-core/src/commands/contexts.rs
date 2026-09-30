@@ -71,6 +71,12 @@ impl Contexts {
 pub enum Lifecycle {
     /// `:w`, `:wq`, `:x`: keep the text.
     Write,
+    /// `:q`: leave the buffer.
+    Quit,
+    /// `:bd`: leave the buffer.
+    Delete,
+    /// `:close`: leave the window.
+    Close,
 }
 
 /// Run a write/quit-family command in a special buffer, or `None` when the
@@ -82,17 +88,39 @@ pub fn finish_special(
     bang: bool,
 ) -> Option<CommandResult> {
     use crate::command_result::{err, ok, ok_silent};
-    let _ = bang;
     match (kind, lifecycle) {
-        (BufferKind::Normal | BufferKind::Pseudocode, _) => None,
+        (BufferKind::Normal, _) => None,
+        // `:q` and `:bd` leave the reading view for the source buffer.
+        (BufferKind::Pseudocode, Lifecycle::Quit | Lifecycle::Delete) => {
+            Some(match editor.set_pseudocode(false) {
+                Ok(()) => ok_silent(),
+                Err(error) => err(error.to_string()),
+            })
+        }
+        (BufferKind::Pseudocode, _) => None,
         (BufferKind::ChatScratch, Lifecycle::Write) => {
             Some(match editor.finish_chat_scratch(true) {
                 Ok(()) => ok("Scratch content transferred to chat input"),
                 Err(error) => err(format!("Could not finish chat scratch: {error}")),
             })
         }
+        (BufferKind::ChatScratch, _) => Some(match editor.finish_chat_scratch(false) {
+            Ok(()) => ok("Scratch buffer discarded"),
+            Err(error) => err(format!("Could not discard chat scratch: {error}")),
+        }),
         (BufferKind::CommitMessage, Lifecycle::Write) => {
             editor.finish_commit_message(true);
+            Some(ok_silent())
+        }
+        (BufferKind::CommitMessage, Lifecycle::Quit | Lifecycle::Delete)
+            if !bang && editor.is_modified() =>
+        {
+            Some(err(
+                "E37: No write since last change (:w commits, :q! aborts)",
+            ))
+        }
+        (BufferKind::CommitMessage, _) => {
+            editor.finish_commit_message(false);
             Some(ok_silent())
         }
     }

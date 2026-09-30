@@ -608,20 +608,6 @@ fn execute_command_single(editor: &mut Editor, command: &str) -> Result<()> {
         }
     }
 
-    // Check if it's a :b <n> or :buffer <n> command
-    if let Some(buffer_num_str) = command
-        .strip_prefix("b ")
-        .or_else(|| command.strip_prefix("buffer "))
-    {
-        if let Ok(buffer_num) = buffer_num_str.trim().parse::<usize>() {
-            if buffer_num > 0 {
-                // Convert from 1-indexed to 0-indexed
-                editor.switch_to_buffer(buffer_num - 1);
-            }
-        }
-        return Ok(());
-    }
-
     // Check if it's a :colorscheme <name> or :colo <name> command
     if let Some(scheme_name) = command
         .strip_prefix("colorscheme ")

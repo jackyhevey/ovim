@@ -4,7 +4,6 @@ mod auto_indent;
 pub mod browser;
 pub mod buffer;
 pub mod change;
-pub mod cmd_buffer;
 pub mod cmd_project;
 pub mod cmd_set;
 pub mod color;

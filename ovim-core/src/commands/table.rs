@@ -4,7 +4,7 @@
 //! read this one table.
 
 use super::contexts::{Contexts, Lifecycle};
-use super::{edit, files, pattern, quickfix, shell, Ex};
+use super::{edit, files, pattern, quickfix, shell, windows, Ex};
 use crate::command_result::CommandResult;
 use crate::editor::Editor;
 
@@ -148,11 +148,70 @@ pub(crate) static COMMANDS: &[ExCommand] = &[
         .range(R::LineOrZero)
         .args(A::File),
     ex(&["ter[minal]", "sh[ell]"], shell::terminal).args(A::Rest),
+    // ---- files ----
     ex(&["w[rite]"], files::write)
         .bang()
         .range(R::Whole)
         .args(A::File)
         .lifecycle(Lifecycle::Write),
+    ex(&["wq"], files::write_quit)
+        .bang()
+        .args(A::File)
+        .lifecycle(Lifecycle::Write),
+    ex(&["x[it]", "exi[t]"], files::xit)
+        .bang()
+        .args(A::File)
+        .lifecycle(Lifecycle::Write),
+    ex(&["wa[ll]", "writeall"], files::write_all).bang(),
+    ex(&["wqa[ll]", "xa[ll]"], files::write_all_quit).bang(),
+    ex(&["up[date]"], files::update).bang().args(A::File),
+    ex(&["sav[eas]"], files::save_as).bang().args(A::File),
+    ex(&["e[dit]"], files::edit).bang().args(A::File).anywhere(),
+    ex(&["checkt[ime]"], files::checktime),
+    ex(&["rec[over]"], files::recover).bang(),
+    ex(&["f[ile]"], files::file_info),
+    ex(&["pw[d]"], files::pwd),
+    ex(&["cd", "lc[d]"], files::cd).args(A::File),
+    // ---- quitting, windows, tab pages, buffers ----
+    ex(&["q[uit]"], windows::quit)
+        .bang()
+        .lifecycle(Lifecycle::Quit),
+    ex(&["qa[ll]", "quita[ll]"], windows::quit_all)
+        .bang()
+        .anywhere(),
+    ex(&["cq[uit]"], windows::cquit).bang().args(A::Text),
+    ex(&["clo[se]"], windows::close)
+        .bang()
+        .lifecycle(Lifecycle::Close),
+    ex(&["on[ly]"], windows::only).bang(),
+    ex(&["sp[lit]"], windows::split_horizontal)
+        .args(A::File)
+        .anywhere(),
+    ex(&["vs[plit]"], windows::split_vertical)
+        .args(A::File)
+        .anywhere(),
+    ex(&["tabnew"], windows::tab_new).args(A::File).anywhere(),
+    ex(&["tabe[dit]"], windows::tab_new)
+        .args(A::File)
+        .anywhere(),
+    ex(&["tabn[ext]"], windows::tab_next).anywhere(),
+    ex(&["tabp[revious]", "tabN[ext]"], windows::tab_previous).anywhere(),
+    ex(&["tabfir[st]", "tabr[ewind]"], windows::tab_first),
+    ex(&["tabl[ast]"], windows::tab_last),
+    ex(&["tabc[lose]"], windows::tab_close).bang(),
+    ex(&["tabo[nly]"], windows::tab_only).bang(),
+    ex(&["tabs"], windows::tabs),
+    ex(&["ls", "buffers", "files"], windows::list_buffers)
+        .bang()
+        .anywhere(),
+    ex(&["b[uffer]"], windows::buffer).bang().args(A::Text),
+    ex(&["bn[ext]"], windows::next_buffer).bang().anywhere(),
+    ex(&["bp[revious]", "bN[ext]"], windows::previous_buffer)
+        .bang()
+        .anywhere(),
+    ex(&["bd[elete]"], windows::delete_buffer)
+        .bang()
+        .lifecycle(Lifecycle::Delete),
     // ---- quickfix ----
     ex(&["cdo"], quickfix::quickfix_do).args(A::Rest),
     ex(&["cfdo"], quickfix::quickfix_do).args(A::Rest),

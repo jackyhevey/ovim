@@ -1,4 +1,4 @@
-//! Project-level ex commands: replace in files, `:grep`, `:update`.
+//! Project-level ex commands: replace in files, `:grep`.
 //!
 //! Kept out of `commands.rs` so that file does not keep growing. `try_handle`
 //! returns `None` for commands it does not own.
@@ -136,18 +136,10 @@ pub fn try_handle(editor: &mut Editor, command: &str) -> Option<CommandResult> {
             editor.resolve_conflict(crate::git::conflict::Resolution::Neither);
             Some(crate::command_result::ok_silent())
         }
-        "update" | "up" => Some(update(editor)),
+
         "grep" | "gr" | "vimgrep" | "vim" => Some(grep(editor, args)),
         _ => None,
     }
-}
-
-/// `:update` — write the buffer only when it has unsaved changes.
-fn update(editor: &mut Editor) -> CommandResult {
-    if !editor.current_buffer_needs_write() {
-        return crate::command_result::ok_silent();
-    }
-    crate::commands::execute_command(editor, "w")
 }
 
 /// Splits `/find/replace/flags rest` on an unescaped delimiter.
