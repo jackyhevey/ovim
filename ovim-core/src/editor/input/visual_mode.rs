@@ -21,7 +21,7 @@ use anyhow::Result;
 use super::char_motion;
 use super::helpers;
 use super::numbers;
-use crate::editor::input_state::{CharMotion, InputState};
+use crate::editor::input_state::{CharMotion, InputState, TextObjectPrefix};
 
 /// Convert the half-open character range into inclusive grapheme endpoints.
 /// Subtract in rope space so an end at column zero selects the preceding
@@ -173,8 +173,8 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
     }
 
     // Handle pending command prefixes (g, i/a text-objects, etc.)
-    if let Some(pending) = editor.pending_command() {
-        editor.clear_pending_command();
+    if let Some(pending) = editor.input_state().prefix_key() {
+        editor.reset_input_state();
         match (pending, key_event.code) {
             ('"', key) => {
                 if let KeyCode::Char(register) = key {
@@ -257,7 +257,7 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
     }
 
     match key_event.code {
-        KeyCode::Char('"') => editor.set_pending_command('"'),
+        KeyCode::Char('"') => editor.set_input_state(InputState::RegisterPending),
         KeyCode::Esc => {
             helpers::exit_visual_mode_to_normal(editor);
         }
@@ -287,11 +287,11 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
             editor.clear_count();
         }
         // Text object prefixes in visual mode
-        KeyCode::Char('i') | KeyCode::Char('a') => {
-            // Set pending command to handle text objects (iw, aw, ip, ap, i{, a{, etc.)
-            editor.set_pending_command(match key_event.code {
-                KeyCode::Char(c) => c,
-                _ => unreachable!(),
+        KeyCode::Char(c @ ('i' | 'a')) => {
+            // Text object prefix (iw, aw, ip, ap, i{, a{, etc.)
+            editor.set_input_state(InputState::TextObjectPending {
+                operator: None,
+                prefix: TextObjectPrefix::from_char(c).expect("i or a"),
             });
         }
         // Motion keys work in visual mode too
@@ -388,11 +388,10 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         KeyCode::Char('g') => {
             // g - first key of gg (go to first line with optional count)
-            editor.set_pending_command('g');
+            editor.set_input_state(InputState::GPrefix { operator: None });
         }
         // Find character forward (f)
         KeyCode::Char('f') => {
-            use crate::editor::input_state::{CharMotion, InputState};
             editor.set_input_state(InputState::AwaitingChar {
                 motion: CharMotion::Find,
                 operator: None,
@@ -400,7 +399,6 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         // Find character backward (F)
         KeyCode::Char('F') => {
-            use crate::editor::input_state::{CharMotion, InputState};
             editor.set_input_state(InputState::AwaitingChar {
                 motion: CharMotion::FindBack,
                 operator: None,
@@ -408,7 +406,6 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         // Till character forward (t)
         KeyCode::Char('t') => {
-            use crate::editor::input_state::{CharMotion, InputState};
             editor.set_input_state(InputState::AwaitingChar {
                 motion: CharMotion::Till,
                 operator: None,
@@ -416,7 +413,6 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         // Till character backward (T)
         KeyCode::Char('T') => {
-            use crate::editor::input_state::{CharMotion, InputState};
             editor.set_input_state(InputState::AwaitingChar {
                 motion: CharMotion::TillBack,
                 operator: None,
@@ -424,7 +420,6 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         // Jump to mark exact position (`)
         KeyCode::Char('`') => {
-            use crate::editor::input_state::{CharMotion, InputState};
             editor.set_input_state(InputState::AwaitingChar {
                 motion: CharMotion::JumpMarkExact,
                 operator: None,
@@ -432,7 +427,6 @@ pub fn handle_visual_mode(editor: &mut Editor, key_event: KeyEvent) -> Result<()
         }
         // Jump to mark line (')
         KeyCode::Char('\'') => {
-            use crate::editor::input_state::{CharMotion, InputState};
             editor.set_input_state(InputState::AwaitingChar {
                 motion: CharMotion::JumpMarkLine,
                 operator: None,

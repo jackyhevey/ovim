@@ -114,9 +114,7 @@ impl InputHandler {
         // the macro silently drops it.
         let is_recording_terminator = key_event.code == KeyCode::Char('q')
             && editor.mode() == Mode::Normal
-            && matches!(editor.input_state(), InputState::Normal)
-            && editor.pending_operator().is_none()
-            && editor.pending_command().is_none()
+            && editor.input_state().is_normal()
             && editor.pending_register().is_none();
         let should_record_macro =
             record_macro && editor.is_recording_macro() && !is_recording_terminator;
@@ -219,11 +217,9 @@ impl InputHandler {
             && editor.mode() == Mode::Normal
         {
             // Check if the command is fully resolved (no pending operator/command)
-            if editor.pending_operator().is_none()
-                && editor.pending_command().is_none()
+            if editor.input_state().is_normal()
                 && editor.pending_register().is_none()
                 && editor.count().is_none()
-                && matches!(editor.input_state(), InputState::Normal)
             {
                 editor.editing.insert_normal_pending = false;
                 editor.start_change_building(editor.cursor_position());
@@ -250,7 +246,10 @@ impl InputHandler {
         editor.sync_folds_after_key(fold_prev.0, fold_prev.1, fold_prev.2);
         editor.report_refused_edit();
 
-        let is_viewport_pending = matches!(editor.pending_command(), Some('z') | Some('Z'));
+        let is_viewport_pending = matches!(
+            editor.input_state(),
+            InputState::ZPrefix | InputState::QuitPrefix
+        );
         let preserve_viewport = editor.viewport.take_preserve_after_input();
         if !preserve_viewport && !is_viewport_pending && !mapping_handled {
             editor.update_scroll_offset();
@@ -308,10 +307,8 @@ impl InputHandler {
     fn is_mapping_context(editor: &Editor) -> bool {
         editor.pending_mapping_sequence().is_empty()
             && editor.count().is_none()
-            && editor.pending_operator().is_none()
-            && editor.pending_command().is_none()
+            && editor.input_state().is_normal()
             && editor.pending_register().is_none()
-            && matches!(editor.input_state(), InputState::Normal)
     }
 
     fn try_handle_mode_mapping(
@@ -564,10 +561,7 @@ impl InputHandler {
         // Leave whatever the keys started: an operator waiting for a motion,
         // Insert mode, a half-typed command line.
         for _ in 0..3 {
-            let pending = editor.pending_operator().is_some()
-                || editor.pending_command().is_some()
-                || !matches!(editor.input_state(), InputState::Normal);
-            if editor.mode() == Mode::Normal && !pending {
+            if editor.mode() == Mode::Normal && editor.input_state().is_normal() {
                 break;
             }
             Self::handle_key_event_internal(

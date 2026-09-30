@@ -132,31 +132,6 @@ impl InputState {
         })
     }
 
-    /// The state for a pending `operator` and/or prefix `key` (the inverse
-    /// of [`Self::pending_operator`] + [`Self::prefix_key`]). Only `g` and
-    /// `i`/`a` combine with an operator; other prefixes drop it.
-    pub fn from_parts(operator: Option<Operator>, key: Option<char>) -> Self {
-        match (operator, key) {
-            (None, None) => Self::Normal,
-            (Some(operator), None) => Self::OperatorPending { operator },
-            (operator, Some('g')) => Self::GPrefix { operator },
-            (operator, Some(c @ ('i' | 'a'))) => Self::TextObjectPending {
-                operator,
-                prefix: TextObjectPrefix::from_char(c).expect("i or a"),
-            },
-            (_, Some('R')) => Self::LspPrefix,
-            (_, Some('z')) => Self::ZPrefix,
-            (_, Some('Z')) => Self::QuitPrefix,
-            (_, Some(bracket @ ('[' | ']'))) => Self::BracketPrefix { bracket },
-            (_, Some('W')) => Self::WindowCommand,
-            (_, Some('q')) => Self::MacroPrefix { is_recording: true },
-            (_, Some('@')) => Self::MacroPrefix {
-                is_recording: false,
-            },
-            (_, Some(_)) => Self::RegisterPending,
-        }
-    }
-
     /// Resets to Normal state.
     pub fn reset(&mut self) {
         *self = Self::Normal;
@@ -293,24 +268,48 @@ mod tests {
     }
 
     #[test]
-    fn pending_operator_and_prefix_key_round_trip_through_from_parts() {
-        let ops = [None, Some(Operator::Delete)];
-        for op in ops {
-            for key in [None, Some('g'), Some('i'), Some('a')] {
-                let state = InputState::from_parts(op, key);
-                assert_eq!((state.pending_operator(), state.prefix_key()), (op, key));
-            }
+    fn pending_operator_and_prefix_key_project_the_state() {
+        let delete = Some(Operator::Delete);
+        let cases = [
+            (InputState::Normal, None, None),
+            (
+                InputState::OperatorPending {
+                    operator: Operator::Delete,
+                },
+                delete,
+                None,
+            ),
+            (InputState::GPrefix { operator: delete }, delete, Some('g')),
+            (
+                InputState::TextObjectPending {
+                    operator: None,
+                    prefix: TextObjectPrefix::Around,
+                },
+                None,
+                Some('a'),
+            ),
+            (
+                InputState::AwaitingChar {
+                    motion: CharMotion::Find,
+                    operator: delete,
+                },
+                delete,
+                None,
+            ),
+            (InputState::LspPrefix, None, Some('R')),
+            (InputState::BracketPrefix { bracket: ']' }, None, Some(']')),
+            (
+                InputState::MacroPrefix {
+                    is_recording: false,
+                },
+                None,
+                Some('@'),
+            ),
+        ];
+        for (state, operator, key) in cases {
+            assert_eq!(state.pending_operator(), operator, "{state:?}");
+            assert_eq!(state.prefix_key(), key, "{state:?}");
         }
-        for key in ['R', 'z', 'Z', '[', ']', 'W', 'q', '@', '"'] {
-            let state = InputState::from_parts(None, Some(key));
-            assert_eq!((state.pending_operator(), state.prefix_key()), (None, Some(key)));
-        }
-        let char_state = InputState::AwaitingChar {
-            motion: CharMotion::Find,
-            operator: Some(Operator::Delete),
-        };
-        assert_eq!(char_state.pending_operator(), Some(Operator::Delete));
-        assert_eq!(char_state.prefix_key(), None);
     }
 
     #[test]

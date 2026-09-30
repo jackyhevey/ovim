@@ -31,7 +31,6 @@ pub fn handle_char_motion(
     // Handle Escape - cancel the motion
     if key.code == KeyCode::Esc {
         editor.reset_input_state();
-        editor.clear_pending_operator();
         editor.clear_count();
         return Ok(());
     }
@@ -69,7 +68,6 @@ pub fn handle_char_motion(
 
     // Clear state
     editor.reset_input_state();
-    editor.clear_pending_operator();
     editor.clear_count();
 
     Ok(())

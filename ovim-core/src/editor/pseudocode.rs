@@ -1,6 +1,6 @@
 //! Lifecycle of source-mapped pseudocode reading buffers. The editable source
 //! remains a separate buffer, with its undo history, diagnostics and file path.
-use super::Editor;
+use super::{Editor, InputState};
 use crate::buffer::{Buffer, BufferId};
 use crate::pseudocode::{Language, Projection};
 use crate::unicode::{grapheme_index_for_byte, GraphemeCol};
@@ -228,7 +228,7 @@ impl Editor {
             self.cancel_pseudocode_command();
             return true;
         }
-        if self.pending_command() == Some('g')
+        if matches!(self.input_state(), InputState::GPrefix { .. })
             && !matches!(
                 key.code,
                 KeyCode::Char('g' | 'e' | 'E' | 'j' | 'k' | '0' | '^' | '$') | KeyCode::Esc
@@ -303,8 +303,6 @@ impl Editor {
 
     fn cancel_pseudocode_command(&mut self) {
         self.reset_input_state();
-        self.clear_pending_command();
-        self.clear_pending_operator();
         self.clear_count();
         self.set_status_message("Pseudocode is a reading view; press Enter to edit source");
     }

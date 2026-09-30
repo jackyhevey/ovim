@@ -27,5 +27,5 @@ fn escape_closes_the_test_panel_while_cancelling_a_pending_command() {
         .unwrap();
 
     assert!(!editor.is_test_panel_open());
-    assert!(editor.pending_command().is_none());
+    assert!(editor.input_state().is_normal());
 }

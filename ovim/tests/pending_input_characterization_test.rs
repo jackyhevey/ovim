@@ -43,10 +43,10 @@ fn pending(test: &EditorTest) -> String {
     if let Some(count) = editor.count() {
         parts.push(format!("n={count}"));
     }
-    if let Some(op) = editor.pending_operator() {
+    if let Some(op) = editor.input_state().pending_operator() {
         parts.push(format!("op={op:?}"));
     }
-    if let Some(cmd) = editor.pending_command() {
+    if let Some(cmd) = editor.input_state().prefix_key() {
         parts.push(format!("cmd={cmd}"));
     }
     if let Some(reg) = editor.pending_register() {
