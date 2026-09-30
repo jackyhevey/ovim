@@ -32,8 +32,6 @@ pub fn try_handle(editor: &mut Editor, key_event: KeyEvent) -> Result<bool> {
             // Single Escape: record time, clear pending state
             editor.set_last_escape_time(std::time::Instant::now());
             editor.clear_count();
-            editor.clear_pending_operator();
-            editor.clear_pending_command();
             editor.reset_input_state();
             Ok(true)
         }

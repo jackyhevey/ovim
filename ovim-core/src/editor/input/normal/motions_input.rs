@@ -378,7 +378,7 @@ fn try_handle_ctrl_motion(editor: &mut Editor, key_event: KeyEvent) -> Result<bo
 
         // Window commands prefix
         KeyCode::Char('w') => {
-            editor.set_pending_command('W');
+            editor.set_input_state(crate::editor::InputState::WindowCommand);
             Ok(true)
         }
 
