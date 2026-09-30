@@ -108,6 +108,26 @@ pub(super) fn split_vertical(editor: &mut Editor, ex: &Ex) -> CommandResult {
     split(editor, ex, true)
 }
 
+/// Load `filename` into the current window, or start a new buffer with that
+/// name when the file does not exist yet (vim: `"name" [New]`). Returns
+/// whether the buffer is new.
+pub(super) fn open_or_create(editor: &mut Editor, filename: &str) -> anyhow::Result<bool> {
+    match editor.load_file(filename) {
+        Ok(()) => Ok(false),
+        Err(_) if !std::path::Path::new(filename).exists() => {
+            let absolute = std::path::absolute(filename)
+                .unwrap_or_else(|_| std::path::PathBuf::from(filename));
+            editor.add_buffer(crate::buffer::Buffer::new());
+            editor.set_file_path(absolute.to_string_lossy().to_string());
+            editor.mark_dirty();
+            // The tab title derives from the buffer's file path.
+            editor.sync_current_tab_buffer();
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn tab_number(editor: &Editor) -> usize {
     editor.current_tab_index() + 1
 }
@@ -124,25 +144,13 @@ pub(super) fn tab_new(editor: &mut Editor, ex: &Ex) -> CommandResult {
         Err(e) => return err(format!("Failed to expand path '{}': {}", ex.args, e)),
     };
     editor.new_tab();
-    match editor.load_file(&filename) {
-        Ok(_) => ok(format!("Opened {} in tab {}", filename, tab_number(editor))),
-        Err(e)
-            if e.to_string().contains("Failed to read file")
-                || e.to_string().contains("No such file") =>
-        {
-            let absolute = std::path::absolute(&filename)
-                .unwrap_or_else(|_| std::path::PathBuf::from(&filename));
-            editor.add_buffer(crate::buffer::Buffer::new());
-            editor.set_file_path(absolute.to_string_lossy().to_string());
-            editor.mark_dirty();
-            // The tab title derives from the buffer's file path.
-            editor.sync_current_tab_buffer();
-            ok(format!(
-                "Created new file {} in tab {}",
-                filename,
-                tab_number(editor)
-            ))
-        }
+    match open_or_create(editor, &filename) {
+        Ok(false) => ok(format!("Opened {} in tab {}", filename, tab_number(editor))),
+        Ok(true) => ok(format!(
+            "Created new file {} in tab {}",
+            filename,
+            tab_number(editor)
+        )),
         Err(e) => err(format!("Failed to load file: {}", e)),
     }
 }

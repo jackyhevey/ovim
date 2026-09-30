@@ -24,13 +24,12 @@ mod windows;
 pub(crate) use parse::{parse, ParsedCmd};
 pub use quickfix::jump_to_quickfix_entry;
 use range::LineRange;
+pub use table::command_names;
 
 use crate::command_result::{err, ok_silent, CommandResult};
 use crate::editor::Editor;
 use contexts::BufferKind;
 use table::{ExCommand, RangePolicy};
-
-pub use table::command_names;
 
 /// The file argument being typed on `line`, for path completion: the rest
 /// of the line after the name of a command whose argument is a file
@@ -163,12 +162,6 @@ pub fn execute_and_show(editor: &mut Editor, line: &str) {
 /// `:terminal` is refused.
 pub fn execute_command_api(editor: &mut Editor, line: &str) -> CommandResult {
     let result = execute_command(editor, line);
-    run_queued_without_terminal(editor, result)
-}
-
-/// For callers without a terminal (the API): run a queued `:!cmd` with
-/// captured output and refuse a queued `:terminal`.
-fn run_queued_without_terminal(editor: &mut Editor, result: CommandResult) -> CommandResult {
     if let Some(shell) = editor.take_pending_shell_command() {
         if let CommandResult::Error(_) = result {
             return result;

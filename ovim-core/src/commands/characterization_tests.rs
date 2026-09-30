@@ -283,6 +283,14 @@ fn cases() -> Vec<Case> {
             .after("c1\nb2\n  a3\n  d4a\n"),
         case("e {dir}/f.txt").file().ok(Starts("Editing: ")),
         case("edit {dir}/f.txt").file().ok(Starts("Editing: ")),
+        // Used to fail; `:tabe {new}` already created the buffer.
+        case("e {dir}/new.txt")
+            .file()
+            .ok(Has("new.txt\" [New]"))
+            .check(|editor| match editor.buffer().file_path() {
+                Some(path) if path.ends_with("new.txt") => Ok(()),
+                other => Err(format!("buffer path {other:?}")),
+            }),
         case("ed").fails("No file name"),
         // ---- tabs ----
         case("tabnew").is("Created tab 2"),

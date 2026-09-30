@@ -295,8 +295,8 @@ pub(super) fn edit_file(editor: &mut Editor, raw_filename: &str, force: bool) ->
             Err(error) => err(format!("Failed to open directory: {error}")),
         };
     }
-    match editor.load_file(&filename) {
-        Ok(_) => {
+    match super::windows::open_or_create(editor, &filename) {
+        Ok(false) => {
             let name = editor
                 .buffer()
                 .file_path()
@@ -304,6 +304,8 @@ pub(super) fn edit_file(editor: &mut Editor, raw_filename: &str, force: bool) ->
                 .unwrap_or_else(|| "[No Name]".to_string());
             ok(format!("Editing: {}", name))
         }
+        // vim: a file that does not exist yet opens as a new buffer.
+        Ok(true) => ok(format!("\"{filename}\" [New]")),
         Err(e) => err(format!("Failed to load file: {}", e)),
     }
 }
