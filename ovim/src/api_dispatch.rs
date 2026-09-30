@@ -222,9 +222,8 @@ pub(crate) async fn handle_api_request(
             }));
         }
         ApiRequest::ExecuteCommand(command, tx) => {
-            // Route through the full interactive dispatcher so headless `exec`
-            // has parity with the command line (substitute, global, ranges, …),
-            // not just the standard commands module.
+            // The same ex dispatcher as the `:` prompt; a `:!cmd` runs with
+            // captured output since there is no terminal.
             let response: ApiResponse = InputHandler::execute_command_api(editor, &command).into();
             refresh_after_input(editor);
             let _ = tx.send(response);

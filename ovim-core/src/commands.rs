@@ -140,12 +140,17 @@ pub fn execute_and_show(editor: &mut Editor, line: &str) {
     }
 }
 
+/// Execute a command line for callers without a terminal (the headless API
+/// and the GUI): a queued `:!cmd` runs with captured output and a queued
+/// `:terminal` is refused.
+pub fn execute_command_api(editor: &mut Editor, line: &str) -> CommandResult {
+    let result = execute_command(editor, line);
+    run_queued_without_terminal(editor, result)
+}
+
 /// For callers without a terminal (the API): run a queued `:!cmd` with
 /// captured output and refuse a queued `:terminal`.
-pub(crate) fn run_queued_without_terminal(
-    editor: &mut Editor,
-    result: CommandResult,
-) -> CommandResult {
+fn run_queued_without_terminal(editor: &mut Editor, result: CommandResult) -> CommandResult {
     if let Some(shell) = editor.take_pending_shell_command() {
         if let CommandResult::Error(_) = result {
             return result;

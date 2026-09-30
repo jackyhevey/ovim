@@ -1,4 +1,3 @@
-use crate::command_result::CommandResult;
 use crate::editor::path_completion::extract_path_from_command;
 use crate::editor::{Editor, Mode};
 use crate::{KeyCode, KeyEvent};
@@ -400,220 +399,19 @@ fn accept_selected_into_command_line(editor: &mut Editor) {
     }
 }
 
-/// Executes a command string directly (used for API/Lua commands)
+/// Runs a command line on behalf of the user (the `:` prompt, keymaps, Lua)
+/// and shows its outcome; stores it in the `":` register afterwards, as vim
+/// does.
 pub fn execute_command_string(editor: &mut Editor, command: &str) -> Result<()> {
-    editor.with_execution_scope(|editor| execute_command_impl(editor, command))
+    crate::commands::execute_and_show(editor, command);
+    editor
+        .registers_mut()
+        .set_last_command(command.trim().to_string());
+    Ok(())
 }
 
-/// Executes a command string on behalf of the headless API / CLI, returning a
-/// structured [`CommandResult`].
-///
-/// The headless `exec` path historically called [`crate::commands::execute_command`]
-/// directly, which only knows the "standard" ex-commands (`:w`, `:q`, `:set`, …).
-/// Substitute (`:s`), global (`:g`/`:v`), ranges, and `:d`/`:y` live in the
-/// interactive command handler and were therefore unreachable headlessly — an
-/// `exec ':%s/a/b/'` returned "Not an editor command" while the same keys typed
-/// interactively worked. Routing through the same dispatcher the interactive
-/// command line uses keeps the two paths in parity.
-pub fn execute_command_string_api(editor: &mut Editor, command: &str) -> CommandResult {
-    editor.with_execution_scope(|editor| execute_command_string_api_inner(editor, command))
-}
-
-fn execute_command_string_api_inner(editor: &mut Editor, command: &str) -> CommandResult {
-    let result = execute_command_string_api_legacy(editor, command);
-    crate::commands::run_queued_without_terminal(editor, result)
-}
-
-fn execute_command_string_api_legacy(editor: &mut Editor, command: &str) -> CommandResult {
-    use crate::command_result::{err, ok, ok_silent};
-
-    let command = command.trim();
-
-    // Standard commands return a structured result we forward verbatim — this
-    // preserves messages like line counts and errors like "No write since last
-    // change". Only when the standard dispatcher reports the command as unknown
-    // do we fall through to the richer interactive handler.
-    let result = crate::commands::execute_command(editor, command);
-    let is_unknown = matches!(
-        &result,
-        CommandResult::Error(e) if e.error.contains("Not an editor command")
-    );
-    if !is_unknown {
-        return result;
-    }
-
-    // The standard dispatcher performs no mutation when it doesn't recognize a
-    // command, so it is safe to re-run the full interactive handler (which
-    // re-checks the standard dispatcher and then handles substitute / global /
-    // range / etc.). That handler reports outcomes on the status line rather
-    // than returning them, so clear the line first and read it back afterwards.
-    editor.set_status_message(String::new());
-    match execute_command_string(editor, command) {
-        Ok(()) => {
-            let status = editor.status_message().trim().to_string();
-            if status.is_empty() {
-                ok_silent()
-            } else if is_vim_error_status(&status) {
-                err(status)
-            } else {
-                ok(status)
-            }
-        }
-        Err(e) => err(e.to_string()),
-    }
-}
-
-/// Vim surfaces command errors on the status line using the `E<number>:`
-/// convention (`E146`, `E20`, `E486`, …). Map those back to an API error even
-/// though the editor itself treats them as ordinary status messages.
-fn is_vim_error_status(status: &str) -> bool {
-    matches!(
-        status.strip_prefix('E'),
-        Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit())
-    )
-}
-
-/// Executes a command from the command line
+/// Executes the command line being edited.
 fn execute_command(editor: &mut Editor) -> Result<()> {
     let command = editor.command_line().trim().to_string();
-    execute_command_impl(editor, &command)
-}
-
-/// Internal command execution implementation
-fn execute_command_impl(editor: &mut Editor, command: &str) -> Result<()> {
-    let command = command.trim();
-
-    // Handle command chaining with |
-    // BUG FIX: Don't split on | for substitute, global, or vglobal commands
-    // because | can appear in patterns like :s/foo|bar/baz/
-    // `:s/pat/rep/flags | cmd` — the bar ends a substitute once its pattern and
-    // replacement are complete (`:cfdo %s/a/b/ge | update`).
-    if let Some((first, rest)) = split_after_substitute(command) {
-        execute_command_impl(editor, first)?;
-        return execute_command_impl(editor, rest);
-    }
-
-    if command.contains('|') && !command_owns_bar(command) {
-        // Simple split for non-substitute commands
-        for part in command.split('|') {
-            let part = part.trim();
-            if !part.is_empty() {
-                execute_command_single(editor, part)?;
-            }
-        }
-        return Ok(());
-    }
-
-    execute_command_single(editor, command)
-}
-
-/// Splits `command` at the bar that terminates a leading `:s` command.
-///
-/// Inside the pattern a bar is literal (regex alternation); in the replacement
-/// and flags an unescaped bar separates the next Ex command, as in vim.
-/// Returns `None` when `command` is not a substitute or has no such bar.
-fn split_after_substitute(command: &str) -> Option<(&str, &str)> {
-    let trimmed = command.trim();
-    let range_len = trimmed
-        .find(|c: char| !(c.is_ascii_digit() || ",%.$ '<>+-".contains(c)))
-        .unwrap_or(trimmed.len());
-    let body = &trimmed[range_len..];
-    let mut chars = body.char_indices();
-    let (_, first) = chars.next()?;
-    if first != 's' {
-        return None;
-    }
-    let (delim_at, delimiter) = chars.next()?;
-    if delimiter.is_alphanumeric()
-        || delimiter.is_whitespace()
-        || matches!(delimiter, '|' | '"' | '\\')
-    {
-        return None;
-    }
-    let mut delimiters = 0;
-    let mut escaped = false;
-    for (offset, c) in body[delim_at..].char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if c == '\\' {
-            escaped = true;
-        } else if c == delimiter {
-            delimiters += 1;
-        } else if c == '|' && delimiters >= 2 {
-            let at = range_len + delim_at + offset;
-            let (first, rest) = (&trimmed[..at], &trimmed[at + 1..]);
-            return Some((first.trim_end(), rest.trim_start()));
-        }
-    }
-    None
-}
-
-/// Whether `|` belongs to this command's payload instead of separating Ex
-/// commands. Shell/terminal commands own their complete tail; pattern commands
-/// may contain a bar in their pattern.
-///
-/// We strip leading range characters (digits, commas, %, ., $, ', <, >) before
-/// recognizing filter/read/write shell forms and pattern commands. This avoids
-/// false positives on commands like `:e files/foo | set number`.
-fn command_owns_bar(command: &str) -> bool {
-    let trimmed = command.trim();
-    if let Ok(parsed) = crate::commands::parse(trimmed) {
-        if parsed.next.is_none() {
-            return true;
-        }
-    }
-    // Skip past range prefix: digits, commas, %, ., $, ', <, >, +, -, spaces
-    let cmd = trimmed.trim_start_matches(|c: char| c.is_ascii_digit() || ",%.$ '<>+-".contains(c));
-    cmd.starts_with('!')
-        || ["r !", "read !", "w !", "write !"]
-            .iter()
-            .any(|prefix| cmd.starts_with(prefix))
-        || cmd.starts_with("s/")
-        || cmd.starts_with("g/")
-        || cmd.starts_with("g!/")
-        || cmd.starts_with("v/")
-}
-
-/// Execute a single command (no chaining)
-fn execute_command_single(editor: &mut Editor, command: &str) -> Result<()> {
-    // Update the : register with the command
-    editor.registers_mut().set_last_command(command.to_string());
-
-    let response = crate::commands::execute_command(editor, command);
-    match response {
-        CommandResult::Success(success_resp) => {
-            // Command executed successfully
-            if let Some(msg) = success_resp.message {
-                // Multi-line messages go to hover popup, single-line to status bar
-                let msg = msg.into_owned();
-                if msg.contains('\n') {
-                    editor.set_hover_info(msg);
-                } else {
-                    editor.set_status_message(msg);
-                }
-            }
-            return Ok(());
-        }
-        CommandResult::Error(err_resp) => {
-            // Check if it's an "unknown command" error
-            if err_resp.error.contains("Not an editor command") {
-                // Fall through to custom input-specific command handling below
-            } else {
-                // It's a real error from a known command
-                editor.set_status_message(err_resp.error);
-                return Ok(());
-            }
-        }
-    }
-
-    if editor.status_message().is_empty() {
-        // Truly unrecognized ex-command (no handler set a status). Report it
-        // the way Vim does (E492) so the user gets feedback on typos instead
-        // of silence, and so the headless API can surface it as an error.
-        editor.set_status_message(format!("E492: Not an editor command: {}", command));
-    }
-
-    Ok(())
+    execute_command_string(editor, &command)
 }

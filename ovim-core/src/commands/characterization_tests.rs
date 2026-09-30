@@ -164,7 +164,7 @@ fn buffer_text(editor: &Editor) -> String {
 }
 
 fn cases() -> Vec<Case> {
-    use M::{Has, Is, Starts};
+    use M::{Has, Starts};
     vec![
         // ---- undo / redo ----
         case("u").keys("x").after("c1\nb2\n  a3\n  d4a\n"),
@@ -356,14 +356,10 @@ fn cases() -> Vec<Case> {
         case("noh").is("Search highlighting cleared"),
         case("nohlsearch").is("Search highlighting cleared"),
         case("nohl").is("Search highlighting cleared"),
-        // The interactive path stores the command in `":` before running it,
-        // so the listing includes the `:reg` being executed; the API does not.
-        case("reg")
-            .is("No registers in use")
-            .interactive(Out::Ok(Is("--- Registers ---\n\":   reg"))),
-        case("registers")
-            .is("No registers in use")
-            .interactive(Out::Ok(Is("--- Registers ---\n\":   registers"))),
+        // The interactive path used to store the command in `":` before
+        // running it, so `:reg` listed itself (vim stores it afterwards).
+        case("reg").is("No registers in use"),
+        case("registers").is("No registers in use"),
         // `:reg {names}` lists only those (vim); `:reg` and `:reg a` used to
         // reach two differently formatted listings.
         case("reg a").is("No registers in use"),
@@ -643,8 +639,10 @@ fn cases() -> Vec<Case> {
         case("global/a/d").is("Deleted 2 line(s)"),
         case("g/b/d|3d").is("Deleted 1 line(s)"),
         // ---- shell ----
-        // The API ran `:!cmd` inline and returned its output; the interactive
-        // path queues it for the frontend.
+        // On purpose the only difference between the entry points: `:!cmd`
+        // and `:terminal` are queued for the frontend's terminal; the API,
+        // having none, runs `:!cmd` with captured output and refuses
+        // `:terminal`.
         case("!echo hi")
             .is("hi")
             .interactive(Out::Silent)
@@ -673,10 +671,8 @@ fn cases() -> Vec<Case> {
             .is("1 line inserted")
             .text("a\nb")
             .after("a\nb\nend\n"),
-        // `:w !cmd` is not characterized here: the standard dispatcher takes
-        // it for `:w {file}` and writes a file named "!cmd" into the working
-        // directory, so the interactive pipe-to-command handler is dead code.
-        // The range used to lose its line breaks when piped.
+        // `:w !cmd` used to be taken for `:w {file}` and write a file named
+        // "!cmd"; with a range the lines lost their line breaks.
         case("w !true").is("4 lines written"),
         case("2,3w !cat").is("2 lines written: b2\n  a3"),
         case("write !true").is("4 lines written"),
@@ -901,6 +897,16 @@ fn check_state(case: &Case, editor: &Editor, failures: &mut Vec<String>, entry: 
             failures.push(format!("{label}: {problem}"));
         }
     }
+}
+
+/// vim: `":` holds the previous command line while a command runs.
+#[test]
+fn the_colon_register_is_set_after_the_command_runs() {
+    let mut editor = Editor::with_content("a");
+    InputHandler::execute_command_string(&mut editor, "reg :").unwrap();
+    assert_eq!(editor.status_message(), "No registers in use");
+    InputHandler::execute_command_string(&mut editor, "reg :").unwrap();
+    assert_eq!(editor.hover_info(), Some("--- Registers ---\n\":   reg :"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
